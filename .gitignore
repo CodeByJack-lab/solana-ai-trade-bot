@@ -1,0 +1,27 @@
+# 🔒 核心安全 (絕對唔可以 Upload)
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 📦 依賴庫 (太大，由 npm 自己裝)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# 🖥️ 操作系統垃圾文件
+.DS_Store
+Thumbs.db
+
+# 🏗️ 編譯與暫存
+dist/
+build/
+.next/
+.cache/
+
+# 🧪 測試與日誌
+logs
+*.log
+npm-debug.log*

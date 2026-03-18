@@ -1,0 +1,31 @@
+{
+  "name": "solana-ai-trade-bot",
+  "version": "1.0.0",
+  "description": "Solana AI Trading Bot",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "solana",
+    "ai",
+    "trading",
+    "bot"
+  ],
+  "author": "CodeByJack",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "@solana/web3.js": "^1.98.4",
+    "@supabase/supabase-js": "^2.99.1",
+    "axios": "^1.13.6",
+    "bignumber.js": "^10.0.2",
+    "bs58": "^6.0.0",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "node-cron": "^4.2.1",
+    "utf-8-validate": "^5.0.10"
+  }
+}
