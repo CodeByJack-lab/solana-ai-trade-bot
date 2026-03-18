@@ -298,6 +298,7 @@ function startPositionMonitor() {
                 const currentPrice = dsInfo?.priceNative;
                 if (!currentPrice) continue;
                 
+                // 更新最高價 (保持乾淨，無 trailing_stop_price)
                 if (currentPrice > pos.highest_price_sol) {
                     pos.highest_price_sol = currentPrice;
                     const table = portfolio.mode === 'LIVE' ? 'live' : 'paper';
@@ -307,6 +308,9 @@ function startPositionMonitor() {
                 const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
                 const drawdownPct = ((pos.highest_price_sol - currentPrice) / pos.highest_price_sol) * 100;
                 const isHalfSold = (pos.strategy_type || '').includes('HALF_SOLD');
+
+                // 🎯 核心防洗盤條件：歷史最高價係咪已經升超過 +50% (即 1.5倍)？
+                const isAthAbove50Pct = pos.highest_price_sol >= (pos.entry_price_sol * 1.5);
 
                 const now = Date.now();
                 const track = reviewTracking.get(pos.mint_address) || { lastPrice: pos.entry_price_sol, lastTime: 0 };
@@ -339,38 +343,38 @@ function startPositionMonitor() {
                 }
 
                 // =====================================
-                // 觸發賣出邏輯 (Meme 幣黃金移動止盈版)
+                // 觸發賣出邏輯 (防震倉 + 移動止盈版)
                 // =====================================
                 let triggerSell = false;
                 let sellReason = "";
                 let sellFraction = 1.0; 
 
-                // 1. 翻倍保本
+                // 1. 翻倍保本 (優先級最高：升到 100% 抽走一半本金)
                 if (pnlPct >= 100 && !isHalfSold) {
                     triggerSell = true;
                     sellReason = `翻倍保本出局 (+${pnlPct.toFixed(1)}%)`;
                     sellFraction = 0.5;
                 }
-                // 2. 破底硬止損
+                // 2. 破底硬止損 (第一把刀：永遠生效，防死線)
                 else if (pnlPct <= config.stop_loss_pct && !isHalfSold) {
                     triggerSell = true;
                     sellReason = `死線硬止損 (${pnlPct.toFixed(1)}%)`;
                     sellFraction = 1.0;
                 }
-                // 3. 高位回落 20% 智能預警
-                else if (drawdownPct >= 20 && drawdownPct < 30) {
+                // 3. 高位回落 20% 智能預警 (🎯 加入 isAthAbove50Pct：未過50%唔會啟動)
+                else if (isAthAbove50Pct && drawdownPct >= 20 && drawdownPct < 30) {
                     const track = reviewTracking.get(pos.mint_address) || {};
                     if (!track.warned20) {
                         track.warned20 = true; 
                         reviewTracking.set(pos.mint_address, track);
                         
-                        console.log(`🚨 [趨勢預警] ${pos.token_symbol || pos.mint_address.substring(0,6)} 從高位回落 ${drawdownPct.toFixed(1)}%，呼叫 AI 判斷是否見頂...`);
+                        console.log(`🚨 [趨勢預警] ${pos.token_symbol || pos.mint_address.substring(0,6)} 利潤曾破50%且回落 ${drawdownPct.toFixed(1)}%，呼叫 AI 判斷是否見頂...`);
                         const { predictTrend } = require('./aiService');
                         if (predictTrend) {
                             const prediction = await predictTrend(pos.mint_address, { ...pos, pnlPct }, drawdownPct);
                             if (prediction && prediction.decision === 'DUMP') {
                                 triggerSell = true;
-                                sellReason = `高位回落 ${drawdownPct.toFixed(1)}%，AI 判斷見頂 DUMP (${prediction.reason})`;
+                                sellReason = `利潤>50%且回落 ${drawdownPct.toFixed(1)}%，AI 判斷見頂 DUMP (${prediction.reason})`;
                                 sellFraction = 1.0;
                             } else {
                                 console.log(`🛡️ [AI 判斷] ${pos.token_symbol || pos.mint_address.substring(0,6)} 只是健康洗盤 (WASH)，繼續持有博取新高。`);
@@ -380,10 +384,10 @@ function startPositionMonitor() {
                         }
                     }
                 }
-                // 4. 終極回落 30% 鐵血止盈/止損
-                else if (drawdownPct >= 30) { 
+                // 4. 終極回落 30% 鐵血止盈 (🎯 加入 isAthAbove50Pct：第二把刀解鎖)
+                else if (isAthAbove50Pct && drawdownPct >= 30) { 
                     triggerSell = true;
-                    sellReason = `高位回撤達 30% 警戒線 (鐵血全清鎖盈)`;
+                    sellReason = `利潤曾破50%，現高位回撤達 30% (鐵血全清鎖盈)`;
                     sellFraction = 1.0;
                 }
 
