@@ -298,10 +298,20 @@ function startPositionMonitor() {
                 const currentPrice = dsInfo?.priceNative;
                 if (!currentPrice) continue;
                 
+                // 🎯 [核心修改] 更新最高價，並同步計算、儲存 trailing_stop_price (八折)
                 if (currentPrice > pos.highest_price_sol) {
                     pos.highest_price_sol = currentPrice;
+                    
+                    // 根據高位回撤 20% 預警邏輯，設定觸發價為最高價之 80%
+                    const newTrailingStopPrice = currentPrice * 0.8; 
+                    pos.trailing_stop_price = newTrailingStopPrice;
+
                     const table = portfolio.mode === 'LIVE' ? 'live' : 'paper';
-                    supabase.from(`active_positions_${table}`).update({ highest_price_sol: currentPrice }).eq('mint_address', pos.mint_address).then(()=>{});
+                    
+                    supabase.from(`active_positions_${table}`).update({ 
+                        highest_price_sol: currentPrice,
+                        trailing_stop_price: newTrailingStopPrice 
+                    }).eq('mint_address', pos.mint_address).then(()=>{});
                 }
                 
                 const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
