@@ -1,4 +1,4 @@
-// src/index.js - 物理隔離 + 整合單行戰報完全體 + 宏觀風控探測器
+// src/index.js - 物理隔離 + 整合單行戰報完全體 + 宏觀風控探測器 + 墓地火化排程
 
 const { supabase } = require('./config/supabase'); 
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
@@ -6,6 +6,7 @@ const { startMarketMonitor } = require('./services/monitorService');
 const { getSolPriceInHKD } = require('./services/priceService'); 
 const { startBtcMonitor } = require('./services/btcMonitorService');
 const { macroJob } = require('./jobs/macroJob'); 
+const { graveyardJob } = require('./jobs/graveyardJob'); // 💀 引入墓地火化排程
 
 async function startApp() {
     console.log("========================================");
@@ -70,6 +71,7 @@ async function startApp() {
     startMarketMonitor(); 
     startBtcMonitor();    
     macroJob.start();     
+    graveyardJob.start(); // 💀 啟動墓地火化排程
 
     /**
      * 2. 💤 回報線：一體化「單行戰報」Loop (每 60 秒印一次)
