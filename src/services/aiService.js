@@ -62,10 +62,6 @@ const keyManager = new GeminiKeyManager();
 const HELIUS_RPC_URL = process.env.SOLANA_RPC_URL;
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY; 
 
-const JUPITER_API_KEY = process.env.JUPITER_API_KEY;
-let JUPITER_BASE_URL = process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag';
-if (JUPITER_BASE_URL.endsWith('/')) JUPITER_BASE_URL = JUPITER_BASE_URL.slice(0, -1);
-
 // 🚀 初始化官方原生 RPC 連線 (更穩定的區塊鏈讀取)
 const { connection } = require('../config/solana');
 
@@ -156,29 +152,35 @@ async function checkRugPull(mintAddress) {
 }
 
 // ==========================================
-// 🦅 存在性證實引擎
+// 🦅 存在性證實引擎 (已拔除 Jupiter Quote，完全零成本)
 // ==========================================
 async function checkTokenExists(mintAddress) {
-    try {
-        const jupHeaders = JUPITER_API_KEY ? { 'x-api-key': JUPITER_API_KEY.replace(/['"]/g, '').trim() } : {};
-        const endpoint = JUPITER_BASE_URL.includes('api.jup.ag') ? '/swap/v1/quote' : '/v6/quote';
-        const jupUrl = `${JUPITER_BASE_URL}${endpoint}?inputMint=So11111111111111111111111111111111111111112&outputMint=${mintAddress}&amount=10000000&slippageBps=100`;
-        
-        const jupRes = await axios.get(jupUrl, { headers: jupHeaders, timeout: 3000 });
-        if (jupRes.data?.outAmount) return true;
-    } catch (e) {}
-
+    // 1. 優先使用 Birdeye API (速度最快，如果 .env 有設定的話)
     if (BIRDEYE_API_KEY) {
         try {
             const birdRes = await axios.get(`https://public-api.birdeye.so/defi/price?address=${mintAddress}`, {
-                headers: { 'X-API-KEY': BIRDEYE_API_KEY.replace(/['"]/g, '').trim(), 'x-chain': 'solana' },
+                headers: { 
+                    'X-API-KEY': BIRDEYE_API_KEY.replace(/['"]/g, '').trim(), 
+                    'x-chain': 'solana' 
+                },
                 timeout: 3000
             });
             if (birdRes.data?.data?.value) return true; 
         } catch (e) {
-            console.log(`⚠️ [Birdeye] 查價失敗或受限。`);
+            console.log(`⚠️ [Birdeye] 查價失敗或受限，轉用 DexScreener...`);
         }
     }
+    
+    // 2. 備用方案：DexScreener API (完全免費)
+    try {
+        const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`, { timeout: 3000 });
+        if (dexRes.data && dexRes.data.pairs && dexRes.data.pairs.length > 0) {
+            return true;
+        }
+    } catch (e) {
+        console.log(`⚠️ [DexScreener] Token ${mintAddress} 查無此幣。`);
+    }
+
     return false;
 }
 
@@ -220,7 +222,7 @@ async function analyzeToken(mintAddress, metaData) {
             } else {
                 const isReal = await checkTokenExists(cleanMint);
                 if (isReal) {
-                    console.log(`💡 [Security] 索引延遲但 Jupiter/Birdeye 證實代幣可交易，啟動放行機制！`);
+                    console.log(`💡 [Security] 索引延遲但 Birdeye/DexScreener 證實代幣可交易，啟動放行機制！`);
                     securityCheck.safe = true;
                 } else {
                     console.log(`🚫 [Security] 查核不合格被攔截: ${securityCheck.reason}`);
@@ -251,9 +253,9 @@ async function analyzeToken(mintAddress, metaData) {
                 hasSocials = `有 (${types})`;
             }
         } else {
-            console.log(`⚠️ [Market Data] DexScreener 未索引，嘗試 Jupiter 備援驗證...`);
-            const existsOnJup = await checkTokenExists(cleanMint);
-            if (!existsOnJup) {
+            console.log(`⚠️ [Market Data] DexScreener 未索引，嘗試備援驗證...`);
+            const existsOnChain = await checkTokenExists(cleanMint);
+            if (!existsOnChain) {
                 return { decision: "SKIP", score: 0, reason: "全網查無此幣交易對，放棄狙擊" };
             }
             console.log(`🎯 [Market Data] 觸發 0 秒盲狙模式！`);
@@ -263,7 +265,7 @@ async function analyzeToken(mintAddress, metaData) {
             hasSocials = "未知 (0秒新盤)";
         }
 
-        let blindSnipeContext = isBlindSnipe ? `\n【特殊狀態】這是一個 0 秒新盤盲狙，DexScreener 尚未抓取數據但 Jupiter 已有報價。請放寬對流動性和社交媒體的要求，以「搶頭礦」的邏輯評估。` : '';
+        let blindSnipeContext = isBlindSnipe ? `\n【特殊狀態】這是一個 0 秒新盤盲狙，DexScreener 尚未抓取數據但備用API已有報價。請放寬對流動性和社交媒體的要求，以「搶頭礦」的邏輯評估。` : '';
 
         // 🧠 第三步：強化的 AI 提示詞 (大戶思維 + 5% 安全線)
         const prompt = `
@@ -391,7 +393,7 @@ async function reviewActivePosition(mintAddress, positionData) {
             - 當前利潤: ${positionData.pnlPct.toFixed(2)}%
 
             【當前盤面數據】
-            - 資金池流動性: $${currentLiquidity}
+            - 資金池流強流動性: $${currentLiquidity}
             - 總市值 (FDV): $${currentFDV}
             - 流動性/FDV 比例: ${liqFdvRatio}%
             - 過去 5 分鐘交易量: $${vol5m}
