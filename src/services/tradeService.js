@@ -13,7 +13,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 // ==========================================
-// 🚀 [核心] 獲取 Jupiter V6 交易路徑 (Paper 與 Live 共同使用)
+// 🚀 [核心] 獲取 Jupiter V6/V1 交易路徑 (智能切換路由)
 // ==========================================
 async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
     try {
@@ -35,7 +35,10 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
         const SLIPPAGE_BPS = isBuying ? 800 : 1000; 
 
         const baseUrl = (process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag').replace(/\/$/, '');
-        const url = `${baseUrl}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${SLIPPAGE_BPS}`;
+        
+        // 💡 終極修正：嚴格區分免費版 (包含 quote-api) 同 付費版
+        const endpoint = baseUrl.includes('quote-api') ? '/v6/quote' : '/swap/v1/quote';
+        const url = `${baseUrl}${endpoint}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${SLIPPAGE_BPS}`;
 
         const config = { headers: {} };
         if (process.env.JUPITER_API_KEY) {

@@ -121,7 +121,15 @@ async function fallbackNativeCheck(mintAddress) {
 async function checkRugPull(mintAddress) {
     try {
         const url = `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`;
-        const response = await axios.get(url, { timeout: 5000, headers: { 'Accept': 'application/json' } });
+        
+        // 💡 [修復 RugCheck 斷線] 加入 User-Agent 偽裝成瀏覽器，並增加 Timeout
+        const response = await axios.get(url, { 
+            timeout: 7000, 
+            headers: { 
+                'Accept': 'application/json',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            } 
+        });
 
         if (!response.data) throw new Error("RugCheck 無回應");
 
@@ -146,7 +154,7 @@ async function checkRugPull(mintAddress) {
         console.log(`✅ [Security] RugCheck 驗證通過 (未發現 Mint/Freeze/LP 撤資風險)。`);
         return { safe: true };
     } catch (err) {
-        console.log(`⚠️ [Security] RugCheck API 暫時無法連線，啟動原生 RPC 備用檢查...`);
+        console.log(`⚠️ [Security] RugCheck API 暫時無法連線 (可能被 Cloudflare 攔截)，啟動原生 RPC 備用檢查...`);
         return await fallbackNativeCheck(mintAddress);
     }
 }

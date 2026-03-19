@@ -43,11 +43,13 @@ async function getJupiterSwapTransaction(quoteResponse) {
         if (!wallet) return null;
 
         const baseUrl = (process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag').replace(/\/$/, '');
-        const endpoint = baseUrl.includes('api.jup.ag') ? '/swap/v1/swap' : '/v6/swap';
+        
+        // 💡 終極修正：Swap 路由同樣必須嚴格對齊 V6 或 V1
+        const endpoint = baseUrl.includes('quote-api') ? '/v6/swap' : '/swap/v1/swap';
         
         const config = { headers: {} };
         if (process.env.JUPITER_API_KEY) {
-            config.headers['x-api-key'] = process.env.JUPITER_API_KEY;
+            config.headers['x-api-key'] = process.env.JUPITER_API_KEY.replace(/['"]/g, '').trim();
         }
 
         const response = await axios.post(`${baseUrl}${endpoint}`, {
