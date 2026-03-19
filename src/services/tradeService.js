@@ -32,10 +32,8 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
             ? new BigNumber(amount).times(1e9).integerValue().toString() 
             : new BigNumber(amount).times(new BigNumber(10).pow(decimals)).integerValue().toString();
 
-        // 🎯 V3: 買入設 8% (800 bps)，賣出/逃生設 10% (1000 bps)
         const SLIPPAGE_BPS = isBuying ? 800 : 1000; 
 
-        // 🎯 V3: 強制使用 V6 引擎
         const baseUrl = (process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag').replace(/\/$/, '');
         const url = `${baseUrl}/v6/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${SLIPPAGE_BPS}`;
 
@@ -70,13 +68,12 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     const isLive = portfolio.mode === 'LIVE';
     const tableSuffix = isLive ? 'live' : 'paper';
 
-    // 🛡️ V3: [防連輸機制 Anti-Chop] 檢查最近兩次賣出紀錄
     try {
         const { data: recentTrades } = await supabase
             .from(`trade_history_${tableSuffix}`)
             .select('realized_pnl_sol')
             .eq('token_mint', mintAddress)
-            .eq('action', 'SELL') // 只計算最終平倉
+            .eq('action', 'SELL') 
             .order('created_at', { ascending: false })
             .limit(2);
 
@@ -96,7 +93,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return;
     }
 
-    // 🎯 V3: 統一使用 Quote API 模擬真實滑點
     const quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol); 
     if (!quoteData) {
         console.log(`⚠️ [${isLive ? 'Live' : 'Paper'}] Jupiter 無法提供有效買入路徑，取消買入。`);
@@ -172,7 +168,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     const quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity);
     
-    // 💀 V3: [死亡宣告機制 Death Protocol] 處理無報價/歸零幣
     if (!quoteData) {
         console.error(`❌ [${isLive ? 'Live' : 'Paper'} Sell] Jupiter 拒絕賣出報價，啟動死亡宣告檢查...`);
         try {
@@ -205,7 +200,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         const pnlSol = new BigNumber(sellValueSol).minus(entryTotalValue).toNumber();
         const pnlPct = new BigNumber(pnlSol).div(entryTotalValue).times(100).toNumber();
 
-        // 🎯 傳遞 strategy_type 修復 MANUAL 標籤問題
         await commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, `Jupiter: ${reason}`, sellQuantity, sellFraction, pos.strategy_type);
         return true;
     }
@@ -220,30 +214,36 @@ async function executeSellRaydium(mintAddress, marketRefPriceSol, reason, sellFr
 }
 
 // ==========================================
-// 💀 死亡宣告/強行撇帳核心 (升級：打入死囚牢房)
+// 💀 死亡宣告/強行撇帳核心 (升級：實盤專屬死囚牢房)
 // ==========================================
 async function forceWriteOff(mintAddress, reason) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
     if (posIndex === -1) return;
     const pos = portfolio.positions[posIndex];
+    const isLive = portfolio.mode === 'LIVE'; // 🛡️ 判定是否為實盤
     
-    // 1. 👻 將死幣記錄打入 graveyard_pool (等候 3 日後火化)
-    try {
-        await supabase.from('graveyard_pool').insert([{
-            mint_address: pos.mint_address,
-            token_symbol: pos.token_symbol,
-            entry_price_sol: pos.entry_price_sol,
-            quantity: pos.quantity,
-            locked_rent_sol: 0.00203928, // Solana 固定的 ATA 租金殘值
-            strategy_type: pos.strategy_type
-        }]);
-        console.log(`🪦 [Graveyard] ${pos.token_symbol || 'UNKNOWN'} 已被打入死囚牢房，鎖定 0.002 SOL 租金，等候秋後問斬。`);
-    } catch (err) {
-        console.error(`⚠️ [Graveyard] 寫入死囚牢房失敗:`, err.message);
+    if (isLive) {
+        // 1A. 👻 實盤：將死幣記錄打入 graveyard_pool (等候 3 日後火化)
+        try {
+            await supabase.from('graveyard_pool').insert([{
+                mint_address: pos.mint_address,
+                token_symbol: pos.token_symbol,
+                entry_price_sol: pos.entry_price_sol,
+                quantity: pos.quantity,
+                locked_rent_sol: 0.00203928, 
+                strategy_type: pos.strategy_type
+            }]);
+            console.log(`🪦 [Graveyard] (LIVE) ${pos.token_symbol || 'UNKNOWN'} 已被打入死囚牢房，鎖定 0.002 SOL 租金，等候秋後問斬。`);
+        } catch (err) {
+            console.error(`⚠️ [Graveyard] 寫入死囚牢房失敗:`, err.message);
+        }
+    } else {
+        // 1B. 📝 模擬盤：無需退租，直接拋棄
+        console.log(`🪦 [Graveyard] (PAPER) 模擬模式：${pos.token_symbol || 'UNKNOWN'} 已直接撇帳，無需退租金。`);
     }
 
-    // 2. 🗑️ 以 0 元賣出，-100% 寫入歷史，並從活躍持倉中剔除 (釋放 AI 狙擊名額)
+    // 2. 🗑️ 以 0 元賣出，-100% 寫入歷史，並從活躍持倉中剔除
     await commitTradeToDb(posIndex, 0, 0, -pos.entry_price_sol * pos.quantity, -100, `FORCE: ${reason}`, pos.quantity, 1.0, pos.strategy_type);
 }
 
@@ -291,7 +291,6 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         ai_factcheck_result: finalReason
     }]);
 
-    // 📢 V3: Telegram 全局報捷補全
     if(typeof sendTelegramAlert === 'function') {
         const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
         const pnlTag = pnlPct >= 0 ? `🟢 +${pnlPct.toFixed(2)}%` : `🔴 ${pnlPct.toFixed(2)}%`;
@@ -301,7 +300,6 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         } else if (sellFraction >= 0.99 && safeStrategyType.includes('HALF_SOLD')) {
             sendTelegramAlert(`${modeTag} <b>✅ 免費抽獎倉位平倉</b>\n🪙 代幣: $${pos.token_symbol}\n💰 成交: ${sellValueSol.toFixed(4)} SOL\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
         } else {
-            // 正常止損/清倉/強制撇帳通知
             sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🪙 代幣: $${pos.token_symbol}\n💰 成交: ${sellValueSol.toFixed(4)} SOL\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
         }
     }
