@@ -1,4 +1,4 @@
-// backend/services/monitorService.js
+// src/services/monitorService.js
 const express = require('express');
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios'); 
@@ -14,6 +14,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 const app = express();
 app.use(express.json({ limit: '50mb' }));
 
+const SOL_MINT = "So11111111111111111111111111111111111111112";
 const TARGET_PROGRAMS = ['6EF8rrecthR5Dkzon8Nwu78hrvfCKubJ14M5uBEwF6P', '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8']; 
 let isProcessingBatch = false; 
 
