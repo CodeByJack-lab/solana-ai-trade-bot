@@ -9,7 +9,7 @@ let pauseCooldownUntil = 0;
 const macroMonitorService = {
     async fetchHighAndDrop(symbol) {
         // 獲取過去 15 分鐘 (15 根 1m K線)
-        const res = await axios.get(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=15`, { timeout: 5000 });
+        const res = await axios.get(`https://api-g.binance.com/api/v3/klines?symbol=${symbol}&interval=1m&limit=15`, { timeout: 5000 });
         const klines = res.data;
         
         let highestPrice = 0;

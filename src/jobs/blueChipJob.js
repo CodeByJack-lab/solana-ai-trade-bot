@@ -128,7 +128,7 @@ const blueChipJob = {
                     const symbol = `${token.token_symbol}USDT`;
                     try {
                         // 💡 提升 Limit 到 100 支 K 線，確保 EMA 同 MACD 計算極度精準
-                        const res = await axios.get(`https://api.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&limit=100`);
+                        const res = await axios.get(`https://api-g.binance.com/api/v3/klines?symbol=${symbol}&interval=15m&limit=100`);
                         
                         const closes = res.data.map(k => parseFloat(k[4]));  // 收盤價
                         const volumes = res.data.map(k => parseFloat(k[5])); // 成交量
