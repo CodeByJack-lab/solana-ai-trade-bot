@@ -1,21 +1,26 @@
-// src/index.js - 物理隔離 + 整合單行戰報完全體 + 宏觀風控探測器 + 墓地火化排程
+// src/index.js - V5.5 終極對沖基金全自動化架構
 
 const { supabase } = require('./config/supabase'); 
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
-const { startMarketMonitor } = require('./services/monitorService');
+const { startMarketMonitor } = require('./services/monitorService'); // Meme Webhook + 撈魚 + 橫盤
 const { getSolPriceInHKD } = require('./services/priceService'); 
-const { startBtcMonitor } = require('./services/btcMonitorService');
-const { macroJob } = require('./jobs/macroJob'); 
-const { graveyardJob } = require('./jobs/graveyardJob'); // 💀 引入墓地火化排程
+
+// 🚨 V5.5 新增模組匯入
+const { macroMonitorService } = require('./services/macroMonitorService'); // 雙龍大盤防禦
+const { blueChipJob } = require('./jobs/blueChipJob');                     // 老幣抄底雷達
+const { retrospectiveJob } = require('./jobs/retrospectiveJob');           // AI 12AM/PM 復盤大腦
+const { healthMonitor } = require('./services/healthMonitor');             // 全局健康看板
+
+// 💀 墓地系統 (保留原有)
+const { graveyardJob } = require('./jobs/graveyardJob'); 
 
 async function startApp() {
-    console.log("========================================");
-    console.log("🚀 SOL_Trade 終極防禦 + 翻倍保本版啟動...");
-    console.log("========================================");
+    console.log("======================================================");
+    console.log("🚀 SOL_Trade V5.5 終極雙軌並行 + 跨廠 AI 備援版啟動...");
+    console.log("======================================================");
 
     /**
-     * 1. 🚀 指令線：監聽 system_config 
-     * 🛠️ 核心修復：加入前端「資金 SET」與「實盤同步」的即時記憶體刷新
+     * 1. 🚀 指令線：監聽 system_config (熱更新開關與資金同步)
      */
     supabase.channel('system_config_monitor')
         .on(
@@ -26,17 +31,15 @@ async function startApp() {
                 const newData = payload.new;
                 const portfolio = getPortfolio();
 
-                // 💡 [修復 BUG] 偵測到 DB 資金改變，強制刷新 Node.js 記憶體
+                // 💡 資金同步邏輯
                 if (portfolio) {
                     if (newData.trade_mode === 'PAPER') {
-                        // 模擬模式：監聽 simulated_balance
                         if (Math.abs(portfolio.cash_sol - newData.simulated_balance) > 0.0001) {
                             console.log(`\n💰 [PAPER 同步] 記憶體餘額刷新為 ${newData.simulated_balance.toFixed(4)} SOL`);
                             portfolio.cash_sol = newData.simulated_balance;
                             portfolio.reference_capital = newData.reference_capital;
                         }
                     } else if (newData.trade_mode === 'LIVE') {
-                        // 🚀 實盤模式：監聽 live_wallet_balance
                         if (Math.abs(portfolio.cash_sol - newData.live_wallet_balance) > 0.0001) {
                             console.log(`\n💰 [LIVE 同步] 實盤記憶體餘額刷新為 ${newData.live_wallet_balance.toFixed(4)} SOL`);
                             portfolio.cash_sol = newData.live_wallet_balance;
@@ -45,7 +48,6 @@ async function startApp() {
                     }
                 }
 
-                // 檢查是否只是狀態開關 (避免資金同步觸發重複廣播)
                 if (oldData && oldData.is_running === newData.is_running && oldData.trade_mode === newData.trade_mode) {
                     return; 
                 }
@@ -60,25 +62,32 @@ async function startApp() {
         )
         .subscribe();
 
-    // 2. 🏰 初始化資產數據
+    // 2. 🏰 初始化資產數據與資金鎖
     const portfolio = await initPortfolio();
     if (!portfolio) {
         console.error("❌ 系統初始化失敗，程序退出。");
         process.exit(1);
     }
 
-    // 3. 啟動後台服務
-    startMarketMonitor(); 
-    startBtcMonitor();    
-    macroJob.start();     
-    graveyardJob.start(); // 💀 啟動墓地火化排程
+    // ==========================================
+    // 3. 🚀 啟動全軍列陣 (V5.5 核心模組)
+    // ==========================================
+    startMarketMonitor();        // 啟動 Express Webhook, 滴水撈魚, 橫盤接回, 監軍逃生
+    macroMonitorService.start(); // 啟動 BTC/SOL 雙龍防禦
+    blueChipJob.start();         // 啟動 Binance RSI 老幣抄底雷達
+    retrospectiveJob.start();    // 啟動 12AM/PM AI 參數微調排程
+    
+    if (graveyardJob && typeof graveyardJob.start === 'function') {
+        graveyardJob.start();    // 啟動死囚火化排程
+    }
 
     /**
-     * 2. 💤 回報線：一體化「單行戰報」Loop (每 60 秒印一次)
+     * 4. 💤 回報線：一體化「單行戰報」Loop (每 60 秒印一次，加入 Health Board)
      */
     async function backgroundReportLoop() {
         try {
             if (global.isRunning === false) {
+                console.log("💤 系統暫停中...");
                 setTimeout(backgroundReportLoop, 60000);
                 return;
             }
@@ -87,25 +96,22 @@ async function startApp() {
             const currentCache = getPortfolio();
             const solHkdPrice = await getSolPriceInHKD();
             
-            // 🧮 核心精算：使用統一的 quantity 變量，避免 NaN 崩潰
             const investedSol = currentCache.positions.reduce((sum, pos) => {
-                const qty = pos.quantity || 0;
-                const price = pos.entry_price_sol || 0;
-                return sum + (qty * price);
+                return sum + ((pos.quantity || 0) * (pos.entry_price_sol || 0));
             }, 0);
             
             const totalCapitalSol = currentCache.cash_sol + investedSol;
             const totalCapitalHkd = totalCapitalSol * solHkdPrice;
             
-            const totalUnits = Math.floor(totalCapitalHkd / 200);
-            const reserveUnits = Math.max(2, Math.floor(totalUnits * 0.2)); 
-            const maxPositions = Math.max(0, totalUnits - reserveUnits);
-
-            // 📢 構建單行過「終極戰報」
-            const summaryLog = `🛰️ 雷達掃描中...`;
+            // 📢 構建終極戰報 (結合資金與全局監控狀態)
+            console.log(`\n========================================`);
+            console.log(`📊 [實時戰報] 總資產: $${totalCapitalHkd.toFixed(2)} HKD | 現金: ${currentCache.cash_sol.toFixed(4)} SOL`);
+            console.log(`持倉數: ${currentCache.positions.length} 隻`);
+            console.log(`--- 🩺 系統健康看板 ---`);
+            console.log(healthMonitor.getHealthReport()); // 💡 印出所有模組嘅 🟢/🔴 狀態
+            console.log(`========================================`);
             
-            console.log(summaryLog);
-            await updateSystemStatus(summaryLog.replace('📊 ', '🦅 '));
+            await updateSystemStatus(`🦅 監控中 | 總資產: $${totalCapitalHkd.toFixed(2)} HKD`);
             
         } catch (loopErr) {
             console.error("⚠️ 戰報 Loop 發生錯誤:", loopErr.message);
