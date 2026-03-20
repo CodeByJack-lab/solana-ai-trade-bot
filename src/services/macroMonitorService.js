@@ -7,10 +7,17 @@ const { healthMonitor } = require('./healthMonitor');
 let pauseCooldownUntil = 0; 
 
 const macroMonitorService = {
+    /**
+     * 💡 獲取高位回撤數據 (修正 CryptoCompare URL 路徑大小寫)
+     */
     async fetchHighAndDrop(symbol) {
         const fsym = symbol.replace('USDT', '');
+        
+        // 🛡️ 修正點：將 histoMinute 改為 histominute (全細寫)
+        const url = `https://min-api.cryptocompare.com/data/v2/histominute?fsym=${fsym}&tsym=USD&limit=15`;
+        
         // 1. 呼叫 CryptoCompare，超時設為 8 秒確保穩定
-        const res = await axios.get(`https://min-api.cryptocompare.com/data/v2/histoMinute?fsym=${fsym}&tsym=USD&limit=15`, { timeout: 8000 });
+        const res = await axios.get(url, { timeout: 8000 });
         
         // 🛡️ 防禦 A：檢查 CryptoCompare 是否回傳業務錯誤
         if (res.data?.Response === 'Error') {
@@ -52,7 +59,7 @@ const macroMonitorService = {
                 const { data: config } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
                 if (!config?.is_running) return;
 
-                // 同步獲取數據，只要其中一個出錯，會直接入 catch
+                // 同步獲取 BTC 同 SOL 數據
                 const [btcData, solData] = await Promise.all([
                     this.fetchHighAndDrop('BTCUSDT'),
                     this.fetchHighAndDrop('SOLUSDT')

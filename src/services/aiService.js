@@ -44,7 +44,7 @@ async function reviewActivePosition(mintAddress, positionData) {
         // 💡 修正 1: URL 換成 Mistral 官方接口
         // 💡 修正 2: Model 換成 Mistral 的開放模型 (如 mistral-large-latest 或 pixtral-12b-2409)
         const res = await axios.post('https://api.mistral.ai/v1/chat/completions', {
-            model: "pixtral-12b-2409", 
+            model: "mistral-large-2411", 
             messages: [{ role: "user", content: promptText }],
             response_format: { type: "json_object" }
         }, {
@@ -60,7 +60,7 @@ async function reviewActivePosition(mintAddress, positionData) {
         return JSON.parse(res.data.choices[0].message.content);
     } catch (err) {
         healthMonitor.setStatus('AI_Overseer', `🔴 失效: ${err.message}`);
-        return { decision: "HOLD", reason: "監軍通訊異常，暫時觀望" };
+        return { decision: "HOLD", reason: "AI Reviewer通訊異常，暫時觀望" };
     }
 }
 
