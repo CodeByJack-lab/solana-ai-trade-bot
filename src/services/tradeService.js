@@ -165,7 +165,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             total_value_sol: configTradeAmountSol, 
             post_trade_balance: newBalance, 
             txid: mockTxid,
-            ai_factcheck_result: aiReason
+            review_history: aiReason
         }]);
 
         if(typeof sendTelegramAlert === 'function') {
@@ -291,7 +291,7 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         realized_pnl_sol: pnlSol, realized_pnl_pct: pnlPct,
         post_trade_balance: newBalance, 
         txid: "SELL_" + Math.random().toString(36).substring(7).toUpperCase(),
-        ai_factcheck_result: finalReason
+        review_history: finalReason
     }]);
 
     if(typeof sendTelegramAlert === 'function') {
