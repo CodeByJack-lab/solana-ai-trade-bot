@@ -61,11 +61,11 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
 }
 
 // ==========================================
-// 🎯 核心買入執行
+// 🎯 核心買入執行 (修復版：採用絕對記帳法扣錢)
 // ==========================================
 async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol) {
     console.log(`\n========================================`);
-    console.log(`⚡ [Execution] 啟下單程序: 狙擊目標 ${tokenSymbol}`);
+    console.log(`⚡ [Execution] 啟動下單程序: 狙擊目標 ${tokenSymbol}`);
 
     const portfolio = getPortfolio();
     const isLive = portfolio.mode === 'LIVE';
@@ -102,7 +102,12 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     const requiredTotalSol = configTradeAmountSol + safetyBufferSol;
 
     if (portfolio.cash_sol < requiredTotalSol) { 
-        console.log(`❌ [Execution] 餘額觸及 1/10 絕對安全底線，取消開倉。`);
+        const alertMsg = `🚨 <b>【資金見底警告】系統已攔截交易！</b>
+💸 現金: <b>${portfolio.cash_sol.toFixed(4)} SOL</b>
+🛒 買入所需: <b>${configTradeAmountSol.toFixed(4)} SOL</b>`;
+        
+        console.log(`❌ [Execution] 餘額不足，取消開倉。`);
+        if (typeof sendAdminAlert === 'function') sendAdminAlert(alertMsg);
         return false;
     }
 
@@ -119,6 +124,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     } 
 
     if (tradeSuccess && tokenQuantity > 0) {
+        // 1. 更新內存 Cache
         updateCache('BUY', configTradeAmountSol, {
             mint_address: mintAddress,
             token_symbol: tokenSymbol,
@@ -128,15 +134,16 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             strategy_type: strategyType 
         });
 
-        // 🛡️ [絕對扣數機制] 讀取資料庫真實餘額 ➡️ 減數 ➡️ 強制寫入 DB
+        // 🛡️ 2. [核心修正] 從資料庫獲取最新餘額，扣錢後即時寫回
         const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-        const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || dbConfig.reference_capital || 10);
+        const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
         const newBalance = currentBalance - Number(configTradeAmountSol);
 
         await supabase.from('system_config')
             .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
             .eq('id', 1);
 
+        // 3. 寫入持倉
         await supabase.from(`active_positions_${tableSuffix}`).insert([{
             mint_address: mintAddress,
             token_symbol: tokenSymbol,
@@ -147,6 +154,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             ai_reason: aiReason
         }]);
 
+        // 4. 寫入歷史
         await supabase.from(`trade_history_${tableSuffix}`).insert([{
             token_mint: mintAddress,
             token_symbol: tokenSymbol,
@@ -155,14 +163,14 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             price_sol: buyPriceSol,
             quantity: tokenQuantity,
             total_value_sol: configTradeAmountSol, 
-            post_trade_balance: newBalance, // 使用精確扣數後餘額
+            post_trade_balance: newBalance, 
             txid: mockTxid,
             ai_factcheck_result: aiReason
         }]);
 
         if(typeof sendTelegramAlert === 'function') {
             const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
-            sendTelegramAlert(`${modeTag} <b>✅ 買入成功</b>\n🪙 代幣: $${tokenSymbol}\n💰 投入: ${configTradeAmountSol.toFixed(4)} SOL\n🧠 理由: ${aiReason}\n🏷️ 策略: ${strategyType}`);
+            sendTelegramAlert(`${modeTag} <b>✅ 買入成功</b>\n🪙 代幣: $${tokenSymbol}\n💰 投入: ${configTradeAmountSol.toFixed(4)} SOL\n🧠 理由: ${aiReason}`);
         }
         healthMonitor.setStatus('Trade_Engine', `🟢 最近買入 ${tokenSymbol}`);
         return true;
@@ -188,7 +196,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     const quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity);
     
     if (!quoteData) {
-        console.error(`❌ [${isLive ? 'Live' : 'Paper'} Sell] Jupiter 報價失敗...`);
+        console.error(`❌ [Sell] Jupiter 報價失敗...`);
         try {
             const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`, { timeout: 3000 });
             const pair = dexRes.data?.pairs?.find(p => p.chainId === 'solana');
@@ -266,9 +274,9 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         }).eq('mint_address', mintAddress);
     }
 
-    // 🛡️ [絕對加數機制] 讀取資料庫真實餘額 ➡️ 加數 ➡️ 強制寫入 DB
+    // 🛡️ [絕對記帳法 - 賣出] 即時讀寫資料庫，將資金加回餘額
     const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-    const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || dbConfig.reference_capital || 10);
+    const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
     const newBalance = currentBalance + Number(sellValueSol);
 
     await supabase.from('system_config')
@@ -281,7 +289,7 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         strategy_type: safeStrategyType, price_sol: finalPriceSol,
         quantity: sellQuantity, total_value_sol: sellValueSol,
         realized_pnl_sol: pnlSol, realized_pnl_pct: pnlPct,
-        post_trade_balance: newBalance, // 使用精確加數後餘額
+        post_trade_balance: newBalance, 
         txid: "SELL_" + Math.random().toString(36).substring(7).toUpperCase(),
         ai_factcheck_result: finalReason
     }]);
@@ -289,14 +297,7 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     if(typeof sendTelegramAlert === 'function') {
         const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
         const pnlTag = pnlPct >= 0 ? `🟢 +${pnlPct.toFixed(2)}%` : `🔴 ${pnlPct.toFixed(2)}%`;
-
-        if (sellFraction < 1.0) {
-            sendTelegramAlert(`${modeTag} <b>🛡️ 翻倍出本成功</b>\n🪙 代幣: $${pos.token_symbol}\n💰 收回: ${sellValueSol.toFixed(4)} SOL\n📈 PNL: ${pnlTag}`);
-        } else if (sellFraction >= 0.99 && safeStrategyType.includes('HALF_SOLD')) {
-            sendTelegramAlert(`${modeTag} <b>✅ 免費抽獎倉位平倉</b>\n🪙 代幣: $${pos.token_symbol}\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
-        } else {
-            sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🪙 代幣: $${pos.token_symbol}\n💰 成交: ${sellValueSol.toFixed(4)} SOL\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
-        }
+        sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🪙 代幣: $${pos.token_symbol}\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
     }
 }
 

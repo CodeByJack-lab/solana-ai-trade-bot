@@ -67,14 +67,16 @@ function checkVolumeShrinkage(volumes) {
 }
 
 // ==========================================
-// 🚀 核心排程 (終極抗 429 批次初篩版)
+// 🚀 核心排程 (終極抗 429 批次初篩版 + 10分鐘心跳日誌)
 // ==========================================
 const blueChipJob = {
     start() {
         console.log(`📈 [BlueChip Radar] 批次防限流初篩版啟動...`);
         healthMonitor.setStatus('Bluechip_Radar', '🟢 監聽中');
 
-        // 因為做咗批次處理，只需 1 秒就問晒 11 隻幣，所以改返每 60 秒行一次
+        let lastHeartbeat = Date.now(); // 💡 設立心跳計時器
+
+        // 因為做咗批次處理，只需 1 秒就問晒所有幣，所以每 60 秒行一次
         setInterval(async () => {
             try {
                 const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -82,15 +84,23 @@ const blueChipJob = {
 
                 const { maxBluechip } = getPositionLimits();
                 if (getBlueChipCount() >= maxBluechip) {
-                    healthMonitor.setStatus('Bluechip_Radar', '🟡 老幣倉位已滿');
+                    healthMonitor.setStatus('Bluechip_Radar', '🟡 主流幣倉位已滿');
                     return;
                 }
 
                 healthMonitor.setStatus('Bluechip_Radar', '🟢 掃苗中...');
+
+                // 💓 💡 檢查是否過了 10 分鐘，印出心跳包
+                const now = Date.now();
+                if (now - lastHeartbeat >= 10 * 60 * 1000) {
+                    console.log(`📡 [BlueChip Radar] Heartbeat: 系統運作正常，過去 10 分鐘大市平靜，未見主流幣暴跌觸發初篩。`);
+                    lastHeartbeat = now; // 重置計時器
+                }
+
                 const { data: pool } = await supabase.from('bluechip_pool').select('*').eq('is_active', true);
                 if (!pool || pool.length === 0 || !BIRDEYE_API_KEY) return;
 
-                // 💡 1. 批次向 DexScreener 索取所有老幣報價 (1 個 Request 搞掂)
+                // 💡 1. 批次向 DexScreener 索取所有主流幣報價 (1 個 Request 搞掂)
                 const mintsArray = pool.map(t => t.mint_address.trim()).filter(Boolean);
                 const chunk = mintsArray.slice(0, 30); // DexScreener 上限 30 隻
                 const mintStr = chunk.join(',');
@@ -119,7 +129,7 @@ const blueChipJob = {
                 // 如果大市平靜，提早收工，0 Birdeye 消耗！
                 if (dipTokens.length === 0) return;
 
-                console.log(`🎯 [哨兵訊號] 發現 ${dipTokens.length} 隻老幣急跌過 8%，準備啟動 Birdeye 精算...`);
+                console.log(`🎯 [哨兵訊號] 發現 ${dipTokens.length} 隻主流幣急跌過 8%，準備啟動 Birdeye 精算...`);
 
                 // 💡 3. 針對真係急跌嘅幣，逐隻向 Birdeye 索取 OHLCV (順序 + 強制 Sleep)
                 for (const token of dipTokens) {

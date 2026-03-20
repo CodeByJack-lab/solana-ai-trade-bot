@@ -173,30 +173,38 @@ async function getDexScreenerInfo(mint, retry) {
 }
 
 // ==========================================
-// 📡 智能雙引擎【批次】報價工具 (5隻一問)
+// 📡 智能雙引擎【批次】報價工具 (5隻一問) - 🚀 升級至 Jupiter V3
 // ==========================================
 async function getBulkPrices(mintsArray) {
     const cleanMints = mintsArray.map(m => m.trim().replace(/\s+/g, '')).filter(Boolean);
     if (cleanMints.length === 0) return {};
 
-    const mintStr = cleanMints.join(',');
+    // 🚀 V3 必須將 SOL_MINT 加入查詢名單，用作 USD -> SOL 嘅換算基準
+    const queryIds = [...new Set([...cleanMints, SOL_MINT])].join(',');
     const priceMap = {};
 
     try {
-        const jupUrl = `https://api.jup.ag/price/v2?ids=${mintStr}&vsToken=${SOL_MINT}`;
+        // 🚀 V3 API 呼叫 (使用官方建議的 lite-api)
+        const jupUrl = `https://lite-api.jup.ag/price/v3?ids=${queryIds}`;
         const jupRes = await axios.get(jupUrl, { timeout: 5000 });
-        
-        if (jupRes.data && jupRes.data.data) {
+        const rawData = jupRes.data?.data;
+
+        // 如果成功攞到報價，而且有 SOL 嘅美金價
+        if (rawData && rawData[SOL_MINT] && rawData[SOL_MINT].usdPrice) {
+            const solPriceUsd = parseFloat(rawData[SOL_MINT].usdPrice);
+            
             for (const mint of cleanMints) {
-                if (jupRes.data.data[mint] && jupRes.data.data[mint].price) {
-                    priceMap[mint] = parseFloat(jupRes.data.data[mint].price);
+                if (rawData[mint] && rawData[mint].usdPrice) {
+                    // 🚀 V3 換算：代幣美金價 / SOL 美金價 = Token/SOL 價格
+                    priceMap[mint] = parseFloat(rawData[mint].usdPrice) / solPriceUsd;
                 }
             }
         }
     } catch (e) {
-        console.warn(`⚠️ [Bulk Price] Jupiter 批次報價失敗，切換 DexScreener 備援...`);
+        console.warn(`⚠️ [Bulk Price V3] Jupiter 批次報價失敗，切換 DexScreener 備援...`);
     }
 
+    // 備援：若有幣 Jupiter 搵唔到，用 DexScreener 補底
     const missingMints = cleanMints.filter(mint => !priceMap[mint]);
     if (missingMints.length > 0) {
         try {
@@ -223,7 +231,7 @@ async function getDynamicConfig() {
 }
 
 function startPositionMonitor() {
-    console.log(`👁️ [Radar] 智能雙引擎 (Jup/Dex) 批次持倉監控啟動 (1分鐘循環)...`);
+    console.log(`👁️ [Radar] 智能雙引擎 (Jup V3/Dex) 批次持倉監控啟動 (1分鐘循環)...`);
     
     setInterval(async () => {
         if (isMonitoringPositions) return; 
@@ -293,12 +301,10 @@ function startPositionMonitor() {
                     // 👁️ AI Review 邏輯 (修正版：加入 10 分鐘新兵保護期)
                     // ==========================================
                     const now = Date.now();
-                    // 💡 根據 Database 嘅 created_at 計持倉時間
                     const posAgeMins = (now - new Date(pos.created_at).getTime()) / 60000;
                     const track = reviewTracking.get(pos.mint_address) || { lastPrice: pos.entry_price_sol, lastTime: now };
                     const changeSinceLastReview = ((currentPrice - track.lastPrice) / track.lastPrice) * 100;
                     
-                    // 🛡️ 只有持倉超過 10 分鐘，且符合時間或波動條件，先至畀 AI 監軍介入
                     if (posAgeMins > 10) {
                         if ((now - track.lastTime > 30 * 60 * 1000) || (Math.abs(changeSinceLastReview) >= 25) || (changeSinceLastReview <= -10)) {
                             reviewTracking.set(pos.mint_address, { lastPrice: currentPrice, lastTime: now });
