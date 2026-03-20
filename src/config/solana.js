@@ -1,3 +1,4 @@
+// src/config/solana.js
 const { Connection } = require('@solana/web3.js');
 const path = require('path');
 

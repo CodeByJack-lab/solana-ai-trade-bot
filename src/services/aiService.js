@@ -1,4 +1,4 @@
-// backend/services/aiService.js
+// src/services/aiService.js
 const axios = require('axios');
 const path = require('path');
 const { supabase } = require('../config/supabase'); // 🗄️ 引入 Supabase

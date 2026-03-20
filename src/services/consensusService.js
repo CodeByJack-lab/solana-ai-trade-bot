@@ -1,4 +1,4 @@
-// backend/services/consensusService.js
+// src/services/consensusService.js
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
 const { healthMonitor } = require('./healthMonitor');

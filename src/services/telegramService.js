@@ -1,4 +1,4 @@
-// backend/services/telegramService.js
+// src/services/telegramService.js
 const axios = require('axios');
 const path = require('path');
 const { healthMonitor } = require('./healthMonitor'); // 🩺 引入看板讀取狀態

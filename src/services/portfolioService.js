@@ -1,4 +1,4 @@
-// backend/services/portfolioService.js
+// src/services/portfolioService.js
 const { supabase } = require('../config/supabase'); 
 const { connection } = require('../config/solana');
 const { PublicKey } = require('@solana/web3.js');

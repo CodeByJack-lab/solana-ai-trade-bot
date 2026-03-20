@@ -1,4 +1,4 @@
-// backend/services/securityGuard.js
+// src/services/securityGuard.js
 const axios = require('axios');
 const { PublicKey } = require('@solana/web3.js');
 const { connection } = require('../config/solana');
@@ -78,9 +78,9 @@ const securityGuard = {
             };
 
         } catch (err) {
-            console.error(`❌ [Security] 保安系統異常:`, err.message);
+            console.error(`❌ [Security] Security Guard 系統異常:`, err.message);
             healthMonitor.setStatus('Security_Guard', `🔴 異常: ${err.message}`);
-            return { isSafe: false, reason: '🛑 保安系統異常攔截' };
+            return { isSafe: false, reason: '🛑 Security Guard 系統異常攔截' };
         }
     },
 

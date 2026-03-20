@@ -1,4 +1,4 @@
-// backend/services/macroMonitorService.js
+// src/services/macroMonitorService.js
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
 const { sendTelegramAlert } = require('./telegramService');

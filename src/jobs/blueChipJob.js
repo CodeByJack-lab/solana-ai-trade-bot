@@ -1,4 +1,4 @@
-// backend/jobs/blueChipJob.js
+// src/jobs/blueChipJob.js
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
 const { getBlueChipCount, getPositionLimits } = require('../services/portfolioService');

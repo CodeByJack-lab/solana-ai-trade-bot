@@ -1,4 +1,4 @@
-// backend/jobs/retrospectiveJob.js
+// src/jobs/retrospectiveJob.js
 const cron = require('node-cron');
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
