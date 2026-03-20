@@ -7,7 +7,7 @@ const { healthMonitor } = require('./healthMonitor');
 const { securityGuard } = require('./securityGuard');
 const { consensusService, getPendingMemeCount } = require('./consensusService'); 
 const { reviewActivePosition, analyzeReentry } = require('./aiService');
-const { executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline } = require('./tradeService'); // 確保引入 runSellPipeline
+const { executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline } = require('./tradeService'); 
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
@@ -192,14 +192,18 @@ function startPositionMonitor() {
                 const isHalfSold = (pos.strategy_type || '').includes('HALF_SOLD');
 
                 // ==========================================
-                // 🚀 【新增】老幣技術離場邏輯 (PNL > 5% 才觸發)
+                // 🚀 【優化】老幣技術離場邏輯 (一體化止盈止損 + 防限流)
                 // ==========================================
-                if (pos.strategy_type === 'BLUECHIP_SWING' && pnlPct > 5) {
+                if (pos.strategy_type === 'BLUECHIP_SWING') {
+                    // 💡 確保每次 Call Birdeye 前強制冷卻 1.5 秒，絕殺 429 報錯
+                    await new Promise(r => setTimeout(r, 1500)); 
+
                     try {
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${pos.mint_address}&type=15m&limit=30`, {
                             headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' },
                             timeout: 5000
                         });
+                        
                         const items = birdeyeRes.data?.data?.items || [];
                         if (items.length >= 26) {
                             const closes = items.map(k => parseFloat(k.o));
@@ -207,18 +211,27 @@ function startPositionMonitor() {
                             const bb = calculateBollingerBands(closes);
                             const macd = calculateMACD(closes);
 
-                            const isRsiHot = rsi >= 70;
-                            const isUpperBB = currentPrice >= bb?.upper;
-                            const isMacdWeak = macd?.hist < macd?.prevHist && macd?.hist > 0;
+                            // 🟢 技術止盈條件 (動能衰竭或極度超買)
+                            const isOverbought = rsi >= 75 || currentPrice >= (bb?.upper * 1.02);
+                            
+                            // 🔴 技術止損條件 (趨勢破壞，不等硬止損)
+                            // 跌穿布林帶中軌 (20MA) 且 MACD 處於零軸以下死叉
+                            const isTrendBroken = currentPrice < bb?.middle && macd?.hist < 0 && macd?.hist < macd?.prevHist;
 
-                            if (isRsiHot || isUpperBB || isMacdWeak) {
-                                const techReason = isRsiHot ? "RSI超買" : (isUpperBB ? "觸碰BB上軌" : "MACD動能見頂");
-                                console.log(`🎯 [Technical Exit] ${pos.token_symbol} 滿足技術指標: ${techReason}`);
-                                await runSellPipeline(pos, currentPrice, `技術平倉: ${techReason}`, 1.0);
+                            if (pnlPct > 3 && isOverbought) {
+                                console.log(`🎯 [Technical Exit] ${pos.token_symbol} 技術止盈: RSI 超買或突破 BB 上軌`);
+                                await runSellPipeline(pos, currentPrice, `技術止盈 (RSI: ${rsi.toFixed(0)})`, 1.0);
                                 continue; 
+                            } 
+                            else if (isTrendBroken && pnlPct < -3) {
+                                console.log(`🛡️ [Technical Exit] ${pos.token_symbol} 技術止損: 跌穿 20MA 且 MACD 死叉`);
+                                await runSellPipeline(pos, currentPrice, `技術止損 (趨勢破壞)`, 1.0);
+                                continue;
                             }
                         }
-                    } catch (e) { console.warn(`⚠️ [Exit Radar] Birdeye 數據獲取失敗: ${e.message}`); }
+                    } catch (e) { 
+                        console.warn(`⚠️ [Exit Radar] ${pos.token_symbol} Birdeye 獲取失敗 (可能限流): ${e.message}`); 
+                    }
                 }
 
                 // ==========================================
@@ -231,7 +244,7 @@ function startPositionMonitor() {
                     reviewTracking.set(pos.mint_address, { lastPrice: currentPrice, lastTime: now });
                     const aiReview = await reviewActivePosition(pos.mint_address, { ...pos, pnlPct });
                     if (aiReview && aiReview.decision === 'EXIT') {
-                        await runSellPipeline(pos, currentPrice, `AI 監軍撤退: ${aiReview.reason}`, 1.0);
+                        await runSellPipeline(pos, currentPrice, `AI Reviewer 撤退: ${aiReview.reason}`, 1.0);
                         continue; 
                     }
                 }

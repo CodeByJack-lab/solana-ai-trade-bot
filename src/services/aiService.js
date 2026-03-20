@@ -29,7 +29,7 @@ async function getDynamicPrompt(promptId, data) {
 
 // ==========================================
 // 🛡️ 監軍部門 (Reviewer) - 雙引擎備援 + 自動同步 DB
-// 主力: Mistral Large -> 失敗後自動切換: Gemini 2.0 Flash Lite
+// 主力: Mistral Small (高頻抗壓) -> 失敗後自動切換: Gemini 2.0 Flash Lite
 // ==========================================
 async function reviewActivePosition(mintAddress, positionData) {
     const promptText = await getDynamicPrompt('reviewer_overseer', {
@@ -43,10 +43,10 @@ async function reviewActivePosition(mintAddress, positionData) {
     let aiResult;
     let modelLabel = "";
 
-    // --- 第一層：主力 Mistral ---
+    // --- 第一層：主力 Mistral (已改為 Small 最新版以應付高頻率呼叫) ---
     try {
         const res = await axios.post('https://api.mistral.ai/v1/chat/completions', {
-            model: "mistral-large-2411", 
+            model: "mistral-small-latest", // 💡 修正：改用速度快、限額高嘅模型
             messages: [{ role: "user", content: promptText }],
             response_format: { type: "json_object" }
         }, {
@@ -55,7 +55,7 @@ async function reviewActivePosition(mintAddress, positionData) {
         });
 
         aiResult = JSON.parse(res.data.choices[0].message.content);
-        modelLabel = "Mistral-Large";
+        modelLabel = "Mistral-Small";
         healthMonitor.setStatus('AI_Overseer', '🟢 正常 (Mistral)');
 
     } catch (mistralErr) {
@@ -82,7 +82,6 @@ async function reviewActivePosition(mintAddress, positionData) {
     // 🚀 【同步核心】將 AI 評語更新回 Supabase
     if (aiResult && aiResult.reason) {
         try {
-            // 根據 positionData.mode 判定實盤或模擬盤表格
             const tableName = positionData.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
             const finalComment = `(${modelLabel}) ${aiResult.reason}`;
 
@@ -102,7 +101,7 @@ async function reviewActivePosition(mintAddress, positionData) {
 
 // ==========================================
 // 🔄 橫盤接回初審 (Re-entry)
-// 專屬 AI: Google gemini-2.5-pro (150/day Rate)
+// 專屬 AI: Google gemini-2.5-pro
 // ==========================================
 async function analyzeReentry(mintAddress, symbol, baselinePrice) {
     try {
