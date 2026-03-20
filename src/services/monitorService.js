@@ -165,7 +165,6 @@ function startWatchlistMonitor() {
 const reviewTracking = new Map(); 
 let isMonitoringPositions = false;
 
-// 保留給 Command Listener 手動斬倉時使用
 async function getDexScreenerInfo(mint, retry) {
     try {
         const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 3000 });
@@ -177,7 +176,6 @@ async function getDexScreenerInfo(mint, retry) {
 // 📡 智能雙引擎【批次】報價工具 (5隻一問)
 // ==========================================
 async function getBulkPrices(mintsArray) {
-    // 🛡️ 絕對防禦：清除所有空白字元，防止 URL 格式錯誤
     const cleanMints = mintsArray.map(m => m.trim().replace(/\s+/g, '')).filter(Boolean);
     if (cleanMints.length === 0) return {};
 
@@ -185,7 +183,6 @@ async function getBulkPrices(mintsArray) {
     const priceMap = {};
 
     try {
-        // 1. 首選：Jupiter V2 Bulk API (極速、準確、免費)
         const jupUrl = `https://api.jup.ag/price/v2?ids=${mintStr}&vsToken=${SOL_MINT}`;
         const jupRes = await axios.get(jupUrl, { timeout: 5000 });
         
@@ -200,7 +197,6 @@ async function getBulkPrices(mintsArray) {
         console.warn(`⚠️ [Bulk Price] Jupiter 批次報價失敗，切換 DexScreener 備援...`);
     }
 
-    // 2. 備援：若有幣 Jupiter 搵唔到 (例如未上路徑)，用 DexScreener 補底
     const missingMints = cleanMints.filter(mint => !priceMap[mint]);
     if (missingMints.length > 0) {
         try {
@@ -218,7 +214,6 @@ async function getBulkPrices(mintsArray) {
             console.warn(`⚠️ [Bulk Price] DexScreener 備援報價亦失敗。`);
         }
     }
-
     return priceMap;
 }
 
@@ -237,20 +232,17 @@ function startPositionMonitor() {
         try {
             const portfolio = getPortfolio();
             const config = await getDynamicConfig();
-            if (portfolio.positions.length === 0) return;
+            if (portfolio.positions.length === 0) { isMonitoringPositions = false; return; }
             
             const positionsSnapshot = [...portfolio.positions];
-            const chunkSize = 5; // 💡 每次問 5 隻
+            const chunkSize = 5; 
 
-            // 將持倉分成 5 隻一組去問價
             for (let i = 0; i < positionsSnapshot.length; i += chunkSize) {
                 const chunk = positionsSnapshot.slice(i, i + chunkSize);
                 const mints = chunk.map(p => p.mint_address);
                 
-                // 🚀 一次過攞晒 5 隻幣嘅價錢！
                 const priceMap = await getBulkPrices(mints);
 
-                // 逐隻處理退場與風控
                 for (const pos of chunk) {
                     const currentPrice = priceMap[pos.mint_address];
                     if (!currentPrice) {
@@ -258,7 +250,6 @@ function startPositionMonitor() {
                         continue; 
                     }
                     
-                    // 更新歷史最高價
                     if (currentPrice > pos.highest_price_sol) {
                         pos.highest_price_sol = currentPrice;
                         const table = portfolio.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
@@ -274,52 +265,49 @@ function startPositionMonitor() {
                     // ==========================================
                     if (pos.strategy_type === 'BLUECHIP_SWING') {
                         await new Promise(r => setTimeout(r, 1500)); 
-
                         try {
                             const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${pos.mint_address}&type=15m&limit=30`, {
                                 headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' },
                                 timeout: 5000
                             });
-                            
                             const items = birdeyeRes.data?.data?.items || [];
                             if (items.length >= 26) {
                                 const closes = items.map(k => parseFloat(k.o));
                                 const rsi = calculateRSI(closes);
                                 const bb = calculateBollingerBands(closes);
                                 const macd = calculateMACD(closes);
-
                                 const isOverbought = rsi >= 75 || currentPrice >= (bb?.upper * 1.02);
                                 const isTrendBroken = currentPrice < bb?.middle && macd?.hist < 0 && macd?.hist < macd?.prevHist;
-
                                 if (pnlPct > 3 && isOverbought) {
-                                    console.log(`🎯 [Technical Exit] ${pos.token_symbol} 技術止盈: RSI 超買或突破 BB 上軌`);
                                     await runSellPipeline(pos, currentPrice, `技術止盈 (RSI: ${rsi.toFixed(0)})`, 1.0);
                                     continue; 
-                                } 
-                                else if (isTrendBroken && pnlPct < -3) {
-                                    console.log(`🛡️ [Technical Exit] ${pos.token_symbol} 技術止損: 跌穿 20MA 且 MACD 死叉`);
+                                } else if (isTrendBroken && pnlPct < -3) {
                                     await runSellPipeline(pos, currentPrice, `技術止損 (趨勢破壞)`, 1.0);
                                     continue;
                                 }
                             }
-                        } catch (e) { 
-                            console.warn(`⚠️ [Exit Radar] ${pos.token_symbol} Birdeye 獲取失敗 (可能限流): ${e.message}`); 
-                        }
+                        } catch (e) { console.warn(`⚠️ [Exit Radar] ${pos.token_symbol} Birdeye 獲取失敗: ${e.message}`); }
                     }
 
                     // ==========================================
-                    // 👁️ AI Review 邏輯
+                    // 👁️ AI Review 邏輯 (修正版：加入 10 分鐘新兵保護期)
                     // ==========================================
                     const now = Date.now();
-                    const track = reviewTracking.get(pos.mint_address) || { lastPrice: pos.entry_price_sol, lastTime: 0 };
+                    // 💡 根據 Database 嘅 created_at 計持倉時間
+                    const posAgeMins = (now - new Date(pos.created_at).getTime()) / 60000;
+                    const track = reviewTracking.get(pos.mint_address) || { lastPrice: pos.entry_price_sol, lastTime: now };
                     const changeSinceLastReview = ((currentPrice - track.lastPrice) / track.lastPrice) * 100;
                     
-                    if ((now - track.lastTime > 30 * 60 * 1000) || (changeSinceLastReview >= 25) || (changeSinceLastReview <= -10)) {
-                        reviewTracking.set(pos.mint_address, { lastPrice: currentPrice, lastTime: now });
-                        const aiReview = await reviewActivePosition(pos.mint_address, { ...pos, pnlPct });
-                        if (aiReview && aiReview.decision === 'EXIT') {
-                            await runSellPipeline(pos, currentPrice, `AI Reviewer 撤退: ${aiReview.reason}`, 1.0);
-                            continue; 
+                    // 🛡️ 只有持倉超過 10 分鐘，且符合時間或波動條件，先至畀 AI 監軍介入
+                    if (posAgeMins > 10) {
+                        if ((now - track.lastTime > 30 * 60 * 1000) || (Math.abs(changeSinceLastReview) >= 25) || (changeSinceLastReview <= -10)) {
+                            reviewTracking.set(pos.mint_address, { lastPrice: currentPrice, lastTime: now });
+                            const aiReview = await reviewActivePosition(pos.mint_address, { ...pos, pnlPct });
+                            if (aiReview && aiReview.decision === 'EXIT') {
+                                console.log(`🛡️ [AI Overseer] ${pos.token_symbol} 巡視決定撤退：${aiReview.reason}`);
+                                await runSellPipeline(pos, currentPrice, `AI Reviewer 撤退: ${aiReview.reason}`, 1.0);
+                                continue; 
+                            }
                         }
                     }
 
@@ -327,7 +315,6 @@ function startPositionMonitor() {
                     // 🛡️ 基本風控邏輯 (翻倍/止損/移動止盈)
                     // ==========================================
                     let triggerSell = false; let sellReason = ""; let sellFraction = 1.0; 
-
                     if (pnlPct >= 100 && !isHalfSold) {
                         triggerSell = true; sellReason = `翻倍保本出局 (+${pnlPct.toFixed(1)}%)`; sellFraction = 0.5;
                     } else if (pnlPct <= config.stop_loss_pct) {
@@ -335,7 +322,6 @@ function startPositionMonitor() {
                     } else if (drawdownPct >= 30 && pnlPct > 20) { 
                         triggerSell = true; sellReason = `高位回撤鎖盈 (-${drawdownPct.toFixed(1)}%)`; sellFraction = 1.0;
                     }
-
                     if (triggerSell) {
                         const isSold = await runSellPipeline(pos, currentPrice, sellReason, sellFraction);
                         if (isSold && sellFraction === 1.0) {
@@ -346,16 +332,10 @@ function startPositionMonitor() {
                             }, { onConflict: 'mint_address' });
                         }
                     }
-
-                    // 💡 時間控制：為免後續 AI Review 同 Birdeye 查 OHLCV 太快撞 429，每處理完一隻幣強制抖 2 秒
                     await new Promise(r => setTimeout(r, 2000));
                 }
             }
-        } catch (err) { 
-            console.error(`❌ [Position Monitor] 出錯:`, err.message); 
-        } finally {
-            isMonitoringPositions = false;
-        }
+        } catch (err) { console.error(`❌ [Position Monitor] 出錯:`, err.message); } finally { isMonitoringPositions = false; }
     }, 60000); 
 }
 
