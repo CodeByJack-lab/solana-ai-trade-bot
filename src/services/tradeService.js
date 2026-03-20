@@ -7,7 +7,7 @@ const { connection } = require('../config/solana');
 const path = require('path');
 const BigNumber = require('bignumber.js'); 
 const { executeLiveSwapUAT } = require('./liveTradeService');
-const { sendTelegramAlert, sendAdminAlert } = require('./telegramService'); // 💡 包含 Admin 警報
+const { sendTelegramAlert, sendAdminAlert } = require('./telegramService'); 
 const { healthMonitor } = require('./healthMonitor');
 
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
@@ -15,7 +15,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
 // ==========================================
-// 🚀 [核心] 獲取 Jupiter V6/V1 交易路徑 (智能切換路由)
+// 🚀 [核心] 獲取 Jupiter V6/V1 交易路徑
 // ==========================================
 async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
     try {
@@ -61,23 +61,21 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
 }
 
 // ==========================================
-// 🎯 核心買入執行 (一擊必殺版 + 10%防護 + 雙重黑名單)
+// 🎯 核心買入執行
 // ==========================================
 async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol) {
     console.log(`\n========================================`);
-    console.log(`⚡ [Execution] 啟動下單程序: 狙擊目標 ${tokenSymbol}`);
+    console.log(`⚡ [Execution] 啟下單程序: 狙擊目標 ${tokenSymbol}`);
 
     const portfolio = getPortfolio();
     const isLive = portfolio.mode === 'LIVE';
     const tableSuffix = isLive ? 'live' : 'paper';
 
-    // 🛑 核心防禦一：每隻幣同時間只准持有一注！
     if (portfolio.positions.some(p => p.mint_address === mintAddress)) {
-        console.log(`🚫 [Trade] 已經持有 ${tokenSymbol}，為防止重複接飛刀，取消加倉。`);
+        console.log(`🚫 [Trade] 已經持有 ${tokenSymbol}，取消加倉。`);
         return false;
     }
 
-    // 🛑 核心防禦二：連輸兩次終極黑名單 (只限 Meme 新幣)
     if (!strategyType.includes('BLUECHIP')) {
         try {
             const { data: recentTrades } = await supabase
@@ -91,7 +89,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             if (recentTrades && recentTrades.length === 2) {
                 const allLoss = recentTrades.every(t => (t.realized_pnl_sol || 0) < 0);
                 if (allLoss) {
-                    console.log(`🚫 [Blacklist] ${tokenSymbol} 最近連輸兩次，啟動防連輸機制，強制放棄新幣狙擊！`);
+                    console.log(`🚫 [Blacklist] ${tokenSymbol} 最近連輸兩次，強制放棄新幣狙擊！`);
                     return false;
                 }
             }
@@ -100,20 +98,11 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         }
     }
 
-    // 🛑 核心防禦三：1/10 絕對安全防線
     const safetyBufferSol = portfolio.reference_capital * 0.1;
     const requiredTotalSol = configTradeAmountSol + safetyBufferSol;
 
     if (portfolio.cash_sol < requiredTotalSol) { 
-        const alertMsg = `🚨 <b>【資金見底警告】系統已攔截交易！</b>
-🪙 目標: <b>$${tokenSymbol}</b>
-💸 現金: <b>${portfolio.cash_sol.toFixed(4)} SOL</b>
-🛡️ 10% 緩衝區: <b>${safetyBufferSol.toFixed(4)} SOL</b>
-🛒 買入所需: <b>${configTradeAmountSol.toFixed(4)} SOL</b>
-👉 <b>防護機制啟動：</b>餘額不足以維持 10% 安全線，請檢查 Dashboard 的注碼設定！`;
-        
         console.log(`❌ [Execution] 餘額觸及 1/10 絕對安全底線，取消開倉。`);
-        if (typeof sendAdminAlert === 'function') sendAdminAlert(alertMsg);
         return false;
     }
 
@@ -139,10 +128,10 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             strategy_type: strategyType 
         });
 
-        // 🛡️ [絕對修正 - 買入] 讀取資料庫真實餘額，精準扣數
+        // 🛡️ [絕對扣數機制] 讀取資料庫真實餘額 ➡️ 減數 ➡️ 強制寫入 DB
         const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-        const currentBalance = isLive ? (dbConfig.live_wallet_balance || 0) : (dbConfig.simulated_balance || dbConfig.reference_capital || 10);
-        const newBalance = currentBalance - configTradeAmountSol;
+        const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || dbConfig.reference_capital || 10);
+        const newBalance = currentBalance - Number(configTradeAmountSol);
 
         await supabase.from('system_config')
             .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
@@ -229,16 +218,10 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     return false;
 }
 
-// ==========================================
-// 🚨 緊急/手動平倉備用函數
-// ==========================================
 async function executeSellRaydium(mintAddress, marketRefPriceSol, reason, sellFraction = 1.0) {
     return await executeSell(mintAddress, marketRefPriceSol, reason, sellFraction);
 }
 
-// ==========================================
-// 💀 死亡宣告/強行撇帳核心
-// ==========================================
 async function forceWriteOff(mintAddress, reason) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
@@ -283,10 +266,10 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         }).eq('mint_address', mintAddress);
     }
 
-    // 🛡️ [絕對修正 - 賣出] 讀取資料庫真實餘額，精準加數
+    // 🛡️ [絕對加數機制] 讀取資料庫真實餘額 ➡️ 加數 ➡️ 強制寫入 DB
     const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-    const currentBalance = isLive ? (dbConfig.live_wallet_balance || 0) : (dbConfig.simulated_balance || dbConfig.reference_capital || 10);
-    const newBalance = currentBalance + sellValueSol;
+    const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || dbConfig.reference_capital || 10);
+    const newBalance = currentBalance + Number(sellValueSol);
 
     await supabase.from('system_config')
         .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
