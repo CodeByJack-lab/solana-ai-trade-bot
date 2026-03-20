@@ -8,45 +8,41 @@ let pauseCooldownUntil = 0;
 
 const macroMonitorService = {
     /**
-     * 💡 獲取高位回撤數據 (修正 CryptoCompare URL 路徑大小寫)
+     * 💡 獲取高位回撤數據 (改用 CoinGecko 免費源)
+     * 支援 Railway 環境，無須 API Key
      */
-    async fetchHighAndDrop(symbol) {
-        const fsym = symbol.replace('USDT', '');
+    async fetchHighAndDrop(coinId) {
+        // CoinGecko 市場圖表 API: 獲取最近 1 天的數據 (包含每小時/每分鐘切片)
+        const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=1`;
         
-        // 🛡️ 修正點：將 histoMinute 改為 histominute (全細寫)
-        const url = `https://min-api.cryptocompare.com/data/v2/histominute?fsym=${fsym}&tsym=USD&limit=15`;
+        const res = await axios.get(url, { timeout: 10000 });
         
-        // 1. 呼叫 CryptoCompare，超時設為 8 秒確保穩定
-        const res = await axios.get(url, { timeout: 8000 });
+        // prices 結構: [[timestamp, price], [timestamp, price], ...]
+        const prices = res.data?.prices;
         
-        // 🛡️ 防禦 A：檢查 CryptoCompare 是否回傳業務錯誤
-        if (res.data?.Response === 'Error') {
-            throw new Error(`CryptoCompare 報錯: ${res.data.Message}`);
-        }
-
-        // 🛡️ 防禦 B：安全獲取 Data 陣列，防止 "not iterable" 錯誤
-        const klines = res.data?.Data?.Data; 
-        
-        if (!klines || !Array.isArray(klines) || klines.length === 0) {
-            throw new Error(`${symbol} 數據格式異常或陣列為空`);
+        if (!prices || !Array.isArray(prices) || prices.length < 15) {
+            throw new Error(`${coinId} CoinGecko 數據不足`);
         }
         
+        // 取得最近 15 根數據的最高點 (約等於最近 1 小時內的高位)
+        const recentPrices = prices.slice(-15);
         let highestPrice = 0;
-        for (const k of klines) {
-            const high = parseFloat(k.high); // CryptoCompare 使用物件屬性 .high
-            if (high > highestPrice) highestPrice = high;
+        for (const p of recentPrices) {
+            const price = parseFloat(p[1]);
+            if (price > highestPrice) highestPrice = price;
         }
         
-        const currentPrice = parseFloat(klines[klines.length - 1].close);
+        const currentPrice = parseFloat(prices[prices.length - 1][1]);
         const dropPct = ((currentPrice - highestPrice) / highestPrice) * 100;
         
         return { currentPrice, highestPrice, dropPct };
     },
 
     start() {
-        console.log(`🌍 [Macro] 雙龍大盤防禦雷達運作中 (CryptoCompare 全球數據源)...`);
-        healthMonitor.setStatus('Macro_Radar', '🟢 監控中');
+        console.log(`🌍 [Macro] 雙龍大盤防禦雷達運作中 (CoinGecko 數據源)...`);
+        healthMonitor.setStatus('Macro_Radar', '🟢 監聽中');
 
+        // 改為每 3 分鐘檢查一次，避免觸發 CoinGecko 免費版 Rate Limit (10-30 calls/min)
         setInterval(async () => {
             const now = Date.now();
             
@@ -61,8 +57,8 @@ const macroMonitorService = {
 
                 // 同步獲取 BTC 同 SOL 數據
                 const [btcData, solData] = await Promise.all([
-                    this.fetchHighAndDrop('BTCUSDT'),
-                    this.fetchHighAndDrop('SOLUSDT')
+                    this.fetchHighAndDrop('bitcoin'),
+                    this.fetchHighAndDrop('solana')
                 ]);
 
                 healthMonitor.setStatus('Macro_Radar', '🟢 正常');
@@ -73,10 +69,10 @@ const macroMonitorService = {
                 // 核心拉閘邏輯
                 if (btcData.dropPct <= -2.0) {
                     triggered = true;
-                    alertMsg = `🚨 <b>BTC 崩盤預警 (CryptoCompare)</b>\n15分鐘高位: $${btcData.highestPrice}\n最新價格: $${btcData.currentPrice}\n回撤幅度: <b>${btcData.dropPct.toFixed(2)}%</b>`;
+                    alertMsg = `🚨 <b>BTC 崩盤預警 (CoinGecko)</b>\n近期高位: $${btcData.highestPrice.toFixed(2)}\n最新價格: $${btcData.currentPrice.toFixed(2)}\n回撤幅度: <b>${btcData.dropPct.toFixed(2)}%</b>`;
                 } else if (solData.dropPct <= -3.0) {
                     triggered = true;
-                    alertMsg = `🚨 <b>SOL 崩盤預警 (CryptoCompare)</b>\n15分鐘高位: $${solData.highestPrice}\n最新價格: $${solData.currentPrice}\n回撤幅度: <b>${solData.dropPct.toFixed(2)}%</b>`;
+                    alertMsg = `🚨 <b>SOL 崩盤預警 (CoinGecko)</b>\n近期高位: $${solData.highestPrice.toFixed(2)}\n最新價格: $${solData.currentPrice.toFixed(2)}\n回撤幅度: <b>${solData.dropPct.toFixed(2)}%</b>`;
                 }
 
                 if (triggered) {
@@ -85,10 +81,10 @@ const macroMonitorService = {
                     pauseCooldownUntil = now + (60 * 60 * 1000); 
                 }
             } catch (err) {
-                // 呢度會捕捉到所有「數據格式異常」或者「API 報錯」
+                console.error(`❌ [Macro_Radar] Error: ${err.message}`);
                 healthMonitor.setStatus('Macro_Radar', `🔴 異常: ${err.message}`);
             }
-        }, 60 * 1000); 
+        }, 180000); // 180000ms = 3 分鐘
     }
 };
 
