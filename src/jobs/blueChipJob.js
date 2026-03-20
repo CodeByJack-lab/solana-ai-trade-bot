@@ -11,33 +11,29 @@ const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
 
+// 💡 定義延遲函數
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // ==========================================
 // 🧮 數學輔助工具區 (完整保留你的四維指標邏輯)
 // ==========================================
-
-// 1. RSI (相對強弱指數)
 function calculateRSI(closes, periods = 14) {
     if (closes.length <= periods) return 50;
     let gains = 0, losses = 0;
     for (let i = 1; i <= periods; i++) {
         const diff = closes[i] - closes[i - 1];
-        if (diff >= 0) gains += diff;
-        else losses -= diff;
+        if (diff >= 0) gains += diff; else losses -= diff;
     }
-    let avgGain = gains / periods;
-    let avgLoss = losses / periods;
+    let avgGain = gains / periods; let avgLoss = losses / periods;
     for (let i = periods + 1; i < closes.length; i++) {
         const diff = closes[i] - closes[i - 1];
-        const gain = diff >= 0 ? diff : 0;
-        const loss = diff < 0 ? -diff : 0;
+        const gain = diff >= 0 ? diff : 0; const loss = diff < 0 ? -diff : 0;
         avgGain = ((avgGain * (periods - 1)) + gain) / periods;
         avgLoss = ((avgLoss * (periods - 1)) + loss) / periods;
     }
-    if (avgLoss === 0) return 100;
-    return 100 - (100 / (1 + (avgGain / avgLoss)));
+    return avgLoss === 0 ? 100 : 100 - (100 / (1 + (avgGain / avgLoss)));
 }
 
-// 2. Bollinger Bands (布林帶)
 function calculateBollingerBands(closes, period = 20, stdDev = 2) {
     if (closes.length < period) return null;
     const slice = closes.slice(-period);
@@ -47,31 +43,22 @@ function calculateBollingerBands(closes, period = 20, stdDev = 2) {
     return { upper: sma + (stdDev * sd), middle: sma, lower: sma - (stdDev * sd) };
 }
 
-// 3. EMA (MACD 基礎)
 function calculateEMA(data, period) {
     const k = 2 / (period + 1);
     let emaArray = [data[0]];
-    for (let i = 1; i < data.length; i++) {
-        emaArray.push(data[i] * k + emaArray[i - 1] * (1 - k));
-    }
+    for (let i = 1; i < data.length; i++) emaArray.push(data[i] * k + emaArray[i - 1] * (1 - k));
     return emaArray;
 }
 
-// 4. MACD (動能反轉)
 function calculateMACD(closes) {
     if (closes.length < 26) return null;
-    const ema12 = calculateEMA(closes, 12);
-    const ema26 = calculateEMA(closes, 26);
+    const ema12 = calculateEMA(closes, 12); const ema26 = calculateEMA(closes, 26);
     const macdLine = ema12.map((v, i) => v - ema26[i]);
     const signalLine = calculateEMA(macdLine, 9);
     const hist = macdLine.map((m, i) => m - signalLine[i]);
-    return {
-        hist: hist[hist.length - 1],
-        prevHist: hist[hist.length - 2]
-    };
+    return { hist: hist[hist.length - 1], prevHist: hist[hist.length - 2] };
 }
 
-// 5. Volume Shrinkage (沽壓枯竭)
 function checkVolumeShrinkage(volumes) {
     if (volumes.length < 7) return false;
     const lastClosedVol = volumes[volumes.length - 2];
@@ -81,11 +68,11 @@ function checkVolumeShrinkage(volumes) {
 }
 
 // ==========================================
-// 🚀 核心排程 (哨兵觸發制)
+// 🚀 核心排程 (強效防限流版)
 // ==========================================
 const blueChipJob = {
     start() {
-        console.log(`📈 [BlueChip Radar] 終極四維雷達啟動 (DexScreener 哨兵 + Birdeye 精算模式)...`);
+        console.log(`📈 [BlueChip Radar] 5秒延遲防限流版啟動...`);
         healthMonitor.setStatus('Bluechip_Radar', '🟢 監聽中');
 
         setInterval(async () => {
@@ -100,25 +87,26 @@ const blueChipJob = {
                 }
 
                 healthMonitor.setStatus('Bluechip_Radar', '🟢 掃苗中...');
-                
                 const { data: pool } = await supabase.from('bluechip_pool').select('*').eq('is_active', true);
                 if (!pool || !BIRDEYE_API_KEY) return;
 
                 for (const token of pool) {
                     try {
-                        // 🕵️ 第一層：DexScreener 免費哨兵 (判斷超跌)
+                        // 🕵️ 第一層：DexScreener 哨兵 (免費 API)
                         const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${token.mint_address}`, { timeout: 4000 });
                         const pair = dexRes.data.pairs?.find(p => p.chainId === 'solana');
                         if (!pair) continue;
 
                         const h1Change = parseFloat(pair.priceChange?.h1 || 0);
-
-                        // 💡 只有當 1 小時跌幅超過 8%，先至啟動 Birdeye 精算 (節省 CUs)
                         if (h1Change > -8) continue; 
 
-                        console.log(`🎯 [哨兵訊號] ${token.token_symbol} 1h 跌幅 ${h1Change}%, 啟動 Birdeye 四維精算...`);
+                        // 💡 【核心改動】在呼叫 Birdeye 前強制等待 5 秒，避開 429 限流
+                        console.log(`⏳ [防限流] 準備掃描 ${token.token_symbol}，等待 5 秒中...`);
+                        await sleep(5000);
 
-                        // 🕵️ 第二層：Birdeye OHLCV 精算 (耗費 CUs)
+                        console.log(`🎯 [哨兵訊號] ${token.token_symbol} 啟動 Birdeye 四維精算...`);
+
+                        // 🕵️ 第二層：Birdeye OHLCV 精算
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&limit=100`, {
                             headers: { 
                                 'X-API-KEY': BIRDEYE_API_KEY.replace(/['"]/g, '').trim(), 
@@ -134,33 +122,23 @@ const blueChipJob = {
                         const volumes = items.map(k => parseFloat(k.v));
                         const currentPrice = closes[closes.length - 1];
 
-                        // 🧮 執行四維運算
                         const rsi = calculateRSI(closes);
                         const bb = calculateBollingerBands(closes);
                         const macdData = calculateMACD(closes);
                         const isVolumeShrinking = checkVolumeShrinkage(volumes);
 
-                        // 🚨 最終四維觸發條件 (RSI <= 30 + BB 觸底 + 縮量 + MACD 轉向)
-                        const isRsiOversold = rsi <= 30;
-                        const isBbTouched = bb && currentPrice <= bb.lower;
-                        const isMacdReversing = macdData && macdData.hist > macdData.prevHist;
-
-                        if (isRsiOversold && isBbTouched && isVolumeShrinking && isMacdReversing) {
+                        if (rsi <= 30 && bb && currentPrice <= bb.lower && isVolumeShrinking && macdData.hist > macdData.prevHist) {
                             console.log(`🚨 [Bluechip] ${token.token_symbol} 指標共振，移交 AI 軍師防雷...`);
-                            
                             const aiDecision = await consensusService.runBluechipConsensus(token.mint_address, {
-                                symbol: token.token_symbol,
-                                rsi,
-                                price: currentPrice,
-                                indicators: 'RSI+BB+Volume+MACD (Birdeye Source)'
+                                symbol: token.token_symbol, rsi, price: currentPrice, indicators: '四維共振 (Birdeye)'
                             });
-                            
                             if (aiDecision?.buy) {
                                 await executeBuy(token.mint_address, token.token_symbol, 'BLUECHIP_SWING', 100, aiDecision.reason, config.trade_amount_sol);
                             }
                         }
                     } catch (e) {
-                        console.warn(`⚠️ [Bluechip] ${token.token_symbol} 檢查失敗: ${e.message}`);
+                        const is429 = e.response?.status === 429;
+                        console.warn(`⚠️ [Bluechip] ${token.token_symbol} ${is429 ? '觸發限流(429)' : '失敗'}: ${e.message}`);
                     }
                 }
             } catch (err) {
