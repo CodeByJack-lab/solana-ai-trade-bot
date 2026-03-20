@@ -61,7 +61,7 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
 }
 
 // ==========================================
-// 🎯 核心買入執行 (修復版：採用絕對記帳法扣錢)
+// 🎯 核心買入執行
 // ==========================================
 async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol) {
     console.log(`\n========================================`);
@@ -124,7 +124,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     } 
 
     if (tradeSuccess && tokenQuantity > 0) {
-        // 1. 更新內存 Cache
         updateCache('BUY', configTradeAmountSol, {
             mint_address: mintAddress,
             token_symbol: tokenSymbol,
@@ -134,7 +133,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             strategy_type: strategyType 
         });
 
-        // 🛡️ 2. [核心修正] 從資料庫獲取最新餘額，扣錢後即時寫回
         const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
         const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
         const newBalance = currentBalance - Number(configTradeAmountSol);
@@ -143,7 +141,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
             .eq('id', 1);
 
-        // 3. 寫入持倉
         await supabase.from(`active_positions_${tableSuffix}`).insert([{
             mint_address: mintAddress,
             token_symbol: tokenSymbol,
@@ -154,7 +151,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             ai_reason: aiReason
         }]);
 
-        // 4. 寫入歷史
         await supabase.from(`trade_history_${tableSuffix}`).insert([{
             token_mint: mintAddress,
             token_symbol: tokenSymbol,
@@ -165,7 +161,8 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             total_value_sol: configTradeAmountSol, 
             post_trade_balance: newBalance, 
             txid: mockTxid,
-            review_history: aiReason
+            ai_factcheck_result: aiReason,
+            review_history: aiReason // 💡 買入時 review_history 預設為初始買入理由
         }]);
 
         if(typeof sendTelegramAlert === 'function') {
@@ -274,7 +271,6 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         }).eq('mint_address', mintAddress);
     }
 
-    // 🛡️ [絕對記帳法 - 賣出] 即時讀寫資料庫，將資金加回餘額
     const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
     const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
     const newBalance = currentBalance + Number(sellValueSol);
@@ -283,6 +279,7 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
         .eq('id', 1);
 
+    // 💡 修正位置：正確地將持倉期間嘅 AI 巡視評語寫入 review_history！
     await supabase.from(`trade_history_${tableSuffix}`).insert([{
         token_mint: mintAddress, token_symbol: pos.token_symbol,
         action: sellFraction >= 0.99 ? 'SELL' : 'SELL_HALF',
@@ -291,7 +288,8 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         realized_pnl_sol: pnlSol, realized_pnl_pct: pnlPct,
         post_trade_balance: newBalance, 
         txid: "SELL_" + Math.random().toString(36).substring(7).toUpperCase(),
-        review_history: finalReason
+        ai_factcheck_result: finalReason,
+        review_history: pos.last_review_comment || pos.ai_reason // 👈 完美對接
     }]);
 
     if(typeof sendTelegramAlert === 'function') {
