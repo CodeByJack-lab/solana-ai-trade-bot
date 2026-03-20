@@ -67,14 +67,14 @@ function checkVolumeShrinkage(volumes) {
 }
 
 // ==========================================
-// 🚀 核心排程 (終極抗 429 批次處理版)
+// 🚀 核心排程 (終極抗 429 批次初篩版)
 // ==========================================
 const blueChipJob = {
     start() {
-        console.log(`📈 [BlueChip Radar] 批次防限流版啟動...`);
+        console.log(`📈 [BlueChip Radar] 批次防限流初篩版啟動...`);
         healthMonitor.setStatus('Bluechip_Radar', '🟢 監聽中');
 
-        // 將掃描間隔由 60 秒改為 90 秒，畀足夠時間行晒 11 隻幣
+        // 因為做咗批次處理，只需 1 秒就問晒 11 隻幣，所以改返每 60 秒行一次
         setInterval(async () => {
             try {
                 const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -88,26 +88,42 @@ const blueChipJob = {
 
                 healthMonitor.setStatus('Bluechip_Radar', '🟢 掃苗中...');
                 const { data: pool } = await supabase.from('bluechip_pool').select('*').eq('is_active', true);
-                if (!pool || !BIRDEYE_API_KEY) return;
+                if (!pool || pool.length === 0 || !BIRDEYE_API_KEY) return;
 
-                // 💡 【核心優化】放棄逐隻行，改為陣列順序處理，每次強制抖 2.5 秒
-                for (let i = 0; i < pool.length; i++) {
-                    const token = pool[i];
+                // 💡 1. 批次向 DexScreener 索取所有老幣報價 (1 個 Request 搞掂)
+                const mintsArray = pool.map(t => t.mint_address.trim()).filter(Boolean);
+                const chunk = mintsArray.slice(0, 30); // DexScreener 上限 30 隻
+                const mintStr = chunk.join(',');
+
+                let dexPairs = [];
+                try {
+                    const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintStr}`, { timeout: 5000 });
+                    dexPairs = dexRes.data?.pairs || [];
+                } catch (e) {
+                    console.warn(`⚠️ [Bluechip] DexScreener 批次初篩失敗:`, e.message);
+                    return; 
+                }
+
+                // 💡 2. 本地極速過濾：只挑選 1小時跌穿 8% 嘅幣
+                const dipTokens = [];
+                for (const token of pool) {
+                    const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === token.mint_address);
+                    const h1Change = pair ? parseFloat(pair.priceChange?.h1 || 0) : 0;
                     
+                    // 跌幅超過 8% 才會被標記為抄底目標 (數值 <= -8)
+                    if (h1Change <= -8) {
+                        dipTokens.push(token);
+                    }
+                }
+
+                // 如果大市平靜，提早收工，0 Birdeye 消耗！
+                if (dipTokens.length === 0) return;
+
+                console.log(`🎯 [哨兵訊號] 發現 ${dipTokens.length} 隻老幣急跌過 8%，準備啟動 Birdeye 精算...`);
+
+                // 💡 3. 針對真係急跌嘅幣，逐隻向 Birdeye 索取 OHLCV (順序 + 強制 Sleep)
+                for (const token of dipTokens) {
                     try {
-                        // 1. DexScreener 快速初篩
-                        const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${token.mint_address}`, { timeout: 4000 });
-                        const pair = dexRes.data.pairs?.find(p => p.chainId === 'solana');
-                        
-                        if (!pair || parseFloat(pair.priceChange?.h1 || 0) > -8) {
-                            // 就算過唔到初篩，都強制抖 1 秒，防 DexScreener 429
-                            await sleep(1000); 
-                            continue; 
-                        }
-
-                        console.log(`🎯 [哨兵訊號] ${token.token_symbol} 啟動 Birdeye 四維精算...`);
-
-                        // 2. Birdeye 深度掃描
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&limit=100`, {
                             headers: { 
                                 'X-API-KEY': BIRDEYE_API_KEY.replace(/['"]/g, '').trim(), 
@@ -139,17 +155,17 @@ const blueChipJob = {
                         }
                     } catch (e) {
                         const is429 = e.response?.status === 429;
-                        console.warn(`⚠️ [Bluechip] ${token.token_symbol} ${is429 ? '觸發限流(429)' : '失敗'}`);
+                        console.warn(`⚠️ [Bluechip] ${token.token_symbol} ${is429 ? '觸發限流(429)' : 'API失敗'}`);
                     }
 
-                    // 💡 【核心優化】不管成功定失敗，每掃完一隻幣強制冷卻 2.5 秒再行下一隻
+                    // 🛡️ 強制冷卻 2.5 秒，保護 Birdeye API 唔會撞 429
                     await sleep(2500); 
                 }
                 
             } catch (err) {
                 healthMonitor.setStatus('Bluechip_Radar', `🔴 異常: ${err.message}`);
             }
-        }, 90 * 1000); // 💡 將大 Loop 改為 90 秒，確保 11 隻幣行得切
+        }, 60 * 1000); // 一分鐘大循環
     }
 };
 
