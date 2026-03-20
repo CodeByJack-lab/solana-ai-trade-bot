@@ -324,4 +324,19 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     }
 }
 
-module.exports = { executeBuy, executeSell, executeSellRaydium, forceWriteOff };
+// ==========================================
+// 🚀 [新增] 賣出流水線 (解決 is not a function 報錯)
+// ==========================================
+async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
+    try {
+        console.log(`🎬 [Pipeline] 準備賣出 ${position.token_symbol || position.mint_address.substring(0,6)}...`);
+        // 💡 呼叫已經穩定運作嘅 executeSell
+        return await executeSell(position.mint_address, currentPrice, reason, fraction);
+    } catch (err) {
+        console.error(`❌ [Pipeline Error] 執行崩潰:`, err.message);
+        return false;
+    }
+}
+
+// 🔑 確保呢一行包含 runSellPipeline
+module.exports = { executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline };
