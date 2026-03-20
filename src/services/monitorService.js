@@ -84,9 +84,19 @@ function startDatabaseNurseryMonitor() {
         try {
             const thresholdTime = new Date(Date.now() - (config.min_age_mins || 5) * 60 * 1000).toISOString();
             const deadTime = new Date(Date.now() - (config.max_age_mins || 60) * 60 * 1000).toISOString();
+            
+            // 🛡️ 防禦 1: 主動清洗 DB 殘留的 SOL_MINT
+            await supabase.from('nursery_pool').delete().eq('mint_address', SOL_MINT);
             await supabase.from('nursery_pool').delete().lte('created_at', deadTime);
 
-            const { data: matureTokens } = await supabase.from('nursery_pool').select('mint_address').lte('created_at', thresholdTime).order('created_at', { ascending: true }).limit(1);
+            // 🛡️ 防禦 2: 撈魚時直接排除 SOL_MINT
+            const { data: matureTokens } = await supabase.from('nursery_pool')
+                .select('mint_address')
+                .neq('mint_address', SOL_MINT)
+                .lte('created_at', thresholdTime)
+                .order('created_at', { ascending: true })
+                .limit(1);
+                
             if (!matureTokens || matureTokens.length === 0) { isProcessingBatch = false; return; }
 
             const mint = matureTokens[0].mint_address;
@@ -111,7 +121,10 @@ app.post('/webhook/helius', async (req, res) => {
         if (Array.isArray(req.body)) {
             req.body.forEach(ev => {
                 if (ev.instructions?.some(ix => TARGET_PROGRAMS.includes(ix.programId)) && ev.tokenTransfers) {
-                    ev.tokenTransfers.forEach(tf => { if (tf.mint) incomingMints.add(tf.mint); });
+                    ev.tokenTransfers.forEach(tf => { 
+                        // 🛡️ 防禦 3: 入口直接封殺 SOL_MINT
+                        if (tf.mint && tf.mint !== SOL_MINT) incomingMints.add(tf.mint); 
+                    });
                 }
             });
         }
