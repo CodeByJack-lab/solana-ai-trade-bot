@@ -28,12 +28,11 @@ async function getDynamicPrompt(promptId, data) {
 }
 
 // ==========================================
-// 🛡️ 監軍部門 (Reviewer) - 智能持倉覆核 (極速逃生)
-// 專屬 AI: Cerebras gpt-oss-120b
+// 🛡️ 監軍部門 (Reviewer) - 智能持倉覆核
+// 專屬 AI: Mistral (使用免費 Experiment 計劃)
 // ==========================================
 async function reviewActivePosition(mintAddress, positionData) {
     try {
-        // 1. 動態從 Supabase 獲取 Prompt
         const promptText = await getDynamicPrompt('reviewer_overseer', {
             token_symbol: positionData.token_symbol,
             pnl_pct: positionData.pnlPct.toFixed(2),
@@ -42,17 +41,22 @@ async function reviewActivePosition(mintAddress, positionData) {
 
         if (!promptText) throw new Error("Prompt 獲取失敗");
 
-        // 2. 呼叫 Cerebras
-        const res = await axios.post('https://api.cerebras.ai/v1/chat/completions', {
-            model: "gpt-oss-120b",
+        // 💡 修正 1: URL 換成 Mistral 官方接口
+        // 💡 修正 2: Model 換成 Mistral 的開放模型 (如 mistral-large-latest 或 pixtral-12b-2409)
+        const res = await axios.post('https://api.mistral.ai/v1/chat/completions', {
+            model: "pixtral-12b-2409", 
             messages: [{ role: "user", content: promptText }],
             response_format: { type: "json_object" }
         }, {
-            headers: { 'Authorization': `Bearer ${CEREBRAS_API_KEY}`, 'Content-Type': 'application/json' },
-            timeout: 5000
+            // 💡 修正 3: Authorization 確保對應 Mistral Key
+            headers: { 
+                'Authorization': `Bearer ${MISTRAL_API_KEY}`, 
+                'Content-Type': 'application/json' 
+            },
+            timeout: 8000 // 稍微放寬 Timeout，Mistral 免費版有時會慢少少
         });
 
-        healthMonitor.setStatus('AI_Overseer', '🟢 正常 (Cerebras)');
+        healthMonitor.setStatus('AI_Overseer', '🟢 正常 (Mistral)');
         return JSON.parse(res.data.choices[0].message.content);
     } catch (err) {
         healthMonitor.setStatus('AI_Overseer', `🔴 失效: ${err.message}`);

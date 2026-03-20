@@ -90,7 +90,7 @@ function startDatabaseNurseryMonitor() {
 
             const mint = matureTokens[0].mint_address;
             await supabase.from('nursery_pool').delete().eq('mint_address', mint); 
-            console.log(`🎣 [Nursery] 撈出成熟代幣 ${mint.substring(0,6)}... 交由保安亭處理`);
+            console.log(`🎣 [Nursery] 撈出成熟代幣 ${mint.substring(0,6)}... 交由 Security Guard 處理`);
 
             const safety = await securityGuard.checkAll(mint);
             if (!safety.isSafe) { console.log(`🛡️ [Security] 攔截: ${safety.reason}`); isProcessingBatch = false; return; }
