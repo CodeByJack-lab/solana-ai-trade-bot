@@ -78,7 +78,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     }
 
     // 🛑 核心防禦二：連輸兩次終極黑名單 (只限 Meme 新幣)
-    // 只要 strategyType 唔包含 BLUECHIP，就啟動防飛刀機制
     if (!strategyType.includes('BLUECHIP')) {
         try {
             const { data: recentTrades } = await supabase
@@ -101,7 +100,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         }
     }
 
-    // 🛑 核心防禦三：1/10 絕對安全防線 (保障 Gas 費與極端錯誤)
+    // 🛑 核心防禦三：1/10 絕對安全防線
     const safetyBufferSol = portfolio.reference_capital * 0.1;
     const requiredTotalSol = configTradeAmountSol + safetyBufferSol;
 
@@ -118,7 +117,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 報價與執行
     const quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol); 
     if (!quoteData) return false;
     
@@ -141,6 +139,15 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             strategy_type: strategyType 
         });
 
+        // 🛡️ [絕對修正 - 買入] 讀取資料庫真實餘額，精準扣數
+        const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
+        const currentBalance = isLive ? (dbConfig.live_wallet_balance || 0) : (dbConfig.simulated_balance || dbConfig.reference_capital || 10);
+        const newBalance = currentBalance - configTradeAmountSol;
+
+        await supabase.from('system_config')
+            .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
+            .eq('id', 1);
+
         await supabase.from(`active_positions_${tableSuffix}`).insert([{
             mint_address: mintAddress,
             token_symbol: tokenSymbol,
@@ -159,7 +166,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             price_sol: buyPriceSol,
             quantity: tokenQuantity,
             total_value_sol: configTradeAmountSol, 
-            post_trade_balance: portfolio.cash_sol,
+            post_trade_balance: newBalance, // 使用精確扣數後餘額
             txid: mockTxid,
             ai_factcheck_result: aiReason
         }]);
@@ -192,21 +199,14 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     const quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity);
     
     if (!quoteData) {
-        console.error(`❌ [${isLive ? 'Live' : 'Paper'} Sell] Jupiter 拒絕賣出報價，啟動死亡宣告檢查...`);
+        console.error(`❌ [${isLive ? 'Live' : 'Paper'} Sell] Jupiter 報價失敗...`);
         try {
             const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`, { timeout: 3000 });
             const pair = dexRes.data?.pairs?.find(p => p.chainId === 'solana');
-            const liq = pair?.liquidity?.usd || 0;
-            
-            if (liq < 500) {
-                console.error(`💀 [Death Protocol] ${tokenSymbol} 流動性已枯竭 ($${liq})，執行強行撇帳！`);
-                await forceWriteOff(mintAddress, "莊家撤資/流動性枯竭，強行撇帳 (-100%)");
-            } else {
-                console.error(`⚠️ [Sell] 流動性尚存 ($${liq})，但無交易路徑，暫緩賣出。`);
+            if ((pair?.liquidity?.usd || 0) < 500) {
+                await forceWriteOff(mintAddress, "流動性枯竭，強行撇帳");
             }
-        } catch (e) {
-            console.error(`⚠️ 死亡宣告檢查失敗: ${e.message}`);
-        }
+        } catch (e) {}
         return false; 
     }
     
@@ -249,26 +249,18 @@ async function forceWriteOff(mintAddress, reason) {
     if (isLive) {
         try {
             await supabase.from('graveyard_pool').insert([{
-                mint_address: pos.mint_address,
-                token_symbol: pos.token_symbol,
-                entry_price_sol: pos.entry_price_sol,
-                quantity: pos.quantity,
-                locked_rent_sol: 0.00203928, 
-                strategy_type: pos.strategy_type
+                mint_address: pos.mint_address, token_symbol: pos.token_symbol,
+                entry_price_sol: pos.entry_price_sol, quantity: pos.quantity,
+                locked_rent_sol: 0.00203928, strategy_type: pos.strategy_type
             }]);
-            console.log(`🪦 [Graveyard] (LIVE) ${pos.token_symbol || 'UNKNOWN'} 已被打入死囚牢房，鎖定 0.002 SOL 租金，等候秋後問斬。`);
-        } catch (err) {
-            console.error(`⚠️ [Graveyard] 寫入死囚牢房失敗:`, err.message);
-        }
-    } else {
-        console.log(`🪦 [Graveyard] (PAPER) 模擬模式：${pos.token_symbol || 'UNKNOWN'} 已直接撇帳，無需退租金。`);
+        } catch (err) {}
     }
 
     await commitTradeToDb(posIndex, 0, 0, -pos.entry_price_sol * pos.quantity, -100, `FORCE: ${reason}`, pos.quantity, 1.0, pos.strategy_type);
 }
 
 // ==========================================
-// 🎯 寫入數據庫 (補完 Telegram 報捷)
+// 🎯 寫入數據庫 (同步 Cache 與 DB)
 // ==========================================
 async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, finalReason, sellQuantity, sellFraction, originalStrategyType) {
     const portfolio = getPortfolio();
@@ -284,28 +276,29 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     if (sellFraction >= 0.99) {
         await supabase.from(`active_positions_${tableSuffix}`).delete().eq('mint_address', mintAddress);
     } else {
-        pos.quantity = new BigNumber(pos.quantity).minus(sellQuantity).toNumber();
-        pos.strategy_type = safeStrategyType + '_HALF_SOLD';
-        
+        const newQty = new BigNumber(pos.quantity).minus(sellQuantity).toNumber();
         await supabase.from(`active_positions_${tableSuffix}`).update({
-            quantity: pos.quantity,
-            strategy_type: pos.strategy_type
+            quantity: newQty,
+            strategy_type: safeStrategyType + '_HALF_SOLD'
         }).eq('mint_address', mintAddress);
     }
 
-    await supabase.from('system_config').update(isLive ? { live_wallet_balance: portfolio.cash_sol } : { simulated_balance: portfolio.cash_sol }).eq('id', 1);
+    // 🛡️ [絕對修正 - 賣出] 讀取資料庫真實餘額，精準加數
+    const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
+    const currentBalance = isLive ? (dbConfig.live_wallet_balance || 0) : (dbConfig.simulated_balance || dbConfig.reference_capital || 10);
+    const newBalance = currentBalance + sellValueSol;
+
+    await supabase.from('system_config')
+        .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
+        .eq('id', 1);
 
     await supabase.from(`trade_history_${tableSuffix}`).insert([{
-        token_mint: mintAddress,
-        token_symbol: pos.token_symbol,
+        token_mint: mintAddress, token_symbol: pos.token_symbol,
         action: sellFraction >= 0.99 ? 'SELL' : 'SELL_HALF',
-        strategy_type: safeStrategyType,  
-        price_sol: finalPriceSol,
-        quantity: sellQuantity,
-        total_value_sol: sellValueSol,
-        realized_pnl_sol: pnlSol,    
-        realized_pnl_pct: pnlPct,    
-        post_trade_balance: portfolio.cash_sol,
+        strategy_type: safeStrategyType, price_sol: finalPriceSol,
+        quantity: sellQuantity, total_value_sol: sellValueSol,
+        realized_pnl_sol: pnlSol, realized_pnl_pct: pnlPct,
+        post_trade_balance: newBalance, // 使用精確加數後餘額
         txid: "SELL_" + Math.random().toString(36).substring(7).toUpperCase(),
         ai_factcheck_result: finalReason
     }]);
@@ -317,26 +310,21 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         if (sellFraction < 1.0) {
             sendTelegramAlert(`${modeTag} <b>🛡️ 翻倍出本成功</b>\n🪙 代幣: $${pos.token_symbol}\n💰 收回: ${sellValueSol.toFixed(4)} SOL\n📈 PNL: ${pnlTag}`);
         } else if (sellFraction >= 0.99 && safeStrategyType.includes('HALF_SOLD')) {
-            sendTelegramAlert(`${modeTag} <b>✅ 免費抽獎倉位平倉</b>\n🪙 代幣: $${pos.token_symbol}\n💰 成交: ${sellValueSol.toFixed(4)} SOL\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
+            sendTelegramAlert(`${modeTag} <b>✅ 免費抽獎倉位平倉</b>\n🪙 代幣: $${pos.token_symbol}\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
         } else {
             sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🪙 代幣: $${pos.token_symbol}\n💰 成交: ${sellValueSol.toFixed(4)} SOL\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
         }
     }
 }
 
-// ==========================================
-// 🚀 [新增] 賣出流水線 (解決 is not a function 報錯)
-// ==========================================
 async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
     try {
         console.log(`🎬 [Pipeline] 準備賣出 ${position.token_symbol || position.mint_address.substring(0,6)}...`);
-        // 💡 呼叫已經穩定運作嘅 executeSell
         return await executeSell(position.mint_address, currentPrice, reason, fraction);
     } catch (err) {
-        console.error(`❌ [Pipeline Error] 執行崩潰:`, err.message);
+        console.error(`❌ [Pipeline Error]`, err.message);
         return false;
     }
 }
 
-// 🔑 確保呢一行包含 runSellPipeline
 module.exports = { executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline };
