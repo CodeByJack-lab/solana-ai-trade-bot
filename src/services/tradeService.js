@@ -324,4 +324,4 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     }
 }
 
-module.exports = { executeBuy, executeSell, executeSellRaydium, forceWriteOff };
+module.exports = { executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline };
