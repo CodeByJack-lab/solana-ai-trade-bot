@@ -10,7 +10,7 @@ const PRO_API_KEY = process.env.GEMINI_API_KEY;
 
 const retrospectiveJob = {
     async runAnalysis() {
-        console.log(`\n🌞 [Evolution] 啟動 12AM/PM 全自動自我進化程序...`);
+        console.log(`\n🌞 [Evolution] 啟動 12AM/PM (HKT) 全自動自我進化程序...`);
         healthMonitor.setStatus('AI_Evolution', '🟢 分析與修正中...');
 
         try {
@@ -117,8 +117,15 @@ const retrospectiveJob = {
     },
 
     start() {
-        cron.schedule('0 0,12 * * *', () => { this.runAnalysis(); });
-        console.log(`🤖 [Evolution] 全自動修正排程已啟動 (12AM & 12PM)...`);
+        // 🚀 新增 timezone 設定，確保以香港時間 (UTC+8) 為準
+        cron.schedule('0 0,12 * * *', () => { 
+            this.runAnalysis(); 
+        }, {
+            scheduled: true,
+            timezone: "Asia/Hong_Kong"
+        });
+        
+        console.log(`🤖 [Evolution] 全自動修正排程已啟動 (每日 12AM & 12PM HKT)...`);
     }
 };
 

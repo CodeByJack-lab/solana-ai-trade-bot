@@ -141,7 +141,7 @@ const consensusService = {
 
     async runBluechipConsensus(mintAddress, marketData) {
         return bluechipQueue.add(async () => {
-            console.log(`\n🏛️ [老幣 議事廳] 開始審核: ${marketData.symbol}`);
+            console.log(`\n🏛️ [主流幣 議事廳] 開始審核: ${marketData.symbol}`);
             const pStrat = await this.getPrompt('bluechip_strategist', { token_symbol: marketData.symbol, news_sentiment: '穩定' });
             
             const strategist = await callWithFallback('Strategist_Bluechip', {provider:'GOOGLE', model:'gemini-3.1-flash-lite-preview'}, {provider:'MISTRAL', model:'mistral-large-latest'}, pStrat);

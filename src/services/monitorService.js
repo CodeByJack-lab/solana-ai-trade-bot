@@ -19,6 +19,32 @@ const TARGET_PROGRAMS = ['6EF8rrecthR5Dkzon8Nwu78hrvfCKubJ14M5uBEwF6P', '675kPX9
 let isProcessingBatch = false; 
 
 // ==========================================
+// 🛡️ Helius Webhook 動態管理器 (節省 Credit 機制)
+// ==========================================
+let currentWebhookState = null; 
+
+async function toggleHeliusWebhook(targetState) {
+    if (!process.env.HELIUS_API_KEY || !process.env.HELIUS_WEBHOOK_ID) {
+        if (!process.env.HELIUS_API_KEY && targetState === false) {
+            console.warn("⚠️ 系統偵測到需要暫停 Webhook，但 .env 缺少 HELIUS_API_KEY，無法發送暫停指令！");
+        }
+        return;
+    }
+    if (currentWebhookState === targetState) return; // 避免重複呼叫
+
+    try {
+        const url = `https://api.helius.xyz/v0/webhooks/${process.env.HELIUS_WEBHOOK_ID}?api-key=${process.env.HELIUS_API_KEY}`;
+        console.log(`🔌 [Webhook Manager] 準備${targetState ? '啟動 🟢' : '暫停 🔴'} Helius Webhook...`);
+        // 使用 PATCH 切換狀態 (根據 Helius 官方文檔)
+        await axios.patch(url, { active: targetState });
+        currentWebhookState = targetState;
+        console.log(`✅ [Webhook Manager] Helius Webhook 已成功${targetState ? '啟動' : '暫停 (不再扣除 Credit)'}！`);
+    } catch (e) {
+        console.error(`❌ [Webhook Manager] 切換狀態失敗:`, e.response?.data || e.message);
+    }
+}
+
+// ==========================================
 // 🧮 離場專用技術指標計算工具
 // ==========================================
 function calculateRSI(closes, periods = 14) {
@@ -71,12 +97,32 @@ function startDatabaseNurseryMonitor() {
     setInterval(async () => {
         if (isProcessingBatch) return; 
         const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
-        if (!config || !config.is_running) return;
-
+        
+        // 1. 取得當前倉位與魚池數據
+        const { count: nurseryCount } = await supabase.from('nursery_pool').select('*', { count: 'exact', head: true });
+        const safeNurseryCount = nurseryCount || 0;
         const { maxMeme } = getPositionLimits();
-        if ((getMemeCount() + getPendingMemeCount()) >= maxMeme) {
-            healthMonitor.setStatus('Meme_Radar', '🟡 倉位或隊列已滿，暫停撈魚');
-            return; 
+        const isPositionsFull = (getMemeCount() + getPendingMemeCount()) >= maxMeme;
+
+        // 2. 系統被暫停 (Dashboard 按下暫停)
+        if (!config || !config.is_running) {
+            await toggleHeliusWebhook(false);
+            return;
+        }
+
+        // 3. 智能 Webhook 控制邏輯
+        if (isPositionsFull || safeNurseryCount >= 50) {
+            if (currentWebhookState !== false) {
+                healthMonitor.setStatus('Meme_Radar', '🟡 倉位/魚池滿，切斷 Helius 節省 Credit');
+                await toggleHeliusWebhook(false);
+            }
+            if (isPositionsFull) return; // 如果倉位滿，則不撈新魚，直接等待舊幣賣出
+        } else if (!isPositionsFull && safeNurseryCount <= 40) {
+            // 4. 倉位有吉位，且魚池 Release 返 10 個位 (<=40) -> 繼續 Webhook
+            if (currentWebhookState !== true) {
+                healthMonitor.setStatus('Meme_Radar', '🟢 魚池釋放空間，重新啟動 Helius');
+                await toggleHeliusWebhook(true);
+            }
         }
 
         healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
@@ -369,6 +415,10 @@ function startCommandListener() {
 
 function startMarketMonitor() {
     app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
+        // 🚀 新增：確保每次重啟都強制打開水閘，避免 Helius 處於永久休眠狀態
+        console.log('🔄 [System] 系統啟動，正在強制作業 Helius Webhook 重新連線...');
+        await toggleHeliusWebhook(true);
+
         startDatabaseNurseryMonitor(); 
         startWatchlistMonitor(); 
         startPositionMonitor();
