@@ -31,6 +31,9 @@ async function getDynamicPrompt(promptId, data) {
 // 🛡️ 監軍部門 (Reviewer) - 智能持倉覆核
 // 專屬 AI: Mistral (使用免費 Experiment 計劃)
 // ==========================================
+let lastMistralCall = 0;
+const MISTRAL_COOLDOWN = 3000; // 💡 強制每次 AI 請求最少隔 3 秒
+
 async function reviewActivePosition(mintAddress, positionData) {
     try {
         const promptText = await getDynamicPrompt('reviewer_overseer', {
