@@ -5,7 +5,7 @@ const { supabase } = require('../config/supabase'); // 🗄️ 引入 Supabase
 const { healthMonitor } = require('./healthMonitor');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-const CEREBRAS_API_KEY = process.env.CEREBRAS_API_KEY;
+const MISTRAL_API_KEY = process.env.MISTRAL_API_KEY;
 const REENTRY_GEMINI_KEY = process.env.REENTRY_GEMINI_API_KEY || process.env.GEMINI_API_KEY;
 
 // ==========================================
