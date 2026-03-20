@@ -67,16 +67,16 @@ function checkVolumeShrinkage(volumes) {
 }
 
 // ==========================================
-// 🚀 核心排程 (終極抗 429 批次初篩版 + 10分鐘心跳日誌)
+// 🚀 核心排程 (終極抗 429 批次初篩版 + 活躍波段參數)
 // ==========================================
 const blueChipJob = {
     start() {
-        console.log(`📈 [BlueChip Radar] 批次防限流初篩版啟動...`);
+        console.log(`📈 [BlueChip Radar] 批次防限流初篩版 (活躍波段模式) 啟動...`);
         healthMonitor.setStatus('Bluechip_Radar', '🟢 監聽中');
 
         let lastHeartbeat = Date.now(); // 💡 設立心跳計時器
 
-        // 因為做咗批次處理，只需 1 秒就問晒所有幣，所以每 60 秒行一次
+        // 每 60 秒行一次
         setInterval(async () => {
             try {
                 const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -84,23 +84,23 @@ const blueChipJob = {
 
                 const { maxBluechip } = getPositionLimits();
                 if (getBlueChipCount() >= maxBluechip) {
-                    healthMonitor.setStatus('Bluechip_Radar', '🟡 主流幣倉位已滿');
+                    healthMonitor.setStatus('Bluechip_Radar', '🟡 老幣倉位已滿');
                     return;
                 }
 
                 healthMonitor.setStatus('Bluechip_Radar', '🟢 掃苗中...');
 
-                // 💓 💡 檢查是否過了 10 分鐘，印出心跳包
+                // 💓 心跳包：每 10 分鐘報一次平安
                 const now = Date.now();
                 if (now - lastHeartbeat >= 10 * 60 * 1000) {
-                    console.log(`📡 [BlueChip Radar] Heartbeat: 系統運作正常，過去 10 分鐘大市平靜，未見主流幣暴跌觸發初篩。`);
-                    lastHeartbeat = now; // 重置計時器
+                    console.log(`📡 [BlueChip Radar] 💓 心跳包: 系統運作正常，過去 10 分鐘大市平靜，未見老幣回調觸發初篩。`);
+                    lastHeartbeat = now; 
                 }
 
                 const { data: pool } = await supabase.from('bluechip_pool').select('*').eq('is_active', true);
                 if (!pool || pool.length === 0 || !BIRDEYE_API_KEY) return;
 
-                // 💡 1. 批次向 DexScreener 索取所有主流幣報價 (1 個 Request 搞掂)
+                // 💡 1. 批次向 DexScreener 索取所有老幣報價 (1 個 Request 搞掂)
                 const mintsArray = pool.map(t => t.mint_address.trim()).filter(Boolean);
                 const chunk = mintsArray.slice(0, 30); // DexScreener 上限 30 隻
                 const mintStr = chunk.join(',');
@@ -114,24 +114,24 @@ const blueChipJob = {
                     return; 
                 }
 
-                // 💡 2. 本地極速過濾：只挑選 1小時跌穿 8% 嘅幣
+                // 💡 2. 本地極速過濾：放寬至 1小時跌穿 4% 嘅幣
                 const dipTokens = [];
                 for (const token of pool) {
                     const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === token.mint_address);
                     const h1Change = pair ? parseFloat(pair.priceChange?.h1 || 0) : 0;
                     
-                    // 跌幅超過 8% 才會被標記為抄底目標 (數值 <= -8)
-                    if (h1Change <= -8) {
+                    // 🚀 放寬：跌幅超過 4% 才會被標記為抄底目標 (原為 -8%)
+                    if (h1Change <= -4) {
                         dipTokens.push(token);
                     }
                 }
 
-                // 如果大市平靜，提早收工，0 Birdeye 消耗！
+                // 如果大市連 4% 回調都無，提早收工，0 Birdeye 消耗！
                 if (dipTokens.length === 0) return;
 
-                console.log(`🎯 [哨兵訊號] 發現 ${dipTokens.length} 隻主流幣急跌過 8%，準備啟動 Birdeye 精算...`);
+                console.log(`🎯 [哨兵訊號] 發現 ${dipTokens.length} 隻老幣回調過 4%，準備啟動 Birdeye 精算...`);
 
-                // 💡 3. 針對真係急跌嘅幣，逐隻向 Birdeye 索取 OHLCV (順序 + 強制 Sleep)
+                // 💡 3. 針對回調幣，逐隻向 Birdeye 索取 OHLCV (順序 + 強制 Sleep)
                 for (const token of dipTokens) {
                     try {
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&limit=100`, {
@@ -153,14 +153,17 @@ const blueChipJob = {
                             const macdData = calculateMACD(closes);
                             const isVolumeShrinking = checkVolumeShrinkage(volumes);
 
-                            if (rsi <= 30 && bb && currentPrice <= bb.lower && isVolumeShrinking && macdData.hist > macdData.prevHist) {
-                                console.log(`🚨 [Bluechip] ${token.token_symbol} 指標共振，移交 AI 軍師防雷...`);
+                            // 🚀 放寬：RSI 由 30 放寬至 40，觸及布林帶下軌邊緣 (1.01倍) 即可
+                            if (rsi <= 40 && bb && currentPrice <= (bb.lower * 1.01) && isVolumeShrinking && macdData.hist > macdData.prevHist) {
+                                console.log(`🚨 [Bluechip] ${token.token_symbol} 指標共振 (RSI: ${rsi.toFixed(1)})，移交 AI 軍師防雷...`);
                                 const aiDecision = await consensusService.runBluechipConsensus(token.mint_address, {
-                                    symbol: token.token_symbol, rsi, price: currentPrice, indicators: '四維共振 (Birdeye)'
+                                    symbol: token.token_symbol, rsi, price: currentPrice, indicators: '四維共振 (活躍波段)'
                                 });
                                 if (aiDecision?.buy) {
                                     await executeBuy(token.mint_address, token.token_symbol, 'BLUECHIP_SWING', 100, aiDecision.reason, config.trade_amount_sol);
                                 }
+                            } else {
+                                console.log(`ℹ️ [Bluechip] ${token.token_symbol} 未達精算門檻 (RSI: ${rsi.toFixed(1)})`);
                             }
                         }
                     } catch (e) {
