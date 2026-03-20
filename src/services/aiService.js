@@ -32,7 +32,7 @@ async function getDynamicPrompt(promptId, data) {
 // 專屬 AI: Mistral (使用免費 Experiment 計劃)
 // ==========================================
 let lastMistralCall = 0;
-const MISTRAL_COOLDOWN = 3000; // 💡 強制每次 AI 請求最少隔 3 秒
+const MISTRAL_COOLDOWN = 10000; // 💡 強制每次 AI 請求最少隔 10 秒
 
 async function reviewActivePosition(mintAddress, positionData) {
     try {
