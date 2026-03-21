@@ -382,17 +382,38 @@ function startPositionMonitor() {
                     // ==========================================
                     const now = Date.now();
                     const posAgeMins = (now - new Date(pos.created_at).getTime()) / 60000;
-                    const track = reviewTracking.get(pos.mint_address) || { lastPrice: pos.entry_price_sol, lastTime: now };
+                    
+                    // 🚀 修正 1：如果 DB 入面連 comment 都無，強制當佢已經過咗 30 分鐘，即刻做第一次 Review！
+                    const needsInitialReview = !pos.last_review_comment; 
+                    
+                    const track = reviewTracking.get(pos.mint_address) || { 
+                        lastPrice: pos.entry_price_sol, 
+                        lastTime: needsInitialReview ? 0 : now // 未 Review 過就設為 0，確保即刻觸發
+                    };
                     const changeSinceLastReview = ((currentPrice - track.lastPrice) / track.lastPrice) * 100;
                     
                     if (posAgeMins > 10) {
-                        if ((now - track.lastTime > 30 * 60 * 1000) || (Math.abs(changeSinceLastReview) >= 25) || (changeSinceLastReview <= -10)) {
+                        // 觸發條件：需要首日巡視 OR 距離上次巡視 > 30 分鐘 OR 暴升 25% OR 暴跌 10%
+                        if (needsInitialReview || (now - track.lastTime > 30 * 60 * 1000) || (Math.abs(changeSinceLastReview) >= 25) || (changeSinceLastReview <= -10)) {
+                            
+                            // 更新記憶體時間，防止重複狂 Call
                             reviewTracking.set(pos.mint_address, { lastPrice: currentPrice, lastTime: now });
+                            console.log(`🔍 [AI Overseer] 開始巡視 ${pos.token_symbol} (觸發條件達標)...`);
+                            
                             const aiReview = await reviewActivePosition(pos.mint_address, { ...pos, pnlPct });
-                            if (aiReview && aiReview.decision === 'EXIT') {
-                                console.log(`🛡️ [AI Overseer] ${pos.token_symbol} 巡視決定撤退：${aiReview.reason}`);
-                                await runSellPipeline(pos, currentPrice, `AI Reviewer 撤退: ${aiReview.reason}`, 1.0);
-                                continue; 
+                            
+                            if (aiReview && aiReview.reason) {
+                                // 🚀 修正 2：無論決定係 HOLD 定 EXIT，都即刻將 AI 嘅判斷 Sync 上 Supabase！
+                                const table = portfolio.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
+                                supabase.from(table).update({ last_review_comment: `(${aiReview.decision}) ${aiReview.reason}` }).eq('mint_address', pos.mint_address).then(()=>{});
+                                
+                                if (aiReview.decision === 'EXIT') {
+                                    console.log(`🛡️ [AI Overseer] ${pos.token_symbol} 巡視決定撤退：${aiReview.reason}`);
+                                    await runSellPipeline(pos, currentPrice, `AI Reviewer 撤退: ${aiReview.reason}`, 1.0);
+                                    continue; 
+                                } else {
+                                    console.log(`🛡️ [AI Overseer] ${pos.token_symbol} 巡視決定留守：${aiReview.reason}`);
+                                }
                             }
                         }
                     }
