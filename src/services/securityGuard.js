@@ -11,6 +11,39 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
 
 const securityGuard = {
+    // ==========================================
+    // 🧠 核心升級：本地 CPU 垃圾特徵預篩選庫 (0 API 消耗)
+    // ==========================================
+    isGarbageToken(name, symbol) {
+        const target = `${name} ${symbol}`.toLowerCase();
+        
+        // 🚨 4 大類別必斬名單
+        const badPatterns = [
+            /^unknown/i,        // 類別一：無主孤魂
+            /\.com/i,           // 類別二：釣魚網址
+            /\.io/i,
+            /\.org/i,
+            /\.xyz/i,
+            /t\.me\//i,         // 類別二：Telegram 連結
+            /test\s*token/i,    // 類別三：測試幣
+            /testnet/i,
+            /presale/i,         // 類別四：預售陷阱
+            /airdrop/i,         // 類別四：空投陷阱
+            /claim/i,           // 類別四：領取陷阱
+            /free/i,
+            /scam/i,            // 類別四：詐騙字眼
+            /fake/i,
+            /honeypot/i
+        ];
+
+        for (const pattern of badPatterns) {
+            if (pattern.test(target)) {
+                return { isGarbage: true, match: pattern.toString() };
+            }
+        }
+        return { isGarbage: false };
+    },
+
     async checkAll(mintAddress) {
         try {
             healthMonitor.setStatus('Security_Guard', '🟢 運作中');
@@ -22,9 +55,6 @@ const securityGuard = {
 
             await new Promise(r => setTimeout(r, 500));
 
-            const rugResult = await this.checkRugPull(cleanMint);
-            if (!rugResult.isSafe) return rugResult;
-
             const { data: params, error: dbErr } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
             if (dbErr) throw new Error("無法讀取動態參數");
 
@@ -34,47 +64,60 @@ const securityGuard = {
                 minRatio: params.min_liq_fdv_ratio || 0.05
             };
 
-            const marketData = await this.fetchDexData(cleanMint);
+            // 🚀 優化 1：先查 DexScreener (極速 API，用嚟做第一層 CPU Filter 嘅素材)
+            let marketData = await this.fetchDexData(cleanMint);
+            let isBlindSnipe = false;
 
             if (!marketData) {
                 const existsOnBirdeye = await this.checkBirdeyeExists(cleanMint);
                 if (existsOnBirdeye) {
                     console.log(`🎯 [Security] 觸發 0 秒盲狙模式！跳過算術題交由 AI 處理。`);
-                    return { 
-                        isSafe: true, 
-                        isBlindSnipe: true,
-                        marketData: {
-                            liquidity: "未知 (0秒盲狙，無池數據)", // 💡 坦白告訴 AI 這是高危
-                            fdv: "未知",
-                            vol5m: "未知",
-                            buys5m: "未知",
-                            sells5m: "未知",
-                            socials: "未知 (極高風險)",
-                            symbol: "BLIND_SNIPE",
-                            name: "UNKNOWN"
-                        }
+                    isBlindSnipe = true;
+                    marketData = {
+                        liquidity: "未知 (0秒盲狙，無池數據)", 
+                        fdv: "未知",
+                        vol5m: "未知",
+                        buys5m: "未知",
+                        sells5m: "未知",
+                        socials: "未知 (極高風險)",
+                        symbol: "BLIND_SNIPE",
+                        name: "UNKNOWN"
                     };
+                } else {
+                    return { isSafe: false, reason: '🛑 查無報價 (Dex/Birdeye 皆無)' };
                 }
-                return { isSafe: false, reason: '🛑 查無報價 (Dex/Birdeye 皆無)' };
+            } else {
+                // ==========================================
+                // 🛡️ 優化 2：CPU 物理防線啟動 (零 API 消耗秒殺)
+                // ==========================================
+                // 1. 垃圾名秒殺
+                const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
+                if (garbageCheck.isGarbage) {
+                    return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
+                }
+
+                // 2. 流動性與成交量秒殺
+                if (marketData.liquidity < limits.minLiq) {
+                    return { isSafe: false, reason: `📉 流動性太窮 ($${marketData.liquidity})` };
+                }
+                if (marketData.vol5m < limits.minVol) {
+                    return { isSafe: false, reason: `📉 5分量死水 ($${marketData.vol5m})` };
+                }
+                const currentRatio = marketData.fdv > 0 ? (marketData.liquidity / marketData.fdv) : 0;
+                if (currentRatio < limits.minRatio) {
+                    return { isSafe: false, reason: `📉 泡沫極大 (比例 ${(currentRatio * 100).toFixed(2)}%)` };
+                }
             }
 
-            if (marketData.liquidity < limits.minLiq) {
-                return { isSafe: false, reason: `📉 流動性太窮 ($${marketData.liquidity})` };
-            }
-            if (marketData.vol5m < limits.minVol) {
-                return { isSafe: false, reason: `📉 5分量死水 ($${marketData.vol5m})` };
-            }
-            
-            const currentRatio = marketData.fdv > 0 ? (marketData.liquidity / marketData.fdv) : 0;
-            if (currentRatio < limits.minRatio) {
-                return { isSafe: false, reason: `📉 泡沫極大 (比例 ${(currentRatio * 100).toFixed(2)}%)` };
-            }
+            // 🚀 優化 3：過關斬將留到最後嘅精英，先配得起消耗珍貴嘅 RugCheck API！
+            const rugResult = await this.checkRugPull(cleanMint);
+            if (!rugResult.isSafe) return rugResult;
 
             return { 
                 isSafe: true, 
-                isBlindSnipe: false,
+                isBlindSnipe: isBlindSnipe,
                 marketData: marketData,
-                reason: '✅ 物理防線通過'
+                reason: '✅ 物理與合約防線全數通過'
             };
 
         } catch (err) {
