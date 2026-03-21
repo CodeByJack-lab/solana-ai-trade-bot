@@ -20,6 +20,49 @@ let isProcessingBatch = false;
 
 let currentWebhookState = null; 
 
+// ==========================================
+// ⏳ 冷宮獨立倒數引擎設定 (RAM 延遲執行)
+// ==========================================
+const PURGATORY_LIMIT = 50; 
+const PURGATORY_WAIT_MS = 3 * 60 * 1000; // 3 分鐘
+let currentPurgatoryCount = 0; 
+
+async function processPurgatoryRetry(mint, symbol) {
+    setTimeout(async () => {
+        try {
+            console.log(`⏳ [Purgatory] 刑滿出冊，為 ${symbol} 進行終極審判...`);
+            
+            const marketData = await securityGuard.fetchDexData(mint);
+            const { data: params } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 1).single();
+            const minLiq = params?.min_liquidity || 10000;
+
+            if (marketData && marketData.liquidity >= minLiq) {
+                const { maxMeme } = getPositionLimits();
+                const isFull = (getMemeCount() + getPendingMemeCount()) >= maxMeme;
+
+                if (!isFull) {
+                    console.log(`✅ [Purgatory] ${symbol} 成功翻身並獲得倉位，交畀 AI 審批！`);
+                    const aiDecision = await consensusService.runMemeConsensus(mint, marketData, { isReentry: false });
+                    if (aiDecision?.buy) {
+                        const { data: config } = await supabase.from('system_config').select('trade_amount_sol').eq('id', 1).single();
+                        await executeBuy(mint, marketData.symbol, 'MEME_HUNTER', aiDecision.score, aiDecision.reason, config.trade_amount_sol);
+                    }
+                    currentPurgatoryCount--;
+                } else {
+                    console.log(`⚠️ [Purgatory] ${symbol} 池大咗但倉滿咗，回爐再坐 3 分鐘...`);
+                    processPurgatoryRetry(mint, symbol); 
+                }
+            } else {
+                console.log(`💀 [Purgatory] ${symbol} 期滿依然係窮鬼，執行處決。`);
+                currentPurgatoryCount--;
+            }
+        } catch (e) {
+            console.error(`❌ [Purgatory Error] 處理 ${symbol} 失敗:`, e.message);
+            currentPurgatoryCount--;
+        }
+    }, PURGATORY_WAIT_MS);
+}
+
 async function toggleHeliusWebhook(targetState) {
     if (!process.env.HELIUS_API_KEY || !process.env.HELIUS_WEBHOOK_ID) return;
     if (currentWebhookState === targetState) return; 
@@ -124,11 +167,28 @@ function startDatabaseNurseryMonitor() {
             if (!matureTokens || matureTokens.length === 0) { isProcessingBatch = false; return; }
 
             const mint = matureTokens[0].mint_address;
+            
+            // 🚀 核心優化：一撈上嚟即刻 Delete，保證隊列極速暢通！
             await supabase.from('nursery_pool').delete().eq('mint_address', mint); 
             console.log(`🎣 [Nursery] 撈出成熟代幣 ${mint.substring(0,6)}... 交由 Security Guard 處理`);
 
             const safety = await securityGuard.checkAll(mint);
-            if (!safety.isSafe) { console.log(`🛡️ [Security] 攔截: ${safety.reason}`); isProcessingBatch = false; return; }
+            
+            if (!safety.isSafe) { 
+                if (safety.isPurgatory && currentPurgatoryCount < PURGATORY_LIMIT) {
+                    currentPurgatoryCount++;
+                    const symbol = safety.marketData?.symbol || 'UNKNOWN';
+                    console.log(`⏳ [Purgatory] ${symbol} 緩刑中 ($${safety.marketData?.liquidity})，入 RAM 倒數。 (冷宮人數: ${currentPurgatoryCount}/${PURGATORY_LIMIT})`);
+                    
+                    processPurgatoryRetry(mint, symbol); 
+                    isProcessingBatch = false;
+                    return; 
+                }
+
+                console.log(`🛡️ [Security] 攔截: ${safety.reason}`); 
+                isProcessingBatch = false; 
+                return; 
+            }
 
             const aiDecision = await consensusService.runMemeConsensus(mint, safety.marketData, { isReentry: false });
             if (aiDecision?.buy) { await executeBuy(mint, safety.marketData.symbol, 'MEME_HUNTER', aiDecision.score, aiDecision.reason, config.trade_amount_sol); }
