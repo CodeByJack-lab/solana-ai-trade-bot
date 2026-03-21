@@ -50,14 +50,17 @@ const retrospectiveJob = {
             const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
             const { data: masterPrompt } = await supabase.from('master_auditor_prompts').select('content').eq('id', 1).single();
 
+            // 🚀 核心升級：將老幣嘅動態參數注入去大腦嘅 Prompt 入面
             let promptText = masterPrompt.content
                 .replace('{{loss_trades_data}}', JSON.stringify(badTrades.map(t => ({
                     symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type
                 }))))
-                .replace('{{current_min_liq}}', params.min_liquidity)
-                .replace('{{current_min_vol}}', params.min_vol_5m);
+                .replace('{{current_min_liq}}', params.min_liquidity || 10000)
+                .replace('{{current_min_vol}}', params.min_vol_5m || 1000)
+                .replace('{{current_bluechip_rsi}}', params.bluechip_max_rsi || 40)
+                .replace('{{current_bluechip_drop}}', params.bluechip_min_drop_pct || 2);
 
-            // 🚀 4. 動態注入需要檢討的 Prompt (無輸錢的部門，不會被檢討！)
+            // 4. 動態注入需要檢討的 Prompt 
             const { data: currentPrompts } = await supabase.from('bot_prompts').select('*');
             if (currentPrompts) {
                 let contextStr = "\n\n【當前系統使用的 AI 劇本 (僅提供有虧損的部門供你修改)】\n";
@@ -81,21 +84,31 @@ const retrospectiveJob = {
             let rawText = res.data.candidates[0].content.parts[0].text;
             const report = JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
 
-            // 6. 【自動執行 A】物理門檻修正 (🚀 核心修正：加入物理安全邊界)
+            // 6. 【自動執行 A】物理門檻修正 (包含 Meme 與 老幣)
             let paramUpdateLog = "無變動";
             if (report.recommended_params) {
                 const updates = {};
                 
-                if (report.recommended_params.min_liquidity !== undefined) {
-                    // 🔒 鎖定流動性在 5,000 到 50,000 之間
+                // Meme 幣防線
+                if (report.recommended_params.min_liquidity !== undefined && report.recommended_params.min_liquidity !== null) {
                     const rawLiq = Number(report.recommended_params.min_liquidity);
                     updates.min_liquidity = Math.max(5000, Math.min(rawLiq, 50000));
                 }
-                
-                if (report.recommended_params.min_vol_5m !== undefined) {
-                    // 🔒 鎖定 5分鐘成交量在 500 到 10,000 之間
+                if (report.recommended_params.min_vol_5m !== undefined && report.recommended_params.min_vol_5m !== null) {
                     const rawVol = Number(report.recommended_params.min_vol_5m);
                     updates.min_vol_5m = Math.max(500, Math.min(rawVol, 10000));
+                }
+
+                // 🚀 老幣防線 (抄底限制)
+                if (report.recommended_params.bluechip_max_rsi !== undefined && report.recommended_params.bluechip_max_rsi !== null) {
+                    // 🔒 鎖定老幣 RSI 喺 20 到 50 之間 (防止 AI 黐線設到 80 去追高)
+                    const rawRSI = Number(report.recommended_params.bluechip_max_rsi);
+                    updates.bluechip_max_rsi = Math.max(20, Math.min(rawRSI, 50));
+                }
+                if (report.recommended_params.bluechip_min_drop_pct !== undefined && report.recommended_params.bluechip_min_drop_pct !== null) {
+                    // 🔒 鎖定跌幅喺 1% 到 10% 之間
+                    const rawDrop = Number(report.recommended_params.bluechip_min_drop_pct);
+                    updates.bluechip_min_drop_pct = Math.max(1, Math.min(rawDrop, 10));
                 }
                 
                 if (Object.keys(updates).length > 0) {
@@ -108,7 +121,7 @@ const retrospectiveJob = {
             let promptUpdateLog = "無修正";
             
             // 🛡️ 最終防線：防止誤傷
-            if (report.target_prompt_id && report.new_prompt_content) {
+            if (report.target_prompt_id && report.new_prompt_content && report.target_prompt_id !== "null") {
                 const isIllegalUpdate = (report.target_prompt_id === 'reviewer_bluechip' && !hasBluechipLoss);
                 
                 if (isIllegalUpdate) {
@@ -140,8 +153,8 @@ const retrospectiveJob = {
             sendAdminAlert(`
 🌞 <b>[系統全自動進化完成]</b>
 📊 <b>敗因分析</b>: ${report.analysis}
-⚙️ <b>物理門檻</b>: ${paramUpdateLog}
-📝 <b>AI 劇本進化</b>: ${promptUpdateLog}
+⚙️ <b>門檻修正</b>: ${paramUpdateLog}
+📝 <b>AI劇本進化</b>: ${promptUpdateLog}
 💡 <b>修正邏輯</b>: ${report.prompt_feedback}
             `);
             
