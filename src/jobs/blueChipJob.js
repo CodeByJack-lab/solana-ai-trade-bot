@@ -78,15 +78,26 @@ function checkVolumeExpansion(volumes) {
 // ==========================================
 const blueChipJob = {
     start() {
-        console.log(`📈 [BlueChip Radar] 活躍波段雙軌模式 (抄底+突破) 啟動...`);
+        console.log(`📈 [BlueChip Radar] 活躍波段雙軌模式 (動態參數版) 啟動...`);
         healthMonitor.setStatus('Bluechip_Radar', '🟢 監聽中');
 
         let lastHeartbeat = Date.now(); 
 
         const runRoutine = async () => {
             try {
+                // 💡 1. 讀取全局設定 + 全新老幣動態參數
                 const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
                 if (!config || !config.is_running) return;
+
+                const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
+                if (!params) return;
+
+                // 提取並轉換老幣專用參數 (防止 String 格式報錯)
+                const bluechipLimits = {
+                    maxRSI: parseFloat(params.bluechip_max_rsi) || 40,
+                    minDropPct: parseFloat(params.bluechip_min_drop_pct) || 2,
+                    minVolUsd: parseFloat(params.bluechip_min_vol) || 500000
+                };
 
                 const { maxBluechip } = getPositionLimits();
                 if (getBlueChipCount() >= maxBluechip) {
@@ -118,19 +129,25 @@ const blueChipJob = {
                     await sleep(1000); 
                 }
 
-                // 💡 2. 本地極速過濾：跌幅超過 4% (抄底) OR 升幅超過 3% (突破)
+                // 💡 2. 本地極速過濾：動態跌幅 (抄底) OR 動態升幅 (突破) + 交易量底線
                 const targetTokens = [];
                 for (const token of pool) {
                     const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === token.mint_address);
                     const h1Change = pair ? parseFloat(pair.priceChange?.h1 || 0) : 0;
+                    const vol24h = pair ? parseFloat(pair.volume?.h24 || 0) : 0;
                     
-                    if (h1Change <= -4 || h1Change >= 3) {
+                    // 過濾死水幣 (交易量小過 bluechip_min_vol)
+                    if (vol24h < bluechipLimits.minVolUsd) continue;
+
+                    // 使用動態參數判斷：跌幅要大過設定值，或者升幅大過跌幅要求嘅 75%
+                    const breakoutThreshold = bluechipLimits.minDropPct * 0.75;
+                    if (h1Change <= -Math.abs(bluechipLimits.minDropPct) || h1Change >= breakoutThreshold) {
                         targetTokens.push(token);
                     }
                 }
 
                 if (targetTokens.length === 0) return;
-                console.log(`🎯 [哨兵訊號] 發現 ${targetTokens.length} 隻老幣有異動 (回調或突破)，啟動精算...`);
+                console.log(`🎯 [哨兵訊號] 發現 ${targetTokens.length} 隻老幣有異動 (回調 >= ${bluechipLimits.minDropPct}%)，啟動精算...`);
 
                 for (const token of targetTokens) {
                     try {
@@ -148,9 +165,9 @@ const blueChipJob = {
                             const bb = calculateBollingerBands(closes);
                             const macdData = calculateMACD(closes);
 
-                            // 📉 策略 A：左側抄底 (Dip)
+                            // 📉 策略 A：左側抄底 (Dip) - 使用動態 RSI 上限
                             const isVolumeShrinking = checkVolumeShrinkage(volumes);
-                            const isDip = rsi <= 40 && bb && currentPrice <= (bb.lower * 1.01) && isVolumeShrinking && macdData.hist > macdData.prevHist;
+                            const isDip = rsi <= bluechipLimits.maxRSI && bb && currentPrice <= (bb.lower * 1.01) && isVolumeShrinking && macdData.hist > macdData.prevHist;
 
                             // 📈 策略 B：右側突破 (Breakout)
                             const isVolumeExpanding = checkVolumeExpansion(volumes);
@@ -158,7 +175,7 @@ const blueChipJob = {
 
                             if (isDip || isBreakout) {
                                 const signalType = isDip ? '左側抄底' : '右側突破';
-                                console.log(`🚨 [Bluechip] ${token.token_symbol} 觸發【${signalType}】(RSI: ${rsi.toFixed(1)})，移交 AI 軍師防雷...`);
+                                console.log(`🚨 [Bluechip] ${token.token_symbol} 觸發【${signalType}】(RSI: ${rsi.toFixed(1)} < 設定值 ${bluechipLimits.maxRSI})，移交 AI 軍師防雷...`);
                                 
                                 const aiDecision = await consensusService.runBluechipConsensus(token.mint_address, {
                                     symbol: token.token_symbol, rsi, price: currentPrice, indicators: `技術面${signalType} (活躍波段)`
