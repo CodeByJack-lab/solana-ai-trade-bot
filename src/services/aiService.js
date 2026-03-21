@@ -28,16 +28,33 @@ async function getDynamicPrompt(promptId, data) {
 }
 
 // ==========================================
-// 🛡️ 監軍部門 (Reviewer) - 雙引擎備援 + 自動同步 DB
+// 🛡️ 監軍部門 (Reviewer) - 主副雙修 AI 分離
 // ==========================================
 async function reviewActivePosition(mintAddress, positionData) {
-    const promptText = await getDynamicPrompt('reviewer_overseer', {
+    // 💡 1. 判斷兵種，選擇對應的 Supabase Prompt ID
+    const isBluechip = positionData.strategy_type === 'BLUECHIP_SWING';
+    const promptId = isBluechip ? 'reviewer_bluechip' : 'reviewer_overseer';
+
+    let promptText = await getDynamicPrompt(promptId, {
         token_symbol: positionData.token_symbol,
         pnl_pct: positionData.pnlPct.toFixed(2),
         ai_reason: positionData.ai_reason
     });
 
-    if (!promptText) return { decision: "HOLD", reason: "系統維護中" };
+    // 💡 2. 防呆機制 (萬一 DB 未加，提供硬編碼備援)
+    if (!promptText && isBluechip) {
+        promptText = `你是一個專業的華爾街量化分析師，負責評估「主流幣波段交易 (Bluechip Swing)」倉位。
+目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason}
+請分析目前的技術指標是否已經破壞，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD/EXIT", "reason": "分析"}。`;
+    } else if (!promptText && !isBluechip) {
+        promptText = `你是一個專業的 AI 監軍，負責評估 Meme 幣倉位。
+目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason}
+請分析社群熱度與洗盤跡象，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD/EXIT", "reason": "分析"}。`;
+    }
+
+    // 🚀 3. 強行注入「獨立審查指令」
+    const roleName = isBluechip ? "量化分析師" : "獨立監軍";
+    promptText += `\n\n【重要任務】\n當初買入這隻幣的理由是：「${positionData.ai_reason}」。\n請你作為${roleName}，嚴格審查目前市場情況是否已經偏離這個初衷。請給出你專屬的評語，**絕對不可**直接照抄買入理由！`;
 
     let aiResult;
     let modelLabel = "";
@@ -54,7 +71,7 @@ async function reviewActivePosition(mintAddress, positionData) {
 
         aiResult = JSON.parse(res.data.choices[0].message.content);
         modelLabel = "Mistral-Small";
-        healthMonitor.setStatus('AI_Overseer', '🟢 正常 (Mistral)');
+        healthMonitor.setStatus('AI_Overseer', `🟢 正常 (${isBluechip ? '老幣' : '新幣'}分析)`);
 
     } catch (mistralErr) {
         console.warn(`⚠️ [Mistral Failed] 正在切換 Gemini 備援: ${mistralErr.message}`);
@@ -68,7 +85,7 @@ async function reviewActivePosition(mintAddress, positionData) {
             const rawText = geminiRes.data.candidates[0].content.parts[0].text;
             aiResult = JSON.parse(rawText);
             modelLabel = "Gemini-Lite";
-            healthMonitor.setStatus('AI_Overseer', '🟡 備援運作中 (Gemini Lite)');
+            healthMonitor.setStatus('AI_Overseer', `🟡 備援運作中 (${isBluechip ? '老幣' : '新幣'})`);
 
         } catch (geminiErr) {
             healthMonitor.setStatus('AI_Overseer', `🔴 雙引擎全線失效: ${geminiErr.message}`);
@@ -82,13 +99,9 @@ async function reviewActivePosition(mintAddress, positionData) {
             const tableName = positionData.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
             const finalComment = `(${modelLabel}) ${aiResult.reason}`;
 
-            // 💡 修正：同時寫入 last_review_comment 同覆蓋 ai_reason，等舊版 UI 可以直接顯示！
             await supabase
                 .from(tableName)
-                .update({ 
-                    last_review_comment: finalComment,
-                    ai_reason: finalComment 
-                })
+                .update({ last_review_comment: finalComment })
                 .eq('mint_address', mintAddress);
                 
             console.log(`✅ [Review Sync] ${positionData.token_symbol} 評語已更新至 ${tableName}`);

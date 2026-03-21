@@ -5,26 +5,22 @@ const { sendTelegramAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
 
 let pauseCooldownUntil = 0; 
+let useCoinGeckoNext = true; 
 
 const macroMonitorService = {
-    /**
-     * 💡 獲取高位回撤數據 (改用 CoinGecko 免費源)
-     * 支援 Railway 環境，無須 API Key
-     */
-    async fetchHighAndDrop(coinId) {
-        // CoinGecko 市場圖表 API: 獲取最近 1 天的數據 (包含每小時/每分鐘切片)
+    
+    // ==========================================
+    // 🌐 數據源 A：CoinGecko (時間窗約 75 分鐘)
+    // ==========================================
+    async fetchHighAndDropCoinGecko(coinId) {
         const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=1`;
-        
         const res = await axios.get(url, { timeout: 10000 });
-        
-        // prices 結構: [[timestamp, price], [timestamp, price], ...]
         const prices = res.data?.prices;
         
         if (!prices || !Array.isArray(prices) || prices.length < 15) {
-            throw new Error(`${coinId} CoinGecko 數據不足`);
+            throw new Error(`CoinGecko 數據不足 (${coinId})`);
         }
         
-        // 取得最近 15 根數據的最高點 (約等於最近 1 小時內的高位)
         const recentPrices = prices.slice(-15);
         let highestPrice = 0;
         for (const p of recentPrices) {
@@ -34,15 +30,43 @@ const macroMonitorService = {
         
         const currentPrice = parseFloat(prices[prices.length - 1][1]);
         const dropPct = ((currentPrice - highestPrice) / highestPrice) * 100;
-        
         return { currentPrice, highestPrice, dropPct };
     },
 
+    // ==========================================
+    // 🌐 數據源 B：CryptoCompare
+    // ==========================================
+    async fetchHighAndDropCryptoCompare(symbol) {
+        const fsym = symbol.replace('USDT', '');
+        // 🚀 核心修正：將 limit=15 改為 limit=75，對齊 CoinGecko 嘅 75 分鐘時間窗
+        const url = `https://min-api.cryptocompare.com/data/v2/histominute?fsym=${fsym}&tsym=USD&limit=75`;
+        const res = await axios.get(url, { timeout: 8000 });
+        
+        if (res.data?.Response === 'Error') throw new Error(`CryptoCompare 報錯: ${res.data.Message}`);
+        
+        const klines = res.data?.Data?.Data; 
+        if (!klines || !Array.isArray(klines) || klines.length === 0) {
+            throw new Error(`CryptoCompare 數據格式異常 (${symbol})`);
+        }
+        
+        let highestPrice = 0;
+        for (const k of klines) {
+            const high = parseFloat(k.high); 
+            if (high > highestPrice) highestPrice = high;
+        }
+        
+        const currentPrice = parseFloat(klines[klines.length - 1].close);
+        const dropPct = ((currentPrice - highestPrice) / highestPrice) * 100;
+        return { currentPrice, highestPrice, dropPct };
+    },
+
+    // ==========================================
+    // 🚀 主程序
+    // ==========================================
     start() {
-        console.log(`🌍 [Macro] 雙龍大盤防禦雷達運作中 (CoinGecko 數據源)...`);
+        console.log(`🌍 [Macro] 大盤防禦雷達運作中 (CoinGecko / CryptoCompare 雙源輪替模式)...`);
         healthMonitor.setStatus('Macro_Radar', '🟢 監聽中');
 
-        // 改為每 3 分鐘檢查一次，避免觸發 CoinGecko 免費版 Rate Limit (10-30 calls/min)
         setInterval(async () => {
             const now = Date.now();
             
@@ -55,24 +79,34 @@ const macroMonitorService = {
                 const { data: config } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
                 if (!config?.is_running) return;
 
-                // 同步獲取 BTC 同 SOL 數據
-                const [btcData, solData] = await Promise.all([
-                    this.fetchHighAndDrop('bitcoin'),
-                    this.fetchHighAndDrop('solana')
-                ]);
+                let btcData, solData, sourceName;
 
-                healthMonitor.setStatus('Macro_Radar', '🟢 正常');
+                if (useCoinGeckoNext) {
+                    sourceName = 'CoinGecko';
+                    [btcData, solData] = await Promise.all([
+                        this.fetchHighAndDropCoinGecko('bitcoin'),
+                        this.fetchHighAndDropCoinGecko('solana')
+                    ]);
+                } else {
+                    sourceName = 'CryptoCompare';
+                    [btcData, solData] = await Promise.all([
+                        this.fetchHighAndDropCryptoCompare('BTCUSDT'),
+                        this.fetchHighAndDropCryptoCompare('SOLUSDT')
+                    ]);
+                }
+
+                useCoinGeckoNext = !useCoinGeckoNext;
+                healthMonitor.setStatus('Macro_Radar', `🟢 正常 (來自 ${sourceName})`);
 
                 let triggered = false;
                 let alertMsg = '';
 
-                // 核心拉閘邏輯
                 if (btcData.dropPct <= -2.0) {
                     triggered = true;
-                    alertMsg = `🚨 <b>BTC 崩盤預警 (CoinGecko)</b>\n近期高位: $${btcData.highestPrice.toFixed(2)}\n最新價格: $${btcData.currentPrice.toFixed(2)}\n回撤幅度: <b>${btcData.dropPct.toFixed(2)}%</b>`;
+                    alertMsg = `🚨 <b>BTC 崩盤預警 (${sourceName})</b>\n近期高位: $${btcData.highestPrice.toFixed(2)}\n最新價格: $${btcData.currentPrice.toFixed(2)}\n回撤幅度: <b>${btcData.dropPct.toFixed(2)}%</b>`;
                 } else if (solData.dropPct <= -3.0) {
                     triggered = true;
-                    alertMsg = `🚨 <b>SOL 崩盤預警 (CoinGecko)</b>\n近期高位: $${solData.highestPrice.toFixed(2)}\n最新價格: $${solData.currentPrice.toFixed(2)}\n回撤幅度: <b>${solData.dropPct.toFixed(2)}%</b>`;
+                    alertMsg = `🚨 <b>SOL 崩盤預警 (${sourceName})</b>\n近期高位: $${solData.highestPrice.toFixed(2)}\n最新價格: $${solData.currentPrice.toFixed(2)}\n回撤幅度: <b>${solData.dropPct.toFixed(2)}%</b>`;
                 }
 
                 if (triggered) {
@@ -83,8 +117,9 @@ const macroMonitorService = {
             } catch (err) {
                 console.error(`❌ [Macro_Radar] Error: ${err.message}`);
                 healthMonitor.setStatus('Macro_Radar', `🔴 異常: ${err.message}`);
+                useCoinGeckoNext = !useCoinGeckoNext;
             }
-        }, 180000); // 180000ms = 3 分鐘
+        }, 120000); 
     }
 };
 

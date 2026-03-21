@@ -1,25 +1,33 @@
 // src/services/liveTradeService.js
-const { Keypair, VersionedTransaction } = require('@solana/web3.js');
+const { Keypair, VersionedTransaction, Transaction, SystemProgram, PublicKey } = require('@solana/web3.js');
 const { connection } = require('../config/solana');
+const { supabase } = require('../config/supabase'); // 🚀 引入 Supabase 以讀取動態設定
 const axios = require('axios');
 const path = require('path');
+const { healthMonitor } = require('./healthMonitor'); 
 
-// 🛠️ 修正 bs58 導入
 let bs58 = require('bs58');
 if (bs58.default) {
     bs58 = bs58.default;
 }
 
-// 🛡️ 載入環境變數
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-/**
- * 🔐 智能初始化錢包
- */
+// 💸 Jito 官方小費收集地址
+const JITO_TIP_ACCOUNTS = [
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvVkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iMgaSbg",
+    "DfXygSm4jcyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjv",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7QsBgTysiEwCAQtbNheJ4sBE",
+    "3AVi9Tg9Uao68XNwNmtcwEdqvLhATCq0MExeb1Z51vtv"
+];
+
 let wallet;
 try {
     const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
-    
     if (rawKey) {
         if (rawKey.startsWith('[')) {
             const Uint8ArrayKey = Uint8Array.from(JSON.parse(rawKey));
@@ -29,23 +37,18 @@ try {
             wallet = Keypair.fromSecretKey(decodedKey);
         }
         console.log(`🔑 [Live Engine] 錢包已掛載。地址: ${wallet.publicKey.toString()}`);
+        healthMonitor.setStatus('Live_Engine', '🟢 錢包已掛載 (待命)'); 
     } else {
-        console.log(`❌ [Live Engine] .env 中找不到 SOLANA_PRIVATE_KEY 變數。`);
+        healthMonitor.setStatus('Live_Engine', '🟡 模擬模式 (無私鑰)'); 
     }
 } catch (err) {
-    console.log(`⚠️ [Live Engine] 私鑰解析失敗: ${err.message}`);
+    healthMonitor.setStatus('Live_Engine', `🔴 私鑰解析失敗`); 
 }
 
-/**
- * 從 Jupiter 獲取真實交易指令
- */
 async function getJupiterSwapTransaction(quoteResponse) {
     try {
         if (!wallet) return null;
-
         const baseUrl = (process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag').replace(/\/$/, '');
-        
-        // 💡 終極修正：Swap 路由同樣必須嚴格對齊 V6 或 V1
         const endpoint = baseUrl.includes('quote-api') ? '/v6/swap' : '/swap/v1/swap';
         
         const config = { headers: {} };
@@ -68,66 +71,78 @@ async function getJupiterSwapTransaction(quoteResponse) {
     }
 }
 
-/**
- * 🚀 執行真實交易 (Jito Anti-MEV 引擎 - 由 Dashboard LIVE 模式觸發)
- */
 async function executeLiveSwapUAT(quoteResponse, action) {
-    if (!wallet) {
-        console.log(`❌ [Live Execution] 錢包未就緒，無法執行實盤操作。`);
-        return false;
-    }
+    if (!wallet) return { success: false, txid: null };
 
     console.log(`\n⚡ [Live Execution] 正在向 Jupiter 請求構建 ${action} 交易...`);
+    healthMonitor.setStatus('Live_Engine', `🟢 構建 ${action} 交易中...`); 
+
     const swapTransactionBase64 = await getJupiterSwapTransaction(quoteResponse);
-    
-    if (!swapTransactionBase64) return false;
+    if (!swapTransactionBase64) {
+        healthMonitor.setStatus('Live_Engine', '🔴 構建交易失敗'); 
+        return { success: false, txid: null };
+    }
 
     try {
-        // 1. 解碼 Base64 交易
         const swapTransactionBuf = Buffer.from(swapTransactionBase64, 'base64');
         const transaction = VersionedTransaction.deserialize(swapTransactionBuf);
-        
-        // 2. 用你的真實私鑰簽名
         transaction.sign([wallet]);
-        console.log(`✍️ [Live Execution] 交易已成功使用私鑰簽名！`);
 
-        // 3. 🔬 起飛前檢查 (Pre-flight Check)
-        // 在正式送出真金白銀前，本地模擬一次，確保交易不會直接 Failed 浪費時間
         console.log(`🔬 [Pre-flight Check] 正在本地模擬交易...`);
         const simulationResult = await connection.simulateTransaction(transaction);
-
         if (simulationResult.value.err) {
-            console.error(`❌ [Pre-flight Failed] 模擬失敗，取消送出 Jito:`, JSON.stringify(simulationResult.value.err));
-            return false;
+            console.error(`❌ [Pre-flight Failed] 模擬失敗:`, JSON.stringify(simulationResult.value.err));
+            healthMonitor.setStatus('Live_Engine', '🔴 模擬交易失敗'); 
+            return { success: false, txid: null };
         } 
         
-        console.log(`✅ [Pre-flight Success] 模擬通過，準備進入 Jito 隱私通道！`);
+        console.log(`✅ [Pre-flight Success] 模擬通過，準備打包 Jito Bundle...`);
+        healthMonitor.setStatus('Live_Engine', '🟢 送出 Jito Bundle 中...'); 
 
-        // ==========================================
-        // 🛡️ 實戰發射：經 Jito Block Engine 提交 (防夾)
-        // ==========================================
-        console.log(`🚀 [Jito Engine] 正在將真金白銀交易送出 (Anti-MEV)...`);
-        
-        const serializedTransaction = transaction.serialize();
-        const base64Tx = Buffer.from(serializedTransaction).toString('base64');
+        // 🚀 核心修正：從 Database 讀取動態小費
+        let dynamicTip = 100000; // 預設 0.0001 SOL
+        try {
+            const { data: config } = await supabase.from('system_config').select('jito_tip_lamports').eq('id', 1).single();
+            if (config && config.jito_tip_lamports) {
+                dynamicTip = Number(config.jito_tip_lamports);
+                console.log(`💸 [Jito Tip] 使用動態小費設定: ${dynamicTip} lamports`);
+            }
+        } catch (dbErr) {
+            console.warn(`⚠️ [Jito Tip] 無法讀取 DB 設定，使用保底 100000 lamports`);
+        }
 
-        // Jito Tokyo Endpoint (延遲最低)
-        const jitoUrl = 'https://mainnet.block-engine.jito.wtf/api/v1/transactions';
+        const latestBlockHash = await connection.getLatestBlockhash();
+        const tipAccount = new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]);
         
+        const tipTx = new Transaction().add(
+            SystemProgram.transfer({
+                fromPubkey: wallet.publicKey,
+                toPubkey: tipAccount,
+                lamports: dynamicTip, // 🚀 改為動態數值
+            })
+        );
+        tipTx.recentBlockhash = latestBlockHash.blockhash;
+        tipTx.feePayer = wallet.publicKey;
+        tipTx.sign(wallet);
+
+        const serializedSwapTx = bs58.encode(transaction.serialize());
+        const serializedTipTx = bs58.encode(tipTx.serialize());
+
+        const jitoUrl = 'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
         const jitoResponse = await axios.post(jitoUrl, {
             jsonrpc: "2.0",
             id: 1,
-            method: "sendTransaction",
-            params: [base64Tx, { encoding: "base64" }]
+            method: "sendBundle",
+            params: [ [serializedSwapTx, serializedTipTx] ]
         }, { headers: { 'Content-Type': 'application/json' } });
 
-        const txid = jitoResponse.data.result;
-        console.log(`✅ [Jito Success] 交易已成功送出！`);
+        const bundleId = jitoResponse.data.result;
+        console.log(`✅ [Jito Success] Bundle 已成功送出！Bundle ID: ${bundleId}`);
+
+        const txid = bs58.encode(transaction.signatures[0]);
         console.log(`🔗 追蹤連結: https://solscan.io/tx/${txid}`);
 
-        // 等待確認 (Confirm)
         console.log(`⏳ 等待區塊鏈確認...`);
-        const latestBlockHash = await connection.getLatestBlockhash();
         await connection.confirmTransaction({
             blockhash: latestBlockHash.blockhash,
             lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
@@ -135,11 +150,15 @@ async function executeLiveSwapUAT(quoteResponse, action) {
         });
         
         console.log(`🎉 [Live Trade] ${action} 交易已在鏈上確認！`);
-        return true;
+        healthMonitor.setStatus('Live_Engine', `🟢 交易確認成功`); 
+        setTimeout(() => healthMonitor.setStatus('Live_Engine', '🟢 錢包已掛載 (待命)'), 5000); 
+        
+        return { success: true, txid: txid }; 
 
     } catch (err) {
         console.error(`❌ [Live Execution] 發送或確認時發生錯誤:`, err.response?.data || err.message);
-        return false;
+        healthMonitor.setStatus('Live_Engine', '🔴 交易確認超時或失敗'); 
+        return { success: false, txid: null };
     }
 }
 

@@ -1,4 +1,4 @@
-// backend/services/tradeService.js
+// src/services/tradeService.js
 const { getPortfolio, updateCache } = require('./portfolioService');
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
@@ -14,18 +14,13 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-// ==========================================
-// 🚀 [核心] 獲取 Jupiter V6/V1 交易路徑
-// ==========================================
 async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
     try {
         let decimals = 6; 
         try {
             const supplyInfo = await connection.getTokenSupply(new PublicKey(tokenMint));
             decimals = supplyInfo.value?.decimals ?? 6; 
-        } catch (e) {
-            console.warn(`⚠️ 無法獲取 ${tokenMint} 小數點，預設使用 6`);
-        }
+        } catch (e) {}
 
         let inputMint = isBuying ? SOL_MINT : tokenMint;
         let outputMint = isBuying ? tokenMint : SOL_MINT;
@@ -55,14 +50,10 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
 
         return { pricePerToken: pricePerTokenSol, rawResponse: response.data, decimals };
     } catch (err) {
-        console.error(`❌ [Jupiter Quote] 獲取報價失敗 (${isBuying ? '買入' : '賣出'}):`, err.response?.data?.error || err.message);
         return null;
     }
 }
 
-// ==========================================
-// 🎯 核心買入執行
-// ==========================================
 async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol) {
     console.log(`\n========================================`);
     console.log(`⚡ [Execution] 啟動下單程序: 狙擊目標 ${tokenSymbol}`);
@@ -93,21 +84,14 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
                     return false;
                 }
             }
-        } catch (dbErr) {
-            console.warn(`⚠️ [Database] 檢查歷史紀錄失敗，跳過黑名單檢查。`);
-        }
+        } catch (dbErr) {}
     }
 
     const safetyBufferSol = portfolio.reference_capital * 0.1;
     const requiredTotalSol = configTradeAmountSol + safetyBufferSol;
 
     if (portfolio.cash_sol < requiredTotalSol) { 
-        const alertMsg = `🚨 <b>【資金見底警告】系統已攔截交易！</b>
-💸 現金: <b>${portfolio.cash_sol.toFixed(4)} SOL</b>
-🛒 買入所需: <b>${configTradeAmountSol.toFixed(4)} SOL</b>`;
-        
         console.log(`❌ [Execution] 餘額不足，取消開倉。`);
-        if (typeof sendAdminAlert === 'function') sendAdminAlert(alertMsg);
         return false;
     }
 
@@ -117,20 +101,21 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     const buyPriceSol = quoteData.pricePerToken;
     const tokenQuantity = new BigNumber(configTradeAmountSol).div(buyPriceSol).toNumber(); 
     let tradeSuccess = true;
-    let mockTxid = "BUY_" + Math.random().toString(36).substring(2, 8).toUpperCase();
+    let finalTxid = "BUY_" + Math.random().toString(36).substring(2, 8).toUpperCase(); 
 
     if (isLive) {
-        tradeSuccess = await executeLiveSwapUAT(quoteData.rawResponse, "BUY");
+        const liveResult = await executeLiveSwapUAT(quoteData.rawResponse, "BUY");
+        tradeSuccess = liveResult?.success || false;
+        if (tradeSuccess && liveResult?.txid) {
+            finalTxid = liveResult.txid; 
+        }
     } 
 
     if (tradeSuccess && tokenQuantity > 0) {
         updateCache('BUY', configTradeAmountSol, {
-            mint_address: mintAddress,
-            token_symbol: tokenSymbol,
-            quantity: tokenQuantity, 
-            entry_price_sol: buyPriceSol,
-            highest_price_sol: buyPriceSol, 
-            strategy_type: strategyType 
+            mint_address: mintAddress, token_symbol: tokenSymbol,
+            quantity: tokenQuantity, entry_price_sol: buyPriceSol,
+            highest_price_sol: buyPriceSol, strategy_type: strategyType 
         });
 
         const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -142,32 +127,20 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             .eq('id', 1);
 
         await supabase.from(`active_positions_${tableSuffix}`).insert([{
-            mint_address: mintAddress,
-            token_symbol: tokenSymbol,
-            strategy_type: strategyType,
-            entry_price_sol: buyPriceSol,
-            highest_price_sol: buyPriceSol, 
-            quantity: tokenQuantity, 
-            ai_reason: aiReason
+            mint_address: mintAddress, token_symbol: tokenSymbol, strategy_type: strategyType,
+            entry_price_sol: buyPriceSol, highest_price_sol: buyPriceSol, quantity: tokenQuantity, ai_reason: aiReason
         }]);
 
         await supabase.from(`trade_history_${tableSuffix}`).insert([{
-            token_mint: mintAddress,
-            token_symbol: tokenSymbol,
-            action: 'BUY',
-            strategy_type: strategyType,
-            price_sol: buyPriceSol,
-            quantity: tokenQuantity,
-            total_value_sol: configTradeAmountSol, 
-            post_trade_balance: newBalance, 
-            txid: mockTxid,
-            ai_factcheck_result: aiReason,
-            review_history: aiReason // 💡 買入時 review_history 預設為初始買入理由
+            token_mint: mintAddress, token_symbol: tokenSymbol, action: 'BUY',
+            strategy_type: strategyType, price_sol: buyPriceSol, quantity: tokenQuantity,
+            total_value_sol: configTradeAmountSol, post_trade_balance: newBalance, 
+            txid: finalTxid, ai_factcheck_result: aiReason, review_history: aiReason 
         }]);
 
         if(typeof sendTelegramAlert === 'function') {
             const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
-            sendTelegramAlert(`${modeTag} <b>✅ 買入成功</b>\n🪙 代幣: $${tokenSymbol}\n💰 投入: ${configTradeAmountSol.toFixed(4)} SOL\n🧠 理由: ${aiReason}`);
+            sendTelegramAlert(`${modeTag} <b>✅ 買入成功</b>\n🪙 代幣: $${tokenSymbol}\n💰 投入: ${configTradeAmountSol.toFixed(4)} SOL\n🔗 TX: ${isLive ? `<a href="https://solscan.io/tx/${finalTxid}">Solscan</a>` : finalTxid}\n🧠 理由: ${aiReason}`);
         }
         healthMonitor.setStatus('Trade_Engine', `🟢 最近買入 ${tokenSymbol}`);
         return true;
@@ -175,9 +148,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     return false;
 }
 
-// ==========================================
-// 🎯 核心賣出執行
-// ==========================================
 async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction = 1.0) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
@@ -193,22 +163,24 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     const quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity);
     
     if (!quoteData) {
-        console.error(`❌ [Sell] Jupiter 報價失敗...`);
         try {
             const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`, { timeout: 3000 });
             const pair = dexRes.data?.pairs?.find(p => p.chainId === 'solana');
-            if ((pair?.liquidity?.usd || 0) < 500) {
-                await forceWriteOff(mintAddress, "流動性枯竭，強行撇帳");
-            }
+            if ((pair?.liquidity?.usd || 0) < 500) await forceWriteOff(mintAddress, "流動性枯竭，強行撇帳");
         } catch (e) {}
         return false; 
     }
     
     const finalPriceSol = quoteData.pricePerToken;
     let tradeSuccess = true;
+    let finalTxid = "SELL_" + Math.random().toString(36).substring(2, 8).toUpperCase(); 
 
     if (isLive) {
-        tradeSuccess = await executeLiveSwapUAT(quoteData.rawResponse, "SELL");
+        const liveResult = await executeLiveSwapUAT(quoteData.rawResponse, "SELL");
+        tradeSuccess = liveResult?.success || false;
+        if (tradeSuccess && liveResult?.txid) {
+            finalTxid = liveResult.txid;
+        }
     }
 
     if (tradeSuccess) {
@@ -217,7 +189,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         const pnlSol = new BigNumber(sellValueSol).minus(entryTotalValue).toNumber();
         const pnlPct = new BigNumber(pnlSol).div(entryTotalValue).times(100).toNumber();
 
-        await commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, `Jupiter: ${reason}`, sellQuantity, sellFraction, pos.strategy_type);
+        await commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, `Jupiter: ${reason}`, sellQuantity, sellFraction, pos.strategy_type, finalTxid);
         return true;
     }
     return false;
@@ -244,13 +216,10 @@ async function forceWriteOff(mintAddress, reason) {
         } catch (err) {}
     }
 
-    await commitTradeToDb(posIndex, 0, 0, -pos.entry_price_sol * pos.quantity, -100, `FORCE: ${reason}`, pos.quantity, 1.0, pos.strategy_type);
+    await commitTradeToDb(posIndex, 0, 0, -pos.entry_price_sol * pos.quantity, -100, `FORCE: ${reason}`, pos.quantity, 1.0, pos.strategy_type, "FORCE_WRITE_OFF");
 }
 
-// ==========================================
-// 🎯 寫入數據庫 (同步 Cache 與 DB)
-// ==========================================
-async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, finalReason, sellQuantity, sellFraction, originalStrategyType) {
+async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, finalReason, sellQuantity, sellFraction, originalStrategyType, txid) {
     const portfolio = getPortfolio();
     const pos = portfolio.positions[posIndex];
     const mintAddress = pos.mint_address;
@@ -266,8 +235,7 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     } else {
         const newQty = new BigNumber(pos.quantity).minus(sellQuantity).toNumber();
         await supabase.from(`active_positions_${tableSuffix}`).update({
-            quantity: newQty,
-            strategy_type: safeStrategyType + '_HALF_SOLD'
+            quantity: newQty, strategy_type: safeStrategyType + '_HALF_SOLD'
         }).eq('mint_address', mintAddress);
     }
 
@@ -279,23 +247,20 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
         .eq('id', 1);
 
-    // 💡 修正位置：正確地將持倉期間嘅 AI 巡視評語寫入 review_history！
     await supabase.from(`trade_history_${tableSuffix}`).insert([{
         token_mint: mintAddress, token_symbol: pos.token_symbol,
         action: sellFraction >= 0.99 ? 'SELL' : 'SELL_HALF',
         strategy_type: safeStrategyType, price_sol: finalPriceSol,
         quantity: sellQuantity, total_value_sol: sellValueSol,
         realized_pnl_sol: pnlSol, realized_pnl_pct: pnlPct,
-        post_trade_balance: newBalance, 
-        txid: "SELL_" + Math.random().toString(36).substring(7).toUpperCase(),
-        ai_factcheck_result: finalReason,
-        review_history: pos.last_review_comment || pos.ai_reason // 👈 完美對接
+        post_trade_balance: newBalance, txid: txid,
+        ai_factcheck_result: finalReason, review_history: pos.last_review_comment || pos.ai_reason 
     }]);
 
     if(typeof sendTelegramAlert === 'function') {
         const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
         const pnlTag = pnlPct >= 0 ? `🟢 +${pnlPct.toFixed(2)}%` : `🔴 ${pnlPct.toFixed(2)}%`;
-        sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🪙 代幣: $${pos.token_symbol}\n📈 PNL: ${pnlTag}\n🧠 理由: ${finalReason}`);
+        sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🪙 代幣: $${pos.token_symbol}\n📈 PNL: ${pnlTag}\n🔗 TX: ${isLive && !txid.includes('FORCE') ? `<a href="https://solscan.io/tx/${txid}">Solscan</a>` : txid}\n🧠 理由: ${finalReason}`);
     }
 }
 
@@ -304,7 +269,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         console.log(`🎬 [Pipeline] 準備賣出 ${position.token_symbol || position.mint_address.substring(0,6)}...`);
         return await executeSell(position.mint_address, currentPrice, reason, fraction);
     } catch (err) {
-        console.error(`❌ [Pipeline Error]`, err.message);
         return false;
     }
 }

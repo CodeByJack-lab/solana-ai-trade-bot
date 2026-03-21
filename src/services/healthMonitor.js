@@ -32,10 +32,20 @@ const healthMonitor = {
     }
 };
 
-// 初始化預設狀態
+// ==========================================
+// 🛡️ 系統啟動大閱兵 (初始化所有部門預設狀態)
+// ==========================================
 healthMonitor.setStatus('Supabase_DB', '🟡 系統啟動中...');
-healthMonitor.setStatus('Meme_Radar', '🟡 等待啟動...');
+healthMonitor.setStatus('Portfolio_Cache', '🟡 讀取資金中...');
+healthMonitor.setStatus('Meme_Radar', '🟡 等待 Helius 水閘...');
 healthMonitor.setStatus('Bluechip_Radar', '🟡 等待啟動...');
-healthMonitor.setStatus('AI_Consensus', '🟡 等待啟動...');
+healthMonitor.setStatus('Macro_Radar', '🟡 雙源探測大盤中...');
+healthMonitor.setStatus('AI_Consensus', '🟡 三白劍俠就位中...');
+healthMonitor.setStatus('AI_Overseer', '🟡 AI Reviewer 就位中...');
+healthMonitor.setStatus('AI_Reentry', '🟡 接回分析就位中...');
+healthMonitor.setStatus('Security_Guard', '🟡 防線建立中...'); // 🚀 新增保安
+healthMonitor.setStatus('Trade_Engine', '🟡 交易引擎預熱中...');
+healthMonitor.setStatus('Live_Engine', '🟡 檢查錢包狀態...');  // 🚀 新增實盤引擎
+healthMonitor.setStatus('AI_Evolution', '🟡 待命中 (12AM/PM 執行)...');
 
 module.exports = { healthMonitor };

@@ -18,24 +18,15 @@ const SOL_MINT = "So11111111111111111111111111111111111111112";
 const TARGET_PROGRAMS = ['6EF8rrecthR5Dkzon8Nwu78hrvfCKubJ14M5uBEwF6P', '675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8']; 
 let isProcessingBatch = false; 
 
-// ==========================================
-// 🛡️ Helius Webhook 動態管理器 (節省 Credit 機制)
-// ==========================================
 let currentWebhookState = null; 
 
 async function toggleHeliusWebhook(targetState) {
-    if (!process.env.HELIUS_API_KEY || !process.env.HELIUS_WEBHOOK_ID) {
-        if (!process.env.HELIUS_API_KEY && targetState === false) {
-            console.warn("⚠️ 系統偵測到需要暫停 Webhook，但 .env 缺少 HELIUS_API_KEY，無法發送暫停指令！");
-        }
-        return;
-    }
-    if (currentWebhookState === targetState) return; // 避免重複呼叫
+    if (!process.env.HELIUS_API_KEY || !process.env.HELIUS_WEBHOOK_ID) return;
+    if (currentWebhookState === targetState) return; 
 
     try {
         const url = `https://api.helius.xyz/v0/webhooks/${process.env.HELIUS_WEBHOOK_ID}?api-key=${process.env.HELIUS_API_KEY}`;
         console.log(`🔌 [Webhook Manager] 準備${targetState ? '啟動 🟢' : '暫停 🔴'} Helius Webhook...`);
-        // 使用 PATCH 切換狀態 (根據 Helius 官方文檔)
         await axios.patch(url, { active: targetState });
         currentWebhookState = targetState;
         console.log(`✅ [Webhook Manager] Helius Webhook 已成功${targetState ? '啟動' : '暫停 (不再扣除 Credit)'}！`);
@@ -44,9 +35,6 @@ async function toggleHeliusWebhook(targetState) {
     }
 }
 
-// ==========================================
-// 🧮 離場專用技術指標計算工具
-// ==========================================
 function calculateRSI(closes, periods = 14) {
     if (closes.length <= periods) return 50;
     let gains = 0, losses = 0;
@@ -86,10 +74,6 @@ function calculateMACD(closes) {
     return { hist: macdLine[macdLine.length - 1] - signalLine[signalLine.length - 1], prevHist: macdLine[macdLine.length - 2] - signalLine[signalLine.length - 2] };
 }
 
-// ==========================================
-// 🌊 核心雷達監控區
-// ==========================================
-
 function startDatabaseNurseryMonitor() {
     console.log(`🐟 [Nursery Radar] 滴水式雷達已啟動 (每 10 秒撈 1 魚)...`);
     healthMonitor.setStatus('Meme_Radar', '🟢 監聽與撈魚中');
@@ -98,27 +82,23 @@ function startDatabaseNurseryMonitor() {
         if (isProcessingBatch) return; 
         const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
         
-        // 1. 取得當前倉位與魚池數據
         const { count: nurseryCount } = await supabase.from('nursery_pool').select('*', { count: 'exact', head: true });
         const safeNurseryCount = nurseryCount || 0;
         const { maxMeme } = getPositionLimits();
         const isPositionsFull = (getMemeCount() + getPendingMemeCount()) >= maxMeme;
 
-        // 2. 系統被暫停 (Dashboard 按下暫停)
         if (!config || !config.is_running) {
             await toggleHeliusWebhook(false);
             return;
         }
 
-        // 3. 智能 Webhook 控制邏輯
         if (isPositionsFull || safeNurseryCount >= 50) {
             if (currentWebhookState !== false) {
                 healthMonitor.setStatus('Meme_Radar', '🟡 倉位/魚池滿，切斷 Helius 節省 Credit');
                 await toggleHeliusWebhook(false);
             }
-            if (isPositionsFull) return; // 如果倉位滿，則不撈新魚，直接等待舊幣賣出
+            if (isPositionsFull) return; 
         } else if (!isPositionsFull && safeNurseryCount <= 40) {
-            // 4. 倉位有吉位，且魚池 Release 返 10 個位 (<=40) -> 繼續 Webhook
             if (currentWebhookState !== true) {
                 healthMonitor.setStatus('Meme_Radar', '🟢 魚池釋放空間，重新啟動 Helius');
                 await toggleHeliusWebhook(true);
@@ -218,30 +198,22 @@ async function getDexScreenerInfo(mint, retry) {
     } catch (e) { return null; }
 }
 
-// ==========================================
-// 📡 智能雙引擎【批次】報價工具 (5隻一問) - 🚀 升級至 Jupiter V3
-// ==========================================
 async function getBulkPrices(mintsArray) {
     const cleanMints = mintsArray.map(m => m.trim().replace(/\s+/g, '')).filter(Boolean);
     if (cleanMints.length === 0) return {};
 
-    // 🚀 V3 必須將 SOL_MINT 加入查詢名單，用作 USD -> SOL 嘅換算基準
     const queryIds = [...new Set([...cleanMints, SOL_MINT])].join(',');
     const priceMap = {};
 
     try {
-        // 🚀 V3 API 呼叫 (使用官方建議的 lite-api)
         const jupUrl = `https://lite-api.jup.ag/price/v3?ids=${queryIds}`;
         const jupRes = await axios.get(jupUrl, { timeout: 5000 });
         const rawData = jupRes.data?.data;
 
-        // 如果成功攞到報價，而且有 SOL 嘅美金價
         if (rawData && rawData[SOL_MINT] && rawData[SOL_MINT].usdPrice) {
             const solPriceUsd = parseFloat(rawData[SOL_MINT].usdPrice);
-            
             for (const mint of cleanMints) {
                 if (rawData[mint] && rawData[mint].usdPrice) {
-                    // 🚀 V3 換算：代幣美金價 / SOL 美金價 = Token/SOL 價格
                     priceMap[mint] = parseFloat(rawData[mint].usdPrice) / solPriceUsd;
                 }
             }
@@ -250,7 +222,6 @@ async function getBulkPrices(mintsArray) {
         console.warn(`⚠️ [Bulk Price V3] Jupiter 批次報價失敗，切換 DexScreener 備援...`);
     }
 
-    // 備援：若有幣 Jupiter 搵唔到，用 DexScreener 補底
     const missingMints = cleanMints.filter(mint => !priceMap[mint]);
     if (missingMints.length > 0) {
         try {
@@ -264,9 +235,7 @@ async function getBulkPrices(mintsArray) {
                     priceMap[mint] = parseFloat(pair.priceNative);
                 }
             }
-        } catch (e) {
-            console.warn(`⚠️ [Bulk Price] DexScreener 備援報價亦失敗。`);
-        }
+        } catch (e) {}
     }
     return priceMap;
 }
@@ -299,10 +268,7 @@ function startPositionMonitor() {
 
                 for (const pos of chunk) {
                     const currentPrice = priceMap[pos.mint_address];
-                    if (!currentPrice) {
-                        console.warn(`⚠️ [Price] 雙引擎皆無法獲取 ${pos.token_symbol} 報價，跳過本次檢查`);
-                        continue; 
-                    }
+                    if (!currentPrice) continue; 
                     
                     if (currentPrice > pos.highest_price_sol) {
                         pos.highest_price_sol = currentPrice;
@@ -313,16 +279,18 @@ function startPositionMonitor() {
                     const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
                     const drawdownPct = ((pos.highest_price_sol - currentPrice) / pos.highest_price_sol) * 100;
                     const isHalfSold = (pos.strategy_type || '').includes('HALF_SOLD');
+                    
+                    // 🚀 核心修正：使用 .includes 避免身份認同危機！
+                    const isBluechip = (pos.strategy_type || '').includes('BLUECHIP'); 
 
                     // ==========================================
-                    // 🚀 老幣技術離場邏輯 (一體化止盈止損 + 防限流)
+                    // 🚀 老幣：獨立量化技術離場邏輯 (無視 Dashboard)
                     // ==========================================
-                    if (pos.strategy_type === 'BLUECHIP_SWING') {
+                    if (isBluechip) {
                         await new Promise(r => setTimeout(r, 1500)); 
                         try {
                             const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${pos.mint_address}&type=15m&limit=30`, {
-                                headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' },
-                                timeout: 5000
+                                headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' }, timeout: 5000
                             });
                             const items = birdeyeRes.data?.data?.items || [];
                             if (items.length >= 26) {
@@ -330,21 +298,27 @@ function startPositionMonitor() {
                                 const rsi = calculateRSI(closes);
                                 const bb = calculateBollingerBands(closes);
                                 const macd = calculateMACD(closes);
+                                
                                 const isOverbought = rsi >= 75 || currentPrice >= (bb?.upper * 1.02);
                                 const isTrendBroken = currentPrice < bb?.middle && macd?.hist < 0 && macd?.hist < macd?.prevHist;
-                                if (pnlPct > 3 && isOverbought) {
-                                    await runSellPipeline(pos, currentPrice, `技術止盈 (RSI: ${rsi.toFixed(0)})`, 1.0);
-                                    continue; 
+                                
+                                if (pnlPct > 4 && isOverbought) {
+                                    await runSellPipeline(pos, currentPrice, `技術止盈 (RSI: ${rsi.toFixed(0)})`, 1.0); continue; 
                                 } else if (isTrendBroken && pnlPct < -3) {
-                                    await runSellPipeline(pos, currentPrice, `技術止損 (趨勢破壞)`, 1.0);
-                                    continue;
+                                    await runSellPipeline(pos, currentPrice, `技術止損 (趨勢破壞)`, 1.0); continue;
                                 }
                             }
-                        } catch (e) { console.warn(`⚠️ [Exit Radar] ${pos.token_symbol} Birdeye 獲取失敗: ${e.message}`); }
+                        } catch (e) { console.warn(`⚠️ [Exit Radar] ${pos.token_symbol} Birdeye 獲取失敗`); }
+
+                        if (pnlPct <= -10) { 
+                            await runSellPipeline(pos, currentPrice, `老幣專屬硬止損 (-10%)`, 1.0); continue;
+                        } else if (drawdownPct >= 15 && pnlPct > 10) { 
+                            await runSellPipeline(pos, currentPrice, `老幣高位回撤鎖盈 (-15%)`, 1.0); continue;
+                        }
                     }
 
                     // ==========================================
-                    // 👁️ AI Review 邏輯 (修正版：加入 10 分鐘新兵保護期)
+                    // 👁️ AI 監軍巡視邏輯 (加入新兵保護期)
                     // ==========================================
                     const now = Date.now();
                     const posAgeMins = (now - new Date(pos.created_at).getTime()) / 60000;
@@ -364,24 +338,32 @@ function startPositionMonitor() {
                     }
 
                     // ==========================================
-                    // 🛡️ 基本風控邏輯 (翻倍/止損/移動止盈)
+                    // 🐕 新幣 (Meme) 專屬硬風控邏輯 (受 Dashboard 控制)
                     // ==========================================
-                    let triggerSell = false; let sellReason = ""; let sellFraction = 1.0; 
-                    if (pnlPct >= 100 && !isHalfSold) {
-                        triggerSell = true; sellReason = `翻倍保本出局 (+${pnlPct.toFixed(1)}%)`; sellFraction = 0.5;
-                    } else if (pnlPct <= config.stop_loss_pct) {
-                        triggerSell = true; sellReason = `死線硬止損 (${pnlPct.toFixed(1)}%)`; sellFraction = 1.0;
-                    } else if (drawdownPct >= 30 && pnlPct > 20) { 
-                        triggerSell = true; sellReason = `高位回撤鎖盈 (-${drawdownPct.toFixed(1)}%)`; sellFraction = 1.0;
-                    }
-                    if (triggerSell) {
-                        const isSold = await runSellPipeline(pos, currentPrice, sellReason, sellFraction);
-                        if (isSold && sellFraction === 1.0) {
-                            await supabase.from('reentry_watchlist').upsert({
-                                mint_address: pos.mint_address, token_symbol: pos.token_symbol || 'UNKNOWN',
-                                sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
-                                consolidation_start_time: new Date().toISOString()
-                            }, { onConflict: 'mint_address' });
+                    if (!isBluechip) {
+                        let triggerSell = false; let sellReason = ""; let sellFraction = 1.0; 
+                        if (pnlPct >= 100 && !isHalfSold) {
+                            triggerSell = true; sellReason = `翻倍保本出局 (+${pnlPct.toFixed(1)}%)`; sellFraction = 0.5;
+                        } else if (pnlPct <= config.stop_loss_pct) {
+                            triggerSell = true; sellReason = `死線硬止損 (${pnlPct.toFixed(1)}%)`; sellFraction = 1.0;
+                        } else if (drawdownPct >= 30 && pnlPct > 20) { 
+                            triggerSell = true; sellReason = `高位回撤鎖盈 (-${drawdownPct.toFixed(1)}%)`; sellFraction = 1.0;
+                        }
+
+                        if (triggerSell) {
+                            const isSold = await runSellPipeline(pos, currentPrice, sellReason, sellFraction);
+                            if (isSold && sellFraction === 1.0) {
+                                // 🚀 核心修正：死線斬倉的幣拉黑，防接飛刀！
+                                if (!sellReason.includes('死線硬止損')) {
+                                    await supabase.from('reentry_watchlist').upsert({
+                                        mint_address: pos.mint_address, token_symbol: pos.token_symbol || 'UNKNOWN',
+                                        sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
+                                        consolidation_start_time: new Date().toISOString()
+                                    }, { onConflict: 'mint_address' });
+                                } else {
+                                    console.log(`🗑️ [風控攔截] ${pos.token_symbol} 觸發死線硬止損，已被拉黑，禁止進入橫盤接回名單！`);
+                                }
+                            }
                         }
                     }
                     await new Promise(r => setTimeout(r, 2000));
@@ -415,9 +397,9 @@ function startCommandListener() {
 
 function startMarketMonitor() {
     app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
-        // 🚀 新增：確保每次重啟都強制打開水閘，避免 Helius 處於永久休眠狀態
         console.log('🔄 [System] 系統啟動，正在強制作業 Helius Webhook 重新連線...');
         await toggleHeliusWebhook(true);
+        healthMonitor.setStatus('Trade_Engine', '🟢 正常待命');
 
         startDatabaseNurseryMonitor(); 
         startWatchlistMonitor(); 

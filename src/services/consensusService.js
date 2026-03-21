@@ -146,7 +146,7 @@ const consensusService = {
             
             const strategist = await callWithFallback('Strategist_Bluechip', {provider:'GOOGLE', model:'gemini-3.1-flash-lite-preview'}, {provider:'MISTRAL', model:'mistral-large-latest'}, pStrat);
             
-            console.log(`🧠 老幣軍師: ${strategist.decision} | 理由: ${strategist.reason}`);
+            console.log(`🧠 主流幣軍師: ${strategist.decision} | 理由: ${strategist.reason}`);
             if (strategist.decision === 'ABORT') return { buy: false, reason: `🚨 攔截: ${strategist.reason}` };
             return { buy: true, reason: `✅ 安全: ${strategist.reason}` };
         });

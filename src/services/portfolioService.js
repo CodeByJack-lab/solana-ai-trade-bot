@@ -3,7 +3,7 @@ const { supabase } = require('../config/supabase');
 const { connection } = require('../config/solana');
 const { PublicKey } = require('@solana/web3.js');
 const path = require('path');
-const { healthMonitor } = require('./healthMonitor'); // 🩺 引入健康看板
+const { healthMonitor } = require('./healthMonitor');
 
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
@@ -42,7 +42,7 @@ async function initPortfolio() {
         if (configErr) throw configErr;
 
         my_portfolio.mode = config ? (config.trade_mode || 'PAPER') : 'PAPER';
-        globalMaxPositions = config?.max_positions || 8; // 讀取總倉位上限
+        globalMaxPositions = config?.max_positions || 8; 
 
         const tableName = my_portfolio.mode === 'PAPER' ? 'active_positions_paper' : 'active_positions_live';
 
@@ -99,13 +99,13 @@ function getPortfolio() { return my_portfolio; }
 // ==========================================
 
 /**
- * 獲取動態倉位上限 (單雙數 5:5 智能分配，單數側重新幣)
+ * 獲取動態倉位上限 (採用 60% 新幣 : 40% 老幣比例)
+ * 如果總數是 5，即變成 3 新 2 老！
  */
 function getPositionLimits() {
-    return {
-        maxMeme: Math.ceil(globalMaxPositions / 2),
-        maxBluechip: Math.floor(globalMaxPositions / 2)
-    };
+    const maxMeme = Math.ceil(globalMaxPositions * 0.6); 
+    const maxBluechip = globalMaxPositions - maxMeme;
+    return { maxMeme, maxBluechip };
 }
 
 /**
