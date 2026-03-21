@@ -96,10 +96,20 @@ const securityGuard = {
                     return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
                 }
 
-                // 2. 流動性與成交量秒殺
+                // 2. 流動性與成交量秒殺及緩刑
                 if (marketData.liquidity < limits.minLiq) {
+                    // ⏳ 緩刑機制啟動：大於 $5000 但未達標
+                    if (marketData.liquidity >= 5000) {
+                        return { 
+                            isSafe: false, 
+                            isPurgatory: true, // 💡 傳送緩刑暗號
+                            reason: `⏳ 流動性緩刑 ($${marketData.liquidity})` 
+                        };
+                    }
+                    // 📉 窮過 $5000，直接死刑
                     return { isSafe: false, reason: `📉 流動性太窮 ($${marketData.liquidity})` };
                 }
+
                 if (marketData.vol5m < limits.minVol) {
                     return { isSafe: false, reason: `📉 5分量死水 ($${marketData.vol5m})` };
                 }
