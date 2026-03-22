@@ -111,8 +111,8 @@ const macroMonitorService = {
 
                 if (triggered) {
                     await supabase.from('system_config').update({ is_running: false, status_msg: '大盤暴跌自動避險中' }).eq('id', 1);
-                    sendTelegramAlert(`${alertMsg}\n\n🛑 <b>系統動作</b>: 已自動關閉新交易總掣\n⏳ <b>狀態</b>: 進入 60 分鐘冷卻期`);
-                    pauseCooldownUntil = now + (60 * 60 * 1000); 
+                    sendTelegramAlert(`${alertMsg}\n\n🛑 <b>系統動作</b>: 已自動關閉新交易總掣\n⏳ <b>狀態</b>: 進入 30 分鐘冷卻期`);
+                    pauseCooldownUntil = now + (30 * 60 * 1000); 
                 }
             } catch (err) {
                 console.error(`❌ [Macro_Radar] Error: ${err.message}`);
