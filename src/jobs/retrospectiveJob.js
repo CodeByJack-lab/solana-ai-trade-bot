@@ -14,43 +14,64 @@ const retrospectiveJob = {
         healthMonitor.setStatus('AI_Evolution', '🟢 分析與修正中...');
 
         try {
-            // 1. 獲取過去 12 小時最差的 3 張單 (優先查實盤)
             const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
-            let { data: badTrades } = await supabase
+            
+            // 1. 獲取過去 12 小時「所有」單 (優先查實盤)
+            let { data: allTrades } = await supabase
                 .from('trade_history_live')
                 .select('*')
-                .gte('created_at', twelveHoursAgo)
-                .lt('realized_pnl_sol', 0)
-                .order('realized_pnl_pct', { ascending: true })
-                .limit(3);
+                .gte('created_at', twelveHoursAgo);
 
             // 若實盤冇單，就攞 Paper 嚟復盤
-            if (!badTrades || badTrades.length === 0) {
+            if (!allTrades || allTrades.length === 0) {
                 const { data: paperTrades } = await supabase
                     .from('trade_history_paper')
                     .select('*')
-                    .gte('created_at', twelveHoursAgo)
-                    .lt('realized_pnl_sol', 0)
-                    .order('realized_pnl_pct', { ascending: true })
-                    .limit(3);
-                badTrades = paperTrades;
+                    .gte('created_at', twelveHoursAgo);
+                allTrades = paperTrades;
             }
 
-            if (!badTrades || badTrades.length === 0) {
-                console.log(`✅ [Evolution] 過去 12 小時無虧損，維持現狀。`);
+            if (!allTrades || allTrades.length === 0) {
+                console.log(`✅ [Evolution] 過去 12 小時無交易，維持現狀。`);
                 healthMonitor.setStatus('AI_Evolution', '🟢 待命中');
                 return;
             }
 
-            // 💡 2. 判斷敗因歸屬，防止誤傷老幣！
+            // 💡 2. 【核心升級】實質盈利防線 (Net PNL Gatekeeper)
+            // 計算過去 12 小時平均盈虧
+            const avgPnlPct = allTrades.reduce((sum, t) => sum + (t.realized_pnl_pct || 0), 0) / allTrades.length;
+            const HURDLE_RATE = 2.0; // 扣除 Jito/滑點後的實質盈利及格線 (例如 2%)
+
+            if (avgPnlPct >= HURDLE_RATE) {
+                const msg = `過去 12 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (已跨越 ${HURDLE_RATE}% 及格線)。\n🛡️ 系統處於「實質印鈔狀態」，為保護神仙幣基因，禁止 AI 擅改參數！`;
+                console.log(`✅ [Evolution] ${msg}`);
+                healthMonitor.setStatus('AI_Evolution', '🟢 利潤達標，休眠中');
+                sendAdminAlert(`🌞 <b>[進化防禦機制觸發]</b>\n${msg}`);
+                return; // 贏緊錢，直接收工，唔好叫 AI 出嚟搞事！
+            } else {
+                console.log(`⚠️ [Evolution] 過去 12 小時平均利潤為 ${avgPnlPct.toFixed(2)}% (未達 ${HURDLE_RATE}% 及格線)。啟動大腦檢討...`);
+            }
+
+            // 3. 既然未達標，就抽最差嗰 3 張單出嚟掟畀 AI
+            const badTrades = allTrades
+                .filter(t => t.realized_pnl_pct < 0)
+                .sort((a, b) => a.realized_pnl_pct - b.realized_pnl_pct) // 由最傷排起
+                .slice(0, 3);
+
+            if (badTrades.length === 0) {
+                console.log(`✅ [Evolution] 過去 12 小時無虧損單，維持現狀。`);
+                healthMonitor.setStatus('AI_Evolution', '🟢 待命中');
+                return;
+            }
+
+            // 4. 判斷敗因歸屬，防止誤傷老幣！
             const hasBluechipLoss = badTrades.some(t => (t.strategy_type || '').includes('BLUECHIP'));
             const hasMemeLoss = badTrades.some(t => !(t.strategy_type || '').includes('BLUECHIP'));
 
-            // 3. 獲取 Master Prompt 與當前參數 
+            // 5. 獲取 Master Prompt 與當前參數 
             const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
             const { data: masterPrompt } = await supabase.from('master_auditor_prompts').select('content').eq('id', 1).single();
 
-            // 🚀 核心升級：將老幣嘅動態參數注入去大腦嘅 Prompt 入面
             let promptText = masterPrompt.content
                 .replace('{{loss_trades_data}}', JSON.stringify(badTrades.map(t => ({
                     symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type
@@ -60,7 +81,7 @@ const retrospectiveJob = {
                 .replace('{{current_bluechip_rsi}}', params.bluechip_max_rsi || 40)
                 .replace('{{current_bluechip_drop}}', params.bluechip_min_drop_pct || 2);
 
-            // 4. 動態注入需要檢討的 Prompt 
+            // 6. 動態注入需要檢討的 Prompt 
             const { data: currentPrompts } = await supabase.from('bot_prompts').select('*');
             if (currentPrompts) {
                 let contextStr = "\n\n【當前系統使用的 AI 劇本 (僅提供有虧損的部門供你修改)】\n";
@@ -75,7 +96,7 @@ const retrospectiveJob = {
                 promptText += contextStr;
             }
 
-            // 5. 呼叫最強大腦 Gemini 3.1 Pro
+            // 7. 呼叫最強大腦 Gemini 3.1 Pro
             const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${PRO_API_KEY}`, {
                 contents: [{ role: "user", parts: [{ text: promptText }] }],
                 generationConfig: { responseMimeType: "application/json", temperature: 0.1 } 
@@ -84,31 +105,22 @@ const retrospectiveJob = {
             let rawText = res.data.candidates[0].content.parts[0].text;
             const report = JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
 
-            // 6. 【自動執行 A】物理門檻修正 (包含 Meme 與 老幣)
+            // 8. 【自動執行 A】物理門檻修正 (包含 Meme 與 老幣)
             let paramUpdateLog = "無變動";
             if (report.recommended_params) {
                 const updates = {};
                 
-                // Meme 幣防線
                 if (report.recommended_params.min_liquidity !== undefined && report.recommended_params.min_liquidity !== null) {
-                    const rawLiq = Number(report.recommended_params.min_liquidity);
-                    updates.min_liquidity = Math.max(5000, Math.min(rawLiq, 50000));
+                    updates.min_liquidity = Math.max(5000, Math.min(Number(report.recommended_params.min_liquidity), 50000));
                 }
                 if (report.recommended_params.min_vol_5m !== undefined && report.recommended_params.min_vol_5m !== null) {
-                    const rawVol = Number(report.recommended_params.min_vol_5m);
-                    updates.min_vol_5m = Math.max(500, Math.min(rawVol, 10000));
+                    updates.min_vol_5m = Math.max(500, Math.min(Number(report.recommended_params.min_vol_5m), 10000));
                 }
-
-                // 🚀 老幣防線 (抄底限制)
                 if (report.recommended_params.bluechip_max_rsi !== undefined && report.recommended_params.bluechip_max_rsi !== null) {
-                    // 🔒 鎖定老幣 RSI 喺 20 到 50 之間 (防止 AI 黐線設到 80 去追高)
-                    const rawRSI = Number(report.recommended_params.bluechip_max_rsi);
-                    updates.bluechip_max_rsi = Math.max(20, Math.min(rawRSI, 50));
+                    updates.bluechip_max_rsi = Math.max(20, Math.min(Number(report.recommended_params.bluechip_max_rsi), 50));
                 }
                 if (report.recommended_params.bluechip_min_drop_pct !== undefined && report.recommended_params.bluechip_min_drop_pct !== null) {
-                    // 🔒 鎖定跌幅喺 1% 到 10% 之間
-                    const rawDrop = Number(report.recommended_params.bluechip_min_drop_pct);
-                    updates.bluechip_min_drop_pct = Math.max(1, Math.min(rawDrop, 10));
+                    updates.bluechip_min_drop_pct = Math.max(1, Math.min(Number(report.recommended_params.bluechip_min_drop_pct), 10));
                 }
                 
                 if (Object.keys(updates).length > 0) {
@@ -117,10 +129,9 @@ const retrospectiveJob = {
                 }
             }
 
-            // 7. 【自動執行 B】AI 劇本修正 
+            // 9. 【自動執行 B】AI 劇本修正 
             let promptUpdateLog = "無修正";
             
-            // 🛡️ 最終防線：防止誤傷
             if (report.target_prompt_id && report.new_prompt_content && report.target_prompt_id !== "null") {
                 const isIllegalUpdate = (report.target_prompt_id === 'reviewer_bluechip' && !hasBluechipLoss);
                 
@@ -143,7 +154,7 @@ const retrospectiveJob = {
                 }
             }
 
-            // 8. 記錄報告與通知
+            // 10. 記錄報告與通知
             await supabase.from('daily_audit_reports').insert([{
                 analysis_content: report.analysis,
                 param_changes: report.recommended_params,
