@@ -40,7 +40,7 @@ const retrospectiveJob = {
             // 💡 2. 【核心升級】實質盈利防線 (Net PNL Gatekeeper)
             // 計算過去 12 小時平均盈虧
             const avgPnlPct = allTrades.reduce((sum, t) => sum + (t.realized_pnl_pct || 0), 0) / allTrades.length;
-            const HURDLE_RATE = 2.0; // 扣除 Jito/滑點後的實質盈利及格線 (例如 2%)
+            const HURDLE_RATE = 5.0; // 扣除 Jito/滑點後的實質盈利及格線 (例如 2%)
 
             if (avgPnlPct >= HURDLE_RATE) {
                 const msg = `過去 12 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (已跨越 ${HURDLE_RATE}% 及格線)。\n🛡️ 系統處於「實質印鈔狀態」，為保護神仙幣基因，禁止 AI 擅改參數！`;
