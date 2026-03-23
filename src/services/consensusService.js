@@ -46,14 +46,35 @@ const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 async function callProvider(provider, modelName, promptText) {
     if (provider === 'GOOGLE') {
         const model = genAI.getGenerativeModel({ model: modelName });
-        const result = await model.generateContent({
-            contents: [{ role: "user", parts: [{ text: promptText }] }],
-            generationConfig: { responseMimeType: "application/json" }
+        
+        let timeoutId;
+        // 建立 10 秒 Timeout Promise
+        const timeoutPromise = new Promise((_, reject) => {
+            timeoutId = setTimeout(() => reject(new Error(`[${modelName}] Google API 超時無回應`)), 10000);
         });
-        let rawText = result.response.text();
-        const match = rawText.match(/\{[\s\S]*\}/);
-        if (!match) throw new Error("Google API 沒有返回 JSON");
-        return JSON.parse(match[0]);
+
+        try {
+            const fetchPromise = model.generateContent({
+                contents: [{ role: "user", parts: [{ text: promptText }] }],
+                generationConfig: { responseMimeType: "application/json" }
+            });
+
+            // Promise.race: 邊個快就用邊個！10秒無反應就直接觸發 timeoutPromise 嘅 reject
+            const result = await Promise.race([fetchPromise, timeoutPromise]);
+            
+            // 如果 API 成功回覆，即刻清除 Timeout 防止 Memory Leak
+            clearTimeout(timeoutId);
+
+            let rawText = result.response.text();
+            const match = rawText.match(/\{[\s\S]*\}/);
+            if (!match) throw new Error("Google API 沒有返回 JSON");
+            return JSON.parse(match[0]);
+            
+        } catch (error) {
+            // 如果出 Error (包括 Timeout 觸發)，都要清走個計時器
+            clearTimeout(timeoutId);
+            throw error; 
+        }
     } else {
         const res = await axios.post(API_CONFIG[provider].url, {
             model: modelName,
@@ -61,7 +82,7 @@ async function callProvider(provider, modelName, promptText) {
             response_format: { type: "json_object" }
         }, {
             headers: { 'Authorization': `Bearer ${API_CONFIG[provider].key}`, 'Content-Type': 'application/json' },
-            timeout: 10000
+            timeout: 10000 // Axios 自帶 10 秒 timeout 防護
         });
         return JSON.parse(res.data.choices[0].message.content);
     }
@@ -155,5 +176,5 @@ const consensusService = {
 
 module.exports = { 
     consensusService,
-    getPendingMemeCount: () => memeQueue.queue.length // 💡 新增：獲取正在審批中的 Ghost Order 數量
+    getPendingMemeCount: () => memeQueue.queue.length
 };
