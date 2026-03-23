@@ -234,8 +234,13 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         await supabase.from(`active_positions_${tableSuffix}`).delete().eq('mint_address', mintAddress);
     } else {
         const newQty = new BigNumber(pos.quantity).minus(sellQuantity).toNumber();
+        
+        // 🚀 FIX: 必須同步更新 RAM 入面嘅數量同策略標籤，否則下次會因為餘額不足無法賣出！
+        pos.quantity = newQty;
+        pos.strategy_type = safeStrategyType + '_HALF_SOLD';
+
         await supabase.from(`active_positions_${tableSuffix}`).update({
-            quantity: newQty, strategy_type: safeStrategyType + '_HALF_SOLD'
+            quantity: newQty, strategy_type: pos.strategy_type
         }).eq('mint_address', mintAddress);
     }
 

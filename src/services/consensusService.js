@@ -48,7 +48,6 @@ async function callProvider(provider, modelName, promptText) {
         const model = genAI.getGenerativeModel({ model: modelName });
         
         let timeoutId;
-        // 建立 10 秒 Timeout Promise
         const timeoutPromise = new Promise((_, reject) => {
             timeoutId = setTimeout(() => reject(new Error(`[${modelName}] Google API 超時無回應`)), 10000);
         });
@@ -59,10 +58,7 @@ async function callProvider(provider, modelName, promptText) {
                 generationConfig: { responseMimeType: "application/json" }
             });
 
-            // Promise.race: 邊個快就用邊個！10秒無反應就直接觸發 timeoutPromise 嘅 reject
             const result = await Promise.race([fetchPromise, timeoutPromise]);
-            
-            // 如果 API 成功回覆，即刻清除 Timeout 防止 Memory Leak
             clearTimeout(timeoutId);
 
             let rawText = result.response.text();
@@ -71,7 +67,6 @@ async function callProvider(provider, modelName, promptText) {
             return JSON.parse(match[0]);
             
         } catch (error) {
-            // 如果出 Error (包括 Timeout 觸發)，都要清走個計時器
             clearTimeout(timeoutId);
             throw error; 
         }
@@ -82,7 +77,7 @@ async function callProvider(provider, modelName, promptText) {
             response_format: { type: "json_object" }
         }, {
             headers: { 'Authorization': `Bearer ${API_CONFIG[provider].key}`, 'Content-Type': 'application/json' },
-            timeout: 10000 // Axios 自帶 10 秒 timeout 防護
+            timeout: 10000 
         });
         return JSON.parse(res.data.choices[0].message.content);
     }
@@ -124,6 +119,15 @@ const consensusService = {
         return memeQueue.add(async () => {
             console.log(`\n🏛️ [Meme 議事廳] 開始審核: ${marketData.symbol || mintAddress.substring(0,6)}`);
             
+            // 🚀 FIX: 每次審核前，獲取最新嘅宏觀災難指數！
+            let currentNewsScore = 0;
+            try {
+                const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
+                currentNewsScore = config?.latest_news_score || 0;
+            } catch (e) {
+                console.warn(`⚠️ [Meme 議事廳] 無法獲取大盤災難指數，預設為 0`);
+            }
+            
             const promptData = {
                 token_symbol: marketData.symbol,
                 token_name: marketData.name,
@@ -132,7 +136,8 @@ const consensusService = {
                 buy_txs: marketData.buys5m,
                 sell_txs: marketData.sells5m,
                 social_links: marketData.socials,
-                description: options.isReentry ? "【注意：橫盤30分鐘後接回】" : "無"
+                description: options.isReentry ? "【注意：橫盤30分鐘後接回】" : "無",
+                latest_news_score: currentNewsScore // 🚀 FIX: 正式注入！
             };
 
             const [pScout, pStrat, pAudit] = await Promise.all([
@@ -162,12 +167,26 @@ const consensusService = {
 
     async runBluechipConsensus(mintAddress, marketData) {
         return bluechipQueue.add(async () => {
-            console.log(`\n🏛️ [主流幣 議事廳] 開始審核: ${marketData.symbol}`);
-            const pStrat = await this.getPrompt('bluechip_strategist', { token_symbol: marketData.symbol, news_sentiment: '穩定' });
+            console.log(`\n🏛️ [老幣 議事廳] 開始審核: ${marketData.symbol}`);
+            
+            // 🚀 FIX: 每次審核前，獲取最新嘅宏觀災難指數！
+            let currentNewsScore = 0;
+            try {
+                const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
+                currentNewsScore = config?.latest_news_score || 0;
+            } catch (e) {
+                console.warn(`⚠️ [老幣 議事廳] 無法獲取大盤災難指數，預設為 0`);
+            }
+
+            // 🚀 FIX: 將 news_sentiment 換成 latest_news_score，與 DB 完美對齊！
+            const pStrat = await this.getPrompt('bluechip_strategist', { 
+                token_symbol: marketData.symbol, 
+                latest_news_score: currentNewsScore 
+            });
             
             const strategist = await callWithFallback('Strategist_Bluechip', {provider:'GOOGLE', model:'gemini-3.1-flash-lite-preview'}, {provider:'MISTRAL', model:'mistral-large-latest'}, pStrat);
             
-            console.log(`🧠 主流幣軍師: ${strategist.decision} | 理由: ${strategist.reason}`);
+            console.log(`🧠 老幣軍師: ${strategist.decision} | 理由: ${strategist.reason}`);
             if (strategist.decision === 'ABORT') return { buy: false, reason: `🚨 攔截: ${strategist.reason}` };
             return { buy: true, reason: `✅ 安全: ${strategist.reason}` };
         });

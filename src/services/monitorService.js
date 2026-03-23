@@ -34,7 +34,13 @@ async function processPurgatoryRetry(mint, symbol) {
             
             const marketData = await securityGuard.fetchDexData(mint);
             const { data: params } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 1).single();
-            const minLiq = params?.min_liquidity || 10000;
+            const { data: config } = await supabase.from('system_config').select('trade_amount_sol, latest_news_score').eq('id', 1).single();
+            
+            let minLiq = params?.min_liquidity || 10000;
+            const newsScore = config?.latest_news_score || 0;
+            if (newsScore >= 40) {
+                minLiq = minLiq * 1.5; // 🚀 新聞差，冷宮出冊門檻都自動升高 1.5 倍
+            }
 
             if (marketData && marketData.liquidity >= minLiq) {
                 const { maxMeme } = getPositionLimits();
@@ -44,7 +50,6 @@ async function processPurgatoryRetry(mint, symbol) {
                     console.log(`✅ [Purgatory] ${symbol} 成功翻身並獲得倉位，交畀 AI 審批！`);
                     const aiDecision = await consensusService.runMemeConsensus(mint, marketData, { isReentry: false });
                     if (aiDecision?.buy) {
-                        const { data: config } = await supabase.from('system_config').select('trade_amount_sol').eq('id', 1).single();
                         await executeBuy(mint, marketData.symbol, 'MEME_HUNTER', aiDecision.score, aiDecision.reason, config.trade_amount_sol);
                     }
                     currentPurgatoryCount--;
@@ -53,7 +58,7 @@ async function processPurgatoryRetry(mint, symbol) {
                     processPurgatoryRetry(mint, symbol); 
                 }
             } else {
-                console.log(`💀 [Purgatory] ${symbol} 期滿依然係窮鬼，執行處決。`);
+                console.log(`💀 [Purgatory] ${symbol} 期滿依然窮鬼 (門檻: $${minLiq})，執行處決。`);
                 currentPurgatoryCount--;
             }
         } catch (e) {
@@ -168,7 +173,6 @@ function startDatabaseNurseryMonitor() {
 
             const mint = matureTokens[0].mint_address;
             
-            // 🚀 核心優化：一撈上嚟即刻 Delete，保證隊列極速暢通！
             await supabase.from('nursery_pool').delete().eq('mint_address', mint); 
             console.log(`🎣 [Nursery] 撈出成熟代幣 ${mint.substring(0,6)}... 交由 Security Guard 處理`);
 
@@ -188,6 +192,14 @@ function startDatabaseNurseryMonitor() {
                 console.log(`🛡️ [Security] 攔截: ${safety.reason}`); 
                 isProcessingBatch = false; 
                 return; 
+            }
+
+            // 🚀 FIX: 嚴格年齡審查！如果代幣池已經建立超過 24 小時，絕對唔當 Meme 盲狙處理！
+            const pairAgeHours = safety.marketData?.pairCreatedAt ? (Date.now() - safety.marketData.pairCreatedAt) / 3600000 : 0;
+            if (pairAgeHours > 24) {
+                console.log(`🚫 [Nursery] ${safety.marketData?.symbol} 太老 (已存在 ${pairAgeHours.toFixed(1)} 小時)，移出新幣魚池，防止老幣扮 Meme！`);
+                isProcessingBatch = false;
+                return;
             }
 
             const aiDecision = await consensusService.runMemeConsensus(mint, safety.marketData, { isReentry: false });
@@ -319,6 +331,10 @@ function startPositionMonitor() {
             
             const positionsSnapshot = [...portfolio.positions];
             const chunkSize = 5; 
+            
+            // 🚀 動態止損計算：如果新聞差，硬止損縮減一半 (例如 -10 變成 -5)
+            const newsScore = config.latest_news_score || 0;
+            const dynamicStopLoss = newsScore >= 40 ? (config.stop_loss_pct / 2) : config.stop_loss_pct;
 
             for (let i = 0; i < positionsSnapshot.length; i += chunkSize) {
                 const chunk = positionsSnapshot.slice(i, i + chunkSize);
@@ -339,12 +355,10 @@ function startPositionMonitor() {
                     const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
                     const drawdownPct = ((pos.highest_price_sol - currentPrice) / pos.highest_price_sol) * 100;
                     const isHalfSold = (pos.strategy_type || '').includes('HALF_SOLD');
-                    
-                    // 🚀 核心修正：使用 .includes 避免身份認同危機！
                     const isBluechip = (pos.strategy_type || '').includes('BLUECHIP'); 
 
                     // ==========================================
-                    // 🚀 老幣：獨立量化技術離場邏輯 (無視 Dashboard)
+                    // 🚀 老幣：獨立量化技術離場邏輯
                     // ==========================================
                     if (isBluechip) {
                         await new Promise(r => setTimeout(r, 1500)); 
@@ -370,63 +384,60 @@ function startPositionMonitor() {
                             }
                         } catch (e) { console.warn(`⚠️ [Exit Radar] ${pos.token_symbol} Birdeye 獲取失敗`); }
 
-                        if (pnlPct <= -10) { 
-                            await runSellPipeline(pos, currentPrice, `老幣專屬硬止損 (-10%)`, 1.0); continue;
+                        // 🚀 核心升級：套用動態止損
+                        if (pnlPct <= dynamicStopLoss) { 
+                            await runSellPipeline(pos, currentPrice, `老幣動態硬止損 (${dynamicStopLoss}%, 新聞指數:${newsScore})`, 1.0); continue;
                         } else if (drawdownPct >= 15 && pnlPct > 10) { 
                             await runSellPipeline(pos, currentPrice, `老幣高位回撤鎖盈 (-15%)`, 1.0); continue;
                         }
                     }
 
                     // ==========================================
-                    // 👁️ AI 監軍巡視邏輯 (加入新兵保護期)
+                    // 👁️ AI 監軍巡視邏輯 
                     // ==========================================
                     const now = Date.now();
                     const posAgeMins = (now - new Date(pos.created_at).getTime()) / 60000;
-                    
-                    // 🚀 修正 1：如果 DB 入面連 comment 都無，強制當佢已經過咗 30 分鐘，即刻做第一次 Review！
                     const needsInitialReview = !pos.last_review_comment; 
                     
                     const track = reviewTracking.get(pos.mint_address) || { 
                         lastPrice: pos.entry_price_sol, 
-                        lastTime: needsInitialReview ? 0 : now // 未 Review 過就設為 0，確保即刻觸發
+                        lastTime: needsInitialReview ? 0 : now 
                     };
                     const changeSinceLastReview = ((currentPrice - track.lastPrice) / track.lastPrice) * 100;
                     
                     if (posAgeMins > 10) {
-                        // 觸發條件：需要首日巡視 OR 距離上次巡視 > 30 分鐘 OR 暴升 25% OR 暴跌 10%
                         if (needsInitialReview || (now - track.lastTime > 30 * 60 * 1000) || (Math.abs(changeSinceLastReview) >= 25) || (changeSinceLastReview <= -10)) {
-                            
-                            // 更新記憶體時間，防止重複狂 Call
                             reviewTracking.set(pos.mint_address, { lastPrice: currentPrice, lastTime: now });
                             console.log(`🔍 [AI Overseer] 開始巡視 ${pos.token_symbol} (觸發條件達標)...`);
                             
                             const aiReview = await reviewActivePosition(pos.mint_address, { ...pos, pnlPct });
                             
                             if (aiReview && aiReview.reason) {
-                                // 🚀 修正 2：無論決定係 HOLD 定 EXIT，都即刻將 AI 嘅判斷 Sync 上 Supabase！
+                                // 🚀 FIX: 同步更新 RAM 記憶體，防止失憶症導致無限 Call API
+                                const finalCommentStr = `(${aiReview.decision}) ${aiReview.reason}`;
+                                pos.last_review_comment = finalCommentStr; 
+
                                 const table = portfolio.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
-                                supabase.from(table).update({ last_review_comment: `(${aiReview.decision}) ${aiReview.reason}` }).eq('mint_address', pos.mint_address).then(()=>{});
+                                supabase.from(table).update({ last_review_comment: finalCommentStr }).eq('mint_address', pos.mint_address).then(()=>{});
                                 
                                 if (aiReview.decision === 'EXIT') {
                                     console.log(`🛡️ [AI Overseer] ${pos.token_symbol} 巡視決定撤退：${aiReview.reason}`);
                                     await runSellPipeline(pos, currentPrice, `AI Reviewer 撤退: ${aiReview.reason}`, 1.0);
                                     continue; 
-                                } else {
-                                    console.log(`🛡️ [AI Overseer] ${pos.token_symbol} 巡視決定留守：${aiReview.reason}`);
                                 }
                             }
                         }
                     }
 
                     // ==========================================
-                    // 🐕 新幣 (Meme) 專屬硬風控邏輯 (受 Dashboard 控制)
+                    // 🐕 新幣 (Meme) 專屬硬風控邏輯
                     // ==========================================
                     if (!isBluechip) {
                         let triggerSell = false; let sellReason = ""; let sellFraction = 1.0; 
                         if (pnlPct >= 100 && !isHalfSold) {
                             triggerSell = true; sellReason = `翻倍保本出局 (+${pnlPct.toFixed(1)}%)`; sellFraction = 0.5;
-                        } else if (pnlPct <= config.stop_loss_pct) {
-                            triggerSell = true; sellReason = `死線硬止損 (${pnlPct.toFixed(1)}%)`; sellFraction = 1.0;
+                        } else if (pnlPct <= dynamicStopLoss) { // 🚀 核心升級：套用動態止損
+                            triggerSell = true; sellReason = `動態死線硬止損 (${pnlPct.toFixed(1)}%, 新聞指數:${newsScore})`; sellFraction = 1.0;
                         } else if (drawdownPct >= 30 && pnlPct > 20) { 
                             triggerSell = true; sellReason = `高位回撤鎖盈 (-${drawdownPct.toFixed(1)}%)`; sellFraction = 1.0;
                         }
@@ -434,15 +445,14 @@ function startPositionMonitor() {
                         if (triggerSell) {
                             const isSold = await runSellPipeline(pos, currentPrice, sellReason, sellFraction);
                             if (isSold && sellFraction === 1.0) {
-                                // 🚀 核心修正：死線斬倉的幣拉黑，防接飛刀！
-                                if (!sellReason.includes('死線硬止損')) {
+                                if (!sellReason.includes('硬止損')) {
                                     await supabase.from('reentry_watchlist').upsert({
                                         mint_address: pos.mint_address, token_symbol: pos.token_symbol || 'UNKNOWN',
                                         sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
                                         consolidation_start_time: new Date().toISOString()
                                     }, { onConflict: 'mint_address' });
                                 } else {
-                                    console.log(`🗑️ [風控攔截] ${pos.token_symbol} 觸發死線硬止損，已被拉黑，禁止進入橫盤接回名單！`);
+                                    console.log(`🗑️ [風控攔截] ${pos.token_symbol} 觸發止損，已被拉黑，禁止進入接回名單！`);
                                 }
                             }
                         }

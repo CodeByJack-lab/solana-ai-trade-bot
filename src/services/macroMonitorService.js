@@ -3,6 +3,7 @@ const axios = require('axios');
 const { supabase } = require('../config/supabase');
 const { sendTelegramAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
+const { newsSentimentService } = require('./newsSentimentService'); // 🚀 1. 新增：引入情報局
 
 let pauseCooldownUntil = 0; 
 let useCoinGeckoNext = true; 
@@ -38,7 +39,6 @@ const macroMonitorService = {
     // ==========================================
     async fetchHighAndDropCryptoCompare(symbol) {
         const fsym = symbol.replace('USDT', '');
-        // 🚀 核心修正：將 limit=15 改為 limit=75，對齊 CoinGecko 嘅 75 分鐘時間窗
         const url = `https://min-api.cryptocompare.com/data/v2/histominute?fsym=${fsym}&tsym=USD&limit=75`;
         const res = await axios.get(url, { timeout: 8000 });
         
@@ -64,7 +64,7 @@ const macroMonitorService = {
     // 🚀 主程序
     // ==========================================
     start() {
-        console.log(`🌍 [Macro] 大盤防禦雷達運作中 (CoinGecko / CryptoCompare 雙源輪替模式)...`);
+        console.log(`🌍 [Macro] 大盤防禦雷達運作中 (結合 AI 新聞情報局)...`);
         healthMonitor.setStatus('Macro_Radar', '🟢 監聽中');
 
         setInterval(async () => {
@@ -96,23 +96,36 @@ const macroMonitorService = {
                 }
 
                 useCoinGeckoNext = !useCoinGeckoNext;
-                healthMonitor.setStatus('Macro_Radar', `🟢 正常 (來自 ${sourceName})`);
+                healthMonitor.setStatus('Macro_Radar', `🟢 正常 (${sourceName})`);
 
-                let triggered = false;
-                let alertMsg = '';
+                let isPriceTriggered = false;
+                let priceAlertMsg = '';
 
+                // 觸發條件 (純粹價格跌幅)
                 if (btcData.dropPct <= -2.0) {
-                    triggered = true;
-                    alertMsg = `🚨 <b>BTC 崩盤預警 (${sourceName})</b>\n近期高位: $${btcData.highestPrice.toFixed(2)}\n最新價格: $${btcData.currentPrice.toFixed(2)}\n回撤幅度: <b>${btcData.dropPct.toFixed(2)}%</b>`;
+                    isPriceTriggered = true;
+                    priceAlertMsg = `BTC 回撤 <b>${btcData.dropPct.toFixed(2)}%</b> (高位 $${btcData.highestPrice.toFixed(0)})`;
                 } else if (solData.dropPct <= -3.0) {
-                    triggered = true;
-                    alertMsg = `🚨 <b>SOL 崩盤預警 (${sourceName})</b>\n近期高位: $${solData.highestPrice.toFixed(2)}\n最新價格: $${solData.currentPrice.toFixed(2)}\n回撤幅度: <b>${solData.dropPct.toFixed(2)}%</b>`;
+                    isPriceTriggered = true;
+                    priceAlertMsg = `SOL 回撤 <b>${solData.dropPct.toFixed(2)}%</b> (高位 $${solData.highestPrice.toFixed(0)})`;
                 }
 
-                if (triggered) {
-                    await supabase.from('system_config').update({ is_running: false, status_msg: '大盤暴跌自動避險中' }).eq('id', 1);
-                    sendTelegramAlert(`${alertMsg}\n\n🛑 <b>系統動作</b>: 已自動關閉新交易總掣\n⏳ <b>狀態</b>: 進入 30 分鐘冷卻期`);
-                    pauseCooldownUntil = now + (30 * 60 * 1000); 
+                // 🚀 2. 新增：當價格觸發警報，即刻 Call 情報局睇新聞做 Double Check！
+                if (isPriceTriggered) {
+                    console.log(`🚨 [Macro] 偵測到大盤急跌，立即啟動 AI 新聞查證...`);
+                    const newsScore = await newsSentimentService.getDisasterScore();
+                    
+                    // 將最新分數寫入 DB，等大腦可以睇到
+                    await supabase.from('system_config').update({ latest_news_score: newsScore }).eq('id', 1);
+
+                    // 決策邏輯：如果真係黑天鵝 (Score >= 50)，即刻拉大掣！
+                    if (newsScore >= 50) {
+                        await supabase.from('system_config').update({ is_running: false, status_msg: `黑天鵝避險 (災難指數:${newsScore})` }).eq('id', 1);
+                        sendTelegramAlert(`🚨 <b>大盤崩盤預警 + AI 災難確認</b>\n\n📉 <b>觸發:</b> ${priceAlertMsg}\n📰 <b>新聞災難指數:</b> <b>${newsScore}/100</b> (黑天鵝級別)\n\n🛑 <b>系統動作</b>: 已自動關閉新交易總掣\n⏳ <b>狀態</b>: 進入 30 分鐘冷卻期`);
+                        pauseCooldownUntil = now + (30 * 60 * 1000); 
+                    } else {
+                        console.log(`ℹ️ [Macro] AI 判斷為常規洗盤 (指數 ${newsScore})，不觸發熔斷。`);
+                    }
                 }
             } catch (err) {
                 console.error(`❌ [Macro_Radar] Error: ${err.message}`);

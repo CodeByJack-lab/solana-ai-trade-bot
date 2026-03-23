@@ -35,20 +35,32 @@ async function reviewActivePosition(mintAddress, positionData) {
     const isBluechip = positionData.strategy_type === 'BLUECHIP_SWING';
     const promptId = isBluechip ? 'reviewer_bluechip' : 'reviewer_overseer';
 
+    // 🚀 核心升級：實時獲取新聞災難指數，賦予監軍宏觀視野
+    let currentNewsScore = 0;
+    try {
+        const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
+        if (config && config.latest_news_score) {
+            currentNewsScore = config.latest_news_score;
+        }
+    } catch (e) {
+        console.warn(`⚠️ [AI Engine] 無法獲取新聞指數，預設為 0`);
+    }
+
     let promptText = await getDynamicPrompt(promptId, {
         token_symbol: positionData.token_symbol,
         pnl_pct: positionData.pnlPct.toFixed(2),
-        ai_reason: positionData.ai_reason
+        ai_reason: positionData.ai_reason,
+        latest_news_score: currentNewsScore // 🚀 注入新變數
     });
 
     // 💡 2. 防呆機制 (萬一 DB 未加，提供硬編碼備援)
     if (!promptText && isBluechip) {
-        promptText = `你是一個專業的華爾街量化分析師，負責評估「主流幣波段交易 (Bluechip Swing)」倉位。
-目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason}
+        promptText = `你是一個專業的華爾街量化分析師，負責評估「老幣波段交易 (Bluechip Swing)」倉位。
+目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason} | 大盤災難指數：${currentNewsScore}/100
 請分析目前的技術指標是否已經破壞，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD/EXIT", "reason": "分析"}。`;
     } else if (!promptText && !isBluechip) {
         promptText = `你是一個專業的 AI 監軍，負責評估 Meme 幣倉位。
-目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason}
+目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason} | 大盤災難指數：${currentNewsScore}/100
 請分析社群熱度與洗盤跡象，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD/EXIT", "reason": "分析"}。`;
     }
 

@@ -12,26 +12,25 @@ const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
 
 const securityGuard = {
     // ==========================================
-    // 🧠 核心升級：本地 CPU 垃圾特徵預篩選庫 (0 API 消耗)
+    // 🧠 核心升級：本地 CPU 垃圾特徵預篩選庫 
     // ==========================================
     isGarbageToken(name, symbol) {
         const target = `${name} ${symbol}`.toLowerCase();
         
-        // 🚨 4 大類別必斬名單
         const badPatterns = [
-            /^unknown/i,        // 類別一：無主孤魂
-            /\.com/i,           // 類別二：釣魚網址
+            /^unknown/i,        
+            /\.com/i,           
             /\.io/i,
             /\.org/i,
             /\.xyz/i,
-            /t\.me\//i,         // 類別二：Telegram 連結
-            /test\s*token/i,    // 類別三：測試幣
+            /t\.me\//i,         
+            /test\s*token/i,    
             /testnet/i,
-            /presale/i,         // 類別四：預售陷阱
-            /airdrop/i,         // 類別四：空投陷阱
-            /claim/i,           // 類別四：領取陷阱
+            /presale/i,         
+            /airdrop/i,         
+            /claim/i,           
             /free/i,
-            /scam/i,            // 類別四：詐騙字眼
+            /scam/i,            
             /fake/i,
             /honeypot/i
         ];
@@ -56,15 +55,23 @@ const securityGuard = {
             await new Promise(r => setTimeout(r, 500));
 
             const { data: params, error: dbErr } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
+            const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
             if (dbErr) throw new Error("無法讀取動態參數");
 
+            // 🚀 動態流動性門檻：大市差，要求自動提高 1.5 倍！
+            let requiredLiq = params.min_liquidity || 10000;
+            const newsScore = config?.latest_news_score || 0;
+            if (newsScore >= 40) {
+                requiredLiq = requiredLiq * 1.5;
+                console.log(`📰 [Security] 大盤災難指數 ${newsScore}，防 Rug 流動性門檻自動提升至 $${requiredLiq}`);
+            }
+
             const limits = {
-                minLiq: params.min_liquidity || 10000,
+                minLiq: requiredLiq,
                 minVol: params.min_vol_5m || 1000,
                 minRatio: params.min_liq_fdv_ratio || 0.05
             };
 
-            // 🚀 優化 1：先查 DexScreener (極速 API，用嚟做第一層 CPU Filter 嘅素材)
             let marketData = await this.fetchDexData(cleanMint);
             let isBlindSnipe = false;
 
@@ -81,33 +88,28 @@ const securityGuard = {
                         sells5m: "未知",
                         socials: "未知 (極高風險)",
                         symbol: "BLIND_SNIPE",
-                        name: "UNKNOWN"
+                        name: "UNKNOWN",
+                        pairCreatedAt: Date.now() // 🚀 FIX: 盲狙視為剛剛出生
                     };
                 } else {
                     return { isSafe: false, reason: '🛑 查無報價 (Dex/Birdeye 皆無)' };
                 }
             } else {
-                // ==========================================
-                // 🛡️ 優化 2：CPU 物理防線啟動 (零 API 消耗秒殺)
-                // ==========================================
-                // 1. 垃圾名秒殺
                 const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
                 if (garbageCheck.isGarbage) {
                     return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
                 }
 
-                // 2. 流動性與成交量秒殺及緩刑
                 if (marketData.liquidity < limits.minLiq) {
-                    // ⏳ 緩刑機制啟動：大於 $5000 但未達標
+                    // ⏳ 緩刑機制啟動
                     if (marketData.liquidity >= 5000) {
                         return { 
                             isSafe: false, 
-                            isPurgatory: true, // 💡 傳送緩刑暗號
-                            reason: `⏳ 流動性緩刑 ($${marketData.liquidity})` 
+                            isPurgatory: true, 
+                            reason: `⏳ 流動性緩刑 ($${marketData.liquidity} < $${limits.minLiq})` 
                         };
                     }
-                    // 📉 窮過 $5000，直接死刑
-                    return { isSafe: false, reason: `📉 流動性太窮 ($${marketData.liquidity})` };
+                    return { isSafe: false, reason: `📉 流動性太窮 ($${marketData.liquidity} < $${limits.minLiq})` };
                 }
 
                 if (marketData.vol5m < limits.minVol) {
@@ -119,7 +121,6 @@ const securityGuard = {
                 }
             }
 
-            // 🚀 優化 3：過關斬將留到最後嘅精英，先配得起消耗珍貴嘅 RugCheck API！
             const rugResult = await this.checkRugPull(cleanMint);
             if (!rugResult.isSafe) return rugResult;
 
@@ -209,7 +210,8 @@ const securityGuard = {
                 vol5m: pair.volume?.m5 || 0,
                 buys5m: pair.txns?.m5?.buys || 0,
                 sells5m: pair.txns?.m5?.sells || 0,
-                socials: hasSocials
+                socials: hasSocials,
+                pairCreatedAt: pair.pairCreatedAt || 0 // 🚀 FIX: 提取代幣池建立時間
             };
         } catch (err) {
             return null;

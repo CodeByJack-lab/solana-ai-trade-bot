@@ -4,9 +4,11 @@ const axios = require('axios');
 const { supabase } = require('../config/supabase');
 const { sendAdminAlert } = require('../services/telegramService'); 
 const { healthMonitor } = require('../services/healthMonitor');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
 const PRO_API_KEY = process.env.GEMINI_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY; // 🚀 董事會專用
 
 const retrospectiveJob = {
     async runAnalysis() {
@@ -16,18 +18,9 @@ const retrospectiveJob = {
         try {
             const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
             
-            // 1. 獲取過去 12 小時「所有」單 (優先查實盤)
-            let { data: allTrades } = await supabase
-                .from('trade_history_live')
-                .select('*')
-                .gte('created_at', twelveHoursAgo);
-
-            // 若實盤冇單，就攞 Paper 嚟復盤
+            let { data: allTrades } = await supabase.from('trade_history_live').select('*').gte('created_at', twelveHoursAgo);
             if (!allTrades || allTrades.length === 0) {
-                const { data: paperTrades } = await supabase
-                    .from('trade_history_paper')
-                    .select('*')
-                    .gte('created_at', twelveHoursAgo);
+                const { data: paperTrades } = await supabase.from('trade_history_paper').select('*').gte('created_at', twelveHoursAgo);
                 allTrades = paperTrades;
             }
 
@@ -37,42 +30,52 @@ const retrospectiveJob = {
                 return;
             }
 
-            // 💡 2. 【核心升級】實質盈利防線 (Net PNL Gatekeeper)
-            // 計算過去 12 小時平均盈虧
             const avgPnlPct = allTrades.reduce((sum, t) => sum + (t.realized_pnl_pct || 0), 0) / allTrades.length;
-            const HURDLE_RATE = 5.0; // 扣除 Jito/滑點後的實質盈利及格線 (例如 2%)
+            const HURDLE_RATE = 5.0; 
 
             if (avgPnlPct >= HURDLE_RATE) {
-                const msg = `過去 12 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (已跨越 ${HURDLE_RATE}% 及格線)。\n🛡️ 系統處於「實質印鈔狀態」，為保護神仙幣基因，禁止 AI 擅改參數！`;
+                const msg = `過去 12 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (已跨越 ${HURDLE_RATE}% 及格線)。\n🛡️ 系統處於「實質印鈔狀態」，禁止 AI 擅改參數！`;
                 console.log(`✅ [Evolution] ${msg}`);
                 healthMonitor.setStatus('AI_Evolution', '🟢 利潤達標，休眠中');
                 sendAdminAlert(`🌞 <b>[進化防禦機制觸發]</b>\n${msg}`);
-                return; // 贏緊錢，直接收工，唔好叫 AI 出嚟搞事！
-            } else {
-                console.log(`⚠️ [Evolution] 過去 12 小時平均利潤為 ${avgPnlPct.toFixed(2)}% (未達 ${HURDLE_RATE}% 及格線)。啟動大腦檢討...`);
+                return; 
             }
 
-            // 3. 既然未達標，就抽最差嗰 3 張單出嚟掟畀 AI
-            const badTrades = allTrades
-                .filter(t => t.realized_pnl_pct < 0)
-                .sort((a, b) => a.realized_pnl_pct - b.realized_pnl_pct) // 由最傷排起
-                .slice(0, 3);
-
+            const badTrades = allTrades.filter(t => t.realized_pnl_pct < 0).sort((a, b) => a.realized_pnl_pct - b.realized_pnl_pct).slice(0, 3);
             if (badTrades.length === 0) {
-                console.log(`✅ [Evolution] 過去 12 小時無虧損單，維持現狀。`);
+                console.log(`✅ [Evolution] 無虧損單，維持現狀。`);
                 healthMonitor.setStatus('AI_Evolution', '🟢 待命中');
                 return;
             }
 
-            // 4. 判斷敗因歸屬，防止誤傷老幣！
+            // ==========================================
+            // 🚀 核心升級 1：獲取「上次修改紀錄」建立反饋迴圈 (加入 VETO 嚴厲警告)
+            // ==========================================
+            const { data: lastAudit } = await supabase.from('daily_audit_reports').select('*').order('created_at', { ascending: false }).limit(1).single();
+            let lastAuditText = "無歷史紀錄 (這是你第一次執行進化)。";
+            
+            if (lastAudit) {
+                lastAuditText = `【上次你給出的敗因分析】: ${lastAudit.analysis_content}\n`;
+                
+                // 🛑 如果上次被董事會否決，給予強烈警告！
+                if (lastAudit.param_changes && lastAudit.param_changes.status === 'VETOED') {
+                    lastAuditText += `\n⚠️ 【嚴重警告：上次你提出的進化提案被「獨立風控董事會」強力否決！】\n`;
+                    lastAuditText += `【被否決的詳細原因】: ${lastAudit.prompt_changes}\n`;
+                    lastAuditText += `(💡 核心指令：請仔細閱讀上述否決原因！你上次的提案過於危險或充滿邏輯漏洞，本次提案絕對不能再犯同樣的錯誤！)\n`;
+                } else {
+                    lastAuditText += `【上次你修改的參數】: ${JSON.stringify(lastAudit.param_changes)}\n`;
+                    lastAuditText += `【上次你修改的Prompt紀錄】: ${JSON.stringify(lastAudit.prompt_changes)}\n`;
+                }
+            }
+
             const hasBluechipLoss = badTrades.some(t => (t.strategy_type || '').includes('BLUECHIP'));
             const hasMemeLoss = badTrades.some(t => !(t.strategy_type || '').includes('BLUECHIP'));
 
-            // 5. 獲取 Master Prompt 與當前參數 
             const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
             const { data: masterPrompt } = await supabase.from('master_auditor_prompts').select('content').eq('id', 1).single();
 
             let promptText = masterPrompt.content
+                .replace('{{last_audit_record}}', lastAuditText) 
                 .replace('{{loss_trades_data}}', JSON.stringify(badTrades.map(t => ({
                     symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type
                 }))))
@@ -81,7 +84,6 @@ const retrospectiveJob = {
                 .replace('{{current_bluechip_rsi}}', params.bluechip_max_rsi || 40)
                 .replace('{{current_bluechip_drop}}', params.bluechip_min_drop_pct || 2);
 
-            // 6. 動態注入需要檢討的 Prompt 
             const { data: currentPrompts } = await supabase.from('bot_prompts').select('*');
             if (currentPrompts) {
                 let contextStr = "\n\n【當前系統使用的 AI 劇本 (僅提供有虧損的部門供你修改)】\n";
@@ -96,7 +98,7 @@ const retrospectiveJob = {
                 promptText += contextStr;
             }
 
-            // 7. 呼叫最強大腦 Gemini 3.1 Pro
+            console.log(`🧠 [Evolution] 正在呼叫 Master AI (Gemini Pro) 撰寫進化提案...`);
             const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${PRO_API_KEY}`, {
                 contents: [{ role: "user", parts: [{ text: promptText }] }],
                 generationConfig: { responseMimeType: "application/json", temperature: 0.1 } 
@@ -105,23 +107,66 @@ const retrospectiveJob = {
             let rawText = res.data.candidates[0].content.parts[0].text;
             const report = JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
 
-            // 8. 【自動執行 A】物理門檻修正 (包含 Meme 與 老幣)
-            let paramUpdateLog = "無變動";
-            if (report.recommended_params) {
-                const updates = {};
+            // ==========================================
+            // ⚖️ 核心升級 2：第三方董事會審查 (Groq 8B 降級防爆 Limit)
+            // ==========================================
+            let isVetoed = false;
+            let boardComment = "✅ 董事會無異議通過";
+
+            if (report.target_prompt_id && report.new_prompt_content && report.target_prompt_id !== "null") {
+                console.log(`⚖️ [Board of Directors] Master AI 提出修改 ${report.target_prompt_id}，正在交由 Groq 董事會審批...`);
                 
-                if (report.recommended_params.min_liquidity !== undefined && report.recommended_params.min_liquidity !== null) {
-                    updates.min_liquidity = Math.max(5000, Math.min(Number(report.recommended_params.min_liquidity), 50000));
+                const auditorPrompt = `你是量化基金的「獨立風控董事會」。首席 AI 剛剛針對近期的虧損，提出了一份系統升級提案。
+【首席 AI 的敗因分析】: ${report.analysis}
+【它企圖修改的 Prompt ID】: ${report.target_prompt_id}
+【它寫出的新 Prompt 內容】: ${report.new_prompt_content}
+
+【你的任務】審查這個新 Prompt 是否安全。
+1. 如果它移除了止損邏輯、鼓勵盲目重倉、或出現邏輯矛盾，請果斷回覆 VETO。
+2. 如果邏輯合理、防禦性足夠、且對症下藥，請回覆 PASS。
+請只回傳 JSON: {"decision": "PASS" 或 "VETO", "reason": "50字內的審查意見"}`;
+
+                try {
+                    // 🚀 降級使用 8B 模型，TPM 額度大增，極難撞 Rate Limit！
+                    const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+                        model: "llama-3.1-8b-instant", 
+                        messages: [{ role: "user", content: auditorPrompt }],
+                        response_format: { type: "json_object" },
+                        temperature: 0.1
+                    }, { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 10000 });
+
+                    const boardDecision = JSON.parse(groqRes.data.choices[0].message.content);
+                    if (boardDecision.decision === 'VETO') {
+                        isVetoed = true;
+                        boardComment = `❌ 董事會否決提案: ${boardDecision.reason}`;
+                        console.log(`🚨 [Board of Directors] 提案被否決！原因: ${boardDecision.reason}`);
+                    } else {
+                        boardComment = `✅ 董事會批准: ${boardDecision.reason}`;
+                        console.log(`✅ [Board of Directors] 提案獲批！`);
+                    }
+                } catch (boardErr) {
+                    // 🛡️ 防禦 Rate Limit (HTTP 429) 嘅終極大閘
+                    const status = boardErr.response?.status;
+                    if (status === 429) {
+                        console.warn(`⚠️ [Board of Directors] Groq 觸發 Rate Limit (429)！為保證系統運作，本次預設信任 Master AI 放行。`);
+                        boardComment = `✅ 董事會批准 (Groq API 繁忙，預設放行)`;
+                    } else {
+                        console.warn(`⚠️ [Board of Directors] 董事會 API 故障 (${boardErr.message})，預設放行。`);
+                        boardComment = `✅ 董事會批准 (API 故障，預設放行)`;
+                    }
                 }
-                if (report.recommended_params.min_vol_5m !== undefined && report.recommended_params.min_vol_5m !== null) {
-                    updates.min_vol_5m = Math.max(500, Math.min(Number(report.recommended_params.min_vol_5m), 10000));
-                }
-                if (report.recommended_params.bluechip_max_rsi !== undefined && report.recommended_params.bluechip_max_rsi !== null) {
-                    updates.bluechip_max_rsi = Math.max(20, Math.min(Number(report.recommended_params.bluechip_max_rsi), 50));
-                }
-                if (report.recommended_params.bluechip_min_drop_pct !== undefined && report.recommended_params.bluechip_min_drop_pct !== null) {
-                    updates.bluechip_min_drop_pct = Math.max(1, Math.min(Number(report.recommended_params.bluechip_min_drop_pct), 10));
-                }
+            }
+
+            // ==========================================
+            // 執行更新邏輯 (受董事會制衡)
+            // ==========================================
+            let paramUpdateLog = "無變動";
+            if (!isVetoed && report.recommended_params) {
+                const updates = {};
+                if (report.recommended_params.min_liquidity !== undefined) updates.min_liquidity = Math.max(5000, Math.min(Number(report.recommended_params.min_liquidity), 50000));
+                if (report.recommended_params.min_vol_5m !== undefined) updates.min_vol_5m = Math.max(500, Math.min(Number(report.recommended_params.min_vol_5m), 10000));
+                if (report.recommended_params.bluechip_max_rsi !== undefined) updates.bluechip_max_rsi = Math.max(20, Math.min(Number(report.recommended_params.bluechip_max_rsi), 50));
+                if (report.recommended_params.bluechip_min_drop_pct !== undefined) updates.bluechip_min_drop_pct = Math.max(1, Math.min(Number(report.recommended_params.bluechip_min_drop_pct), 10));
                 
                 if (Object.keys(updates).length > 0) {
                     await supabase.from('ai_strategy_params').update(updates).eq('id', 1);
@@ -129,44 +174,33 @@ const retrospectiveJob = {
                 }
             }
 
-            // 9. 【自動執行 B】AI 劇本修正 
             let promptUpdateLog = "無修正";
-            
             if (report.target_prompt_id && report.new_prompt_content && report.target_prompt_id !== "null") {
-                const isIllegalUpdate = (report.target_prompt_id === 'reviewer_bluechip' && !hasBluechipLoss);
-                
-                if (isIllegalUpdate) {
-                    promptUpdateLog = `❌ 攔截非法修改：老幣無虧損，拒絕 Master AI 修改 reviewer_bluechip！`;
+                if (isVetoed) {
+                    promptUpdateLog = boardComment; // 紀錄被否決 (重要：這段字會寫入 DB 成為下一次的反思內容)
                 } else {
-                    const { error: pErr } = await supabase
-                        .from('bot_prompts')
-                        .update({ 
-                            content: report.new_prompt_content,
-                            updated_at: new Date()
-                        })
-                        .eq('prompt_id', report.target_prompt_id);
-                    
-                    if (!pErr) {
-                        promptUpdateLog = `✅ 已自動更新 ${report.target_prompt_id}`;
+                    const isIllegalUpdate = (report.target_prompt_id === 'reviewer_bluechip' && !hasBluechipLoss);
+                    if (isIllegalUpdate) {
+                        promptUpdateLog = `❌ 系統攔截：老幣無虧損，拒絕 Master AI 修改 reviewer_bluechip！`;
                     } else {
-                        promptUpdateLog = `❌ 更新失敗: ${pErr.message}`;
+                        const { error: pErr } = await supabase.from('bot_prompts').update({ content: report.new_prompt_content, updated_at: new Date() }).eq('prompt_id', report.target_prompt_id);
+                        promptUpdateLog = !pErr ? `✅ 已自動更新 ${report.target_prompt_id} (${boardComment})` : `❌ 更新失敗: ${pErr.message}`;
                     }
                 }
             }
 
-            // 10. 記錄報告與通知
             await supabase.from('daily_audit_reports').insert([{
                 analysis_content: report.analysis,
-                param_changes: report.recommended_params,
+                param_changes: isVetoed ? { status: "VETOED" } : report.recommended_params,
                 prompt_changes: report.prompt_feedback + " | " + promptUpdateLog
             }]);
 
             sendAdminAlert(`
 🌞 <b>[系統全自動進化完成]</b>
 📊 <b>敗因分析</b>: ${report.analysis}
+⚖️ <b>董事會決議</b>: ${boardComment}
 ⚙️ <b>門檻修正</b>: ${paramUpdateLog}
 📝 <b>AI劇本進化</b>: ${promptUpdateLog}
-💡 <b>修正邏輯</b>: ${report.prompt_feedback}
             `);
             
             healthMonitor.setStatus('AI_Evolution', '🟢 完成進化');
@@ -178,14 +212,8 @@ const retrospectiveJob = {
     },
 
     start() {
-        cron.schedule('0 0,12 * * *', () => { 
-            this.runAnalysis(); 
-        }, {
-            scheduled: true,
-            timezone: "Asia/Hong_Kong"
-        });
-        
-        console.log(`🤖 [Evolution] 全自動修正排程已啟動 (每日 12AM & 12PM HKT)...`);
+        cron.schedule('0 0,12 * * *', () => { this.runAnalysis(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
+        console.log(`🤖 [Evolution] 雙軌審查進化排程已啟動 (Master 提案 + Groq 審批)...`);
     }
 };
 
