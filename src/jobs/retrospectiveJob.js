@@ -7,8 +7,16 @@ const { healthMonitor } = require('../services/healthMonitor');
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-const PRO_API_KEY = process.env.GEMINI_API_KEY;
-const GROQ_API_KEY = process.env.GROQ_API_KEY; // 🚀 董事會專用
+// 🚀 核心升級：將所有 Gemini Keys 放入 Array (自動過濾空值)
+const GEMINI_KEYS = [
+    process.env.GEMINI_API_KEY,
+    process.env.REENTRY_GEMINI_API_KEY, // 🚀 換咗做你指定嘅變數名！
+    process.env.GEMINI_API_KEY_3 // 預留位置，有需要隨時加
+].filter(Boolean);
+
+let currentKeyIndex = 0; // 記住上次用到邊條 Key
+
+const GROQ_API_KEY = process.env.GROQ_API_KEY; // 董事會專用
 
 const retrospectiveJob = {
     async runAnalysis() {
@@ -16,6 +24,8 @@ const retrospectiveJob = {
         healthMonitor.setStatus('AI_Evolution', '🟢 分析與修正中...');
 
         try {
+            if (GEMINI_KEYS.length === 0) throw new Error("系統找不到任何有效的 GEMINI_API_KEY");
+
             const twelveHoursAgo = new Date(Date.now() - 12 * 60 * 60 * 1000).toISOString();
             
             let { data: allTrades } = await supabase.from('trade_history_live').select('*').gte('created_at', twelveHoursAgo);
@@ -48,16 +58,11 @@ const retrospectiveJob = {
                 return;
             }
 
-            // ==========================================
-            // 🚀 核心升級 1：獲取「上次修改紀錄」建立反饋迴圈 (加入 VETO 嚴厲警告)
-            // ==========================================
             const { data: lastAudit } = await supabase.from('daily_audit_reports').select('*').order('created_at', { ascending: false }).limit(1).single();
             let lastAuditText = "無歷史紀錄 (這是你第一次執行進化)。";
             
             if (lastAudit) {
                 lastAuditText = `【上次你給出的敗因分析】: ${lastAudit.analysis_content}\n`;
-                
-                // 🛑 如果上次被董事會否決，給予強烈警告！
                 if (lastAudit.param_changes && lastAudit.param_changes.status === 'VETOED') {
                     lastAuditText += `\n⚠️ 【嚴重警告：上次你提出的進化提案被「獨立風控董事會」強力否決！】\n`;
                     lastAuditText += `【被否決的詳細原因】: ${lastAudit.prompt_changes}\n`;
@@ -98,17 +103,49 @@ const retrospectiveJob = {
                 promptText += contextStr;
             }
 
-            console.log(`🧠 [Evolution] 正在呼叫 Master AI (Gemini Pro) 撰寫進化提案...`);
-            const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${PRO_API_KEY}`, {
-                contents: [{ role: "user", parts: [{ text: promptText }] }],
-                generationConfig: { responseMimeType: "application/json", temperature: 0.1 } 
-            }, { timeout: 25000 });
+            // ==========================================
+            // 🚀 核心升級：多 Key 輪替與 429 容災重試機制
+            // ==========================================
+            let report = null;
+            let rawText = "";
 
-            let rawText = res.data.candidates[0].content.parts[0].text;
-            const report = JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
+            for (let attempt = 0; attempt < GEMINI_KEYS.length; attempt++) {
+                const activeKey = GEMINI_KEYS[currentKeyIndex % GEMINI_KEYS.length];
+                const keyNumber = (currentKeyIndex % GEMINI_KEYS.length) + 1;
+                currentKeyIndex++; // 推進指標，下次用下一條
+
+                try {
+                    console.log(`🧠 [Evolution] 正在呼叫 Master AI (Gemini Pro) 撰寫進化提案 (使用 Key #${keyNumber})...`);
+                    const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${activeKey}`, {
+                        contents: [{ role: "user", parts: [{ text: promptText }] }],
+                        generationConfig: { responseMimeType: "application/json", temperature: 0.1 } 
+                    }, { timeout: 25000 });
+
+                    rawText = res.data.candidates[0].content.parts[0].text;
+                    report = JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
+                    
+                    console.log(`✅ [Evolution] Key #${keyNumber} 成功產出報告！`);
+                    break; // 成功就立刻跳出迴圈
+
+                } catch (apiErr) {
+                    const status = apiErr.response?.status;
+                    if (status === 429) {
+                        console.warn(`⚠️ [Evolution] Key #${keyNumber} 額度已耗盡 (HTTP 429)！系統將自動切換下一條 Key 補上...`);
+                        // 迴圈會繼續，嘗試下一條 Key
+                    } else {
+                        // 其他非額度錯誤 (例如 Timeout) 直接拋出
+                        throw apiErr; 
+                    }
+                }
+            }
+
+            // 如果全部 Key 都試過晒都失敗
+            if (!report) {
+                throw new Error("🚨 所有 Gemini API Keys 的額度均已耗盡 (429)，無法產出進化報告！請添加更多 Keys。");
+            }
 
             // ==========================================
-            // ⚖️ 核心升級 2：第三方董事會審查 (Groq 8B 降級防爆 Limit)
+            // ⚖️ 第三方董事會審查 (Groq 8B 降級防爆 Limit)
             // ==========================================
             let isVetoed = false;
             let boardComment = "✅ 董事會無異議通過";
@@ -127,7 +164,6 @@ const retrospectiveJob = {
 請只回傳 JSON: {"decision": "PASS" 或 "VETO", "reason": "50字內的審查意見"}`;
 
                 try {
-                    // 🚀 降級使用 8B 模型，TPM 額度大增，極難撞 Rate Limit！
                     const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
                         model: "llama-3.1-8b-instant", 
                         messages: [{ role: "user", content: auditorPrompt }],
@@ -145,7 +181,6 @@ const retrospectiveJob = {
                         console.log(`✅ [Board of Directors] 提案獲批！`);
                     }
                 } catch (boardErr) {
-                    // 🛡️ 防禦 Rate Limit (HTTP 429) 嘅終極大閘
                     const status = boardErr.response?.status;
                     if (status === 429) {
                         console.warn(`⚠️ [Board of Directors] Groq 觸發 Rate Limit (429)！為保證系統運作，本次預設信任 Master AI 放行。`);
@@ -177,7 +212,7 @@ const retrospectiveJob = {
             let promptUpdateLog = "無修正";
             if (report.target_prompt_id && report.new_prompt_content && report.target_prompt_id !== "null") {
                 if (isVetoed) {
-                    promptUpdateLog = boardComment; // 紀錄被否決 (重要：這段字會寫入 DB 成為下一次的反思內容)
+                    promptUpdateLog = boardComment; 
                 } else {
                     const isIllegalUpdate = (report.target_prompt_id === 'reviewer_bluechip' && !hasBluechipLoss);
                     if (isIllegalUpdate) {
@@ -213,7 +248,7 @@ const retrospectiveJob = {
 
     start() {
         cron.schedule('0 0,12 * * *', () => { this.runAnalysis(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
-        console.log(`🤖 [Evolution] 雙軌審查進化排程已啟動 (Master 提案 + Groq 審批)...`);
+        console.log(`🤖 [Evolution] 雙軌審查進化排程已啟動 (自動輪替多條 Gemini API Key)...`);
     }
 };
 
