@@ -128,7 +128,7 @@ function startWebhookStatsMonitor() {
         stats_totalWebhookSignals = 0;
         stats_pumpFunCreates = 0;
         stats_addedToNursery = 0;
-    }, 10 * 60 * 1000); 
+    }, 2 * 60 * 1000); 
 }
 
 const ramSecondaryPool = new Map(); 
