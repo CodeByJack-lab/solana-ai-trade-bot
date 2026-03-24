@@ -6,7 +6,8 @@ const { getPortfolio, getMemeCount, getPositionLimits } = require('./portfolioSe
 const { healthMonitor } = require('./healthMonitor');
 const { securityGuard } = require('./securityGuard');
 const { graveyardJob } = require('../jobs/graveyardJob'); 
-const { janitorJob } = require('../jobs/janitorJob'); // 🚀 加呢行：引入清道夫
+const { janitorJob } = require('../jobs/janitorJob');
+const { blueChipJob } = require('../jobs/blueChipJob');
 const { consensusService, getPendingMemeCount } = require('./consensusService'); 
 const { reviewActivePosition, analyzeReentry } = require('./aiService');
 const { executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline } = require('./tradeService'); 
@@ -498,7 +499,7 @@ function startMarketMonitor() {
         startWatchlistMonitor(); 
         startPositionMonitor();
         startCommandListener();
-        
+
         blueChipJob.start();
         macroMonitorService.start();
         retrospectiveJob.start();
