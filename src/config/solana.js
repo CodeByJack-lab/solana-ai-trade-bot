@@ -27,6 +27,14 @@ const withTimeout = (promise, ms, actionName) => {
     return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 };
 
+// 🚀 核心修復：這幾個動作絕對不能 2 秒斬斷，必須給予充分時間！
+const NO_TIMEOUT_METHODS = [
+    'confirmTransaction',       // 確認交易上鏈 (通常需 5-20 秒)
+    'sendRawTransaction',       // 發送交易
+    'sendTransaction',          // 發送交易
+    'simulateTransaction'       // 模擬交易 (有時需 3-5 秒)
+];
+
 // 🤖 智能切換代理 (Proxy)
 const connection = new Proxy(primaryConnection, {
     get(target, propKey) {
@@ -34,15 +42,25 @@ const connection = new Proxy(primaryConnection, {
         
         if (typeof origMethod === 'function') {
             return async function (...args) {
+                // 🛡️ 如果是白名單內的耗時操作，不使用 withTimeout，但保留失敗切換機制
+                if (NO_TIMEOUT_METHODS.includes(propKey)) {
+                    try {
+                        return await origMethod.apply(target, args);
+                    } catch (err) {
+                        console.warn(`\n⚠️ [${propKey}] Alchemy 執行失敗: ${err.message}`);
+                        console.warn(`🔄 瞬間無縫切換至 Helius 黃金水喉補救...`);
+                        const fallbackMethod = fallbackConnection[propKey];
+                        return await fallbackMethod.apply(fallbackConnection, args);
+                    }
+                }
+
+                // ⚡ 其他普通查詢 (getBalance, getLatestBlockhash 等)，嚴格執行 2 秒死亡倒數！
                 try {
-                    // 優先使用 Alchemy，但加上 2000 毫秒 (2秒) 嘅死亡倒數
-                    // 如果係 getLatestBlockhash 呢啲緊急要求，2秒都嫌多！
                     return await withTimeout(origMethod.apply(target, args), 2000, propKey);
                 } catch (err) {
                     console.warn(`\n⚠️ 觸發備援機制！原因: ${err.message}`);
                     console.warn(`🔄 瞬間無縫切換至 Helius 黃金水喉補救...`);
                     
-                    // Alchemy 失敗或超時，即刻用 Helius 補飛
                     const fallbackMethod = fallbackConnection[propKey];
                     return await fallbackMethod.apply(fallbackConnection, args);
                 }
