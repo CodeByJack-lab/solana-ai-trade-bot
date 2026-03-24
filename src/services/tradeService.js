@@ -2,7 +2,7 @@
 const { getPortfolio, updateCache } = require('./portfolioService');
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
-const { PublicKey } = require('@solana/web3.js');
+const { PublicKey, Keypair } = require('@solana/web3.js'); // 🚀 FIX: 加入 Keypair 防止 Crash
 const { connection } = require('../config/solana'); 
 const path = require('path');
 const BigNumber = require('bignumber.js'); 
@@ -19,20 +19,33 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-// 🚀 新增：實盤核數師 (獲取鏈上真實 SPL Token 餘額)
+// 🚀 頂層初始化：只解析一次 Private Key，供全檔案使用
+let globalWalletPublicKey = null;
+try {
+    const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
+    if (rawKey) {
+        if (rawKey.startsWith('[')) {
+            globalWalletPublicKey = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey.toString();
+        } else {
+            globalWalletPublicKey = Keypair.fromSecretKey(bs58.decode(rawKey)).publicKey.toString();
+        }
+    }
+} catch (e) {
+    console.error("⚠️ [TradeService] 無法解析 Private Key");
+}
+
+// 實盤核數師 (獲取鏈上真實 SPL Token 餘額)
 async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     try {
         const walletKey = new PublicKey(walletPubKeyStr);
         const mintKey = new PublicKey(tokenMintStr);
         
-        // 查所有 Token Accounts
         const parsedTokenAccounts = await connection.getParsedTokenAccountsByOwner(walletKey, {
             mint: mintKey
         });
 
         if (parsedTokenAccounts.value.length === 0) return 0;
 
-        // 總和所有同一個 Mint 嘅 Account 餘額 (通常只有一個)
         let totalUiAmount = 0;
         for (const accountInfo of parsedTokenAccounts.value) {
             totalUiAmount += accountInfo.account.data.parsed.info.tokenAmount.uiAmount;
@@ -41,7 +54,7 @@ async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
         return totalUiAmount;
     } catch (e) {
         console.error(`⚠️ [Balance Check] 無法獲取真實代幣餘額 (${tokenMintStr.substring(0,6)}):`, e.message);
-        return null; // 查唔到就回傳 null，等上面決定點做
+        return null; 
     }
 }
 
@@ -60,8 +73,6 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
             ? new BigNumber(amount).times(1e9).integerValue().toString() 
             : new BigNumber(amount).times(new BigNumber(10).pow(decimals)).integerValue().toString();
 
-        // 🚀 實盤生存指南：拉高滑點容忍度
-        // 買入 10%，賣出逃命 15%
         const SLIPPAGE_BPS = isBuying ? 1000 : 1500; 
 
         const baseUrl = (process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag').replace(/\/$/, '');
@@ -142,32 +153,21 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         if (tradeSuccess && liveResult?.txid) {
             finalTxid = liveResult.txid; 
             
-            // 🚀 實盤保險：買入成功後，等 5 秒查下區塊鏈真正收到幾多粒！
             console.log(`🔍 [Live Check] 正在驗證鏈上真實到帳數量...`);
             await new Promise(r => setTimeout(r, 5000));
-            
-            let walletPublicKey = null;
-            const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
-            if (rawKey) {
-                if (rawKey.startsWith('[')) {
-                    walletPublicKey = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey.toString();
-                } else {
-                    walletPublicKey = Keypair.fromSecretKey(bs58.decode(rawKey)).publicKey.toString();
-                }
-            }
 
-            if (walletPublicKey) {
-                const realBal = await getRealTokenBalance(walletPublicKey, mintAddress);
+            if (globalWalletPublicKey) {
+                const realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
                 if (realBal !== null && realBal > 0) {
                     console.log(`✅ [Live Check] 預期: ${tokenQuantity.toFixed(4)} | 鏈上真實: ${realBal.toFixed(4)}`);
-                    tokenQuantity = realBal; // 以真實餘額為準！
+                    tokenQuantity = realBal; 
                 } else if (realBal === 0) {
                     console.error(`🚨 [FATAL] Jito 報告成功，但鏈上查無餘額！可能是假成功/跌單，放棄寫入 DB！`);
-                    return false; // 終止寫入幽靈持倉
+                    return false; 
                 }
             }
         } else {
-            return false; // Jito 失敗直接撤退
+            return false; 
         }
     } 
 
@@ -179,8 +179,16 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         });
 
         const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-        const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
-        const newBalance = currentBalance - Number(configTradeAmountSol);
+        let currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
+        let newBalance = currentBalance - Number(configTradeAmountSol);
+
+        // 🚀 實盤：更新錢包餘額為鏈上真實數字 (已扣除 ATA 租金與 Tip)
+        if (isLive && globalWalletPublicKey) {
+            try {
+                const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
+                newBalance = realLamports / 1e9;
+            } catch (e) {}
+        }
 
         await supabase.from('system_config')
             .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
@@ -221,29 +229,16 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     console.log(`\n⚡ [Sell] 正在嘗試平倉: ${tokenSymbol} (預期比例: ${sellFraction * 100}%)`);
 
-    // 🚀 實盤保險：賣出前核對真實餘額！
-    if (isLive) {
-        let walletPublicKey = null;
-        const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
-        if (rawKey) {
-            walletPublicKey = rawKey.startsWith('[') 
-                ? Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey.toString()
-                : Keypair.fromSecretKey(bs58.decode(rawKey)).publicKey.toString();
-        }
-
-        if (walletPublicKey) {
-            const realBal = await getRealTokenBalance(walletPublicKey, mintAddress);
-            if (realBal !== null) {
-                if (realBal === 0) {
-                    console.error(`🚨 [FATAL] 鏈上餘額為 0，無法賣出！自動執行本地撇帳。`);
-                    await forceWriteOff(mintAddress, "實盤餘額為 0，假持倉撇帳");
-                    return false;
-                }
-                
-                // 計算需要賣出的真實數量
-                sellQuantity = new BigNumber(realBal).times(sellFraction).toNumber();
-                console.log(`🔍 [Live Check] 調整真實賣出數量為: ${sellQuantity.toFixed(4)}`);
+    if (isLive && globalWalletPublicKey) {
+        const realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
+        if (realBal !== null) {
+            if (realBal === 0) {
+                console.error(`🚨 [FATAL] 鏈上餘額為 0，無法賣出！自動執行本地撇帳。`);
+                await forceWriteOff(mintAddress, "實盤餘額為 0，假持倉撇帳");
+                return false;
             }
+            sellQuantity = new BigNumber(realBal).times(sellFraction).toNumber();
+            console.log(`🔍 [Live Check] 調整真實賣出數量為: ${sellQuantity.toFixed(4)}`);
         }
     }
 
@@ -262,6 +257,14 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     let tradeSuccess = true;
     let finalTxid = "SELL_" + Math.random().toString(36).substring(2, 8).toUpperCase(); 
 
+    // 🚀 紀錄售前餘額 (對撞起點)
+    let preSellBalanceLamports = 0;
+    if (isLive && globalWalletPublicKey) {
+        try {
+            preSellBalanceLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
+        } catch (e) {}
+    }
+
     if (isLive) {
         const liveResult = await executeLiveSwapUAT(quoteData.rawResponse, "SELL");
         tradeSuccess = liveResult?.success || false;
@@ -270,9 +273,26 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         }
     }
 
+    // 🚀 計算真實入袋 SOL (對撞終點)
+    let actualSolReceived = 0;
+    if (isLive && tradeSuccess && finalTxid.startsWith('3') && globalWalletPublicKey) { // Jito TXID 通常長過一般 string，以此判斷真 TX
+        console.log(`🔍 [Live Check] 正在驗證鏈上真實 SOL 收益 (等待 5 秒確認區塊)...`);
+        await new Promise(r => setTimeout(r, 5000));
+        try {
+            const postSellBalanceLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
+            actualSolReceived = (postSellBalanceLamports - preSellBalanceLamports) / 1e9;
+            console.log(`✅ [Live Check] 售前: ${(preSellBalanceLamports/1e9).toFixed(4)} | 售後: ${(postSellBalanceLamports/1e9).toFixed(4)} | 實際淨賺: ${actualSolReceived.toFixed(6)} SOL`);
+        } catch (e) { console.warn("⚠️ [Live Check] 無法獲取售後餘額"); }
+    }
+
     if (tradeSuccess) {
-        const sellValueSol = new BigNumber(sellQuantity).times(finalPriceSol).toNumber();
-        // PNL 計算依然用返當初買入嘅估算數量，保持財報一致
+        let sellValueSol = new BigNumber(sellQuantity).times(finalPriceSol).toNumber();
+
+        // 🚀 實盤精準對撞：使用真實入袋 SOL (已全數扣除 Tip/Gas/滑點摩擦)
+        if (isLive && actualSolReceived !== 0) {
+            sellValueSol = actualSolReceived;
+        }
+
         const entryTotalValue = new BigNumber(pos.quantity).times(sellFraction).times(pos.entry_price_sol);
         const pnlSol = new BigNumber(sellValueSol).minus(entryTotalValue).toNumber();
         const pnlPct = new BigNumber(pnlSol).div(entryTotalValue).times(100).toNumber();
@@ -322,18 +342,24 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         await supabase.from(`active_positions_${tableSuffix}`).delete().eq('mint_address', mintAddress);
     } else {
         const newQty = new BigNumber(pos.quantity).minus(sellQuantity).toNumber();
-        
         pos.quantity = newQty;
         pos.strategy_type = safeStrategyType + '_HALF_SOLD';
-
         await supabase.from(`active_positions_${tableSuffix}`).update({
             quantity: newQty, strategy_type: pos.strategy_type
         }).eq('mint_address', mintAddress);
     }
 
     const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-    const currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
-    const newBalance = currentBalance + Number(sellValueSol);
+    let currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
+    let newBalance = currentBalance + Number(sellValueSol);
+
+    // 🚀 實盤精準對撞：更新 DB 的錢包餘額為鏈上真實數字
+    if (isLive && globalWalletPublicKey) {
+        try {
+            const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
+            newBalance = realLamports / 1e9;
+        } catch (e) {}
+    }
 
     await supabase.from('system_config')
         .update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance })
