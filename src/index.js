@@ -1,24 +1,25 @@
-// src/index.js - V6.0 終極對沖基金全自動化架構
-
+// src/index.js - V6.0 實盤防彈版
 const { supabase } = require('./config/supabase'); 
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
-const { startMarketMonitor } = require('./services/monitorService'); // Meme Webhook + 撈魚 + 橫盤
+const { startMarketMonitor } = require('./services/monitorService'); 
 const { getSolPriceInHKD } = require('./services/priceService'); 
 
 // 🚨 核心模組匯入
-const { macroMonitorService } = require('./services/macroMonitorService'); // 雙龍大盤防禦
-const { blueChipJob } = require('./jobs/blueChipJob');                     // 老幣抄底雷達
-const { retrospectiveJob } = require('./jobs/retrospectiveJob');           // AI 12AM/PM 復盤大腦
-const { healthMonitor } = require('./services/healthMonitor');             // 全局健康看板
+const { macroMonitorService } = require('./services/macroMonitorService'); 
+const { blueChipJob } = require('./jobs/blueChipJob');                     
+const { retrospectiveJob } = require('./jobs/retrospectiveJob');           
+const { healthMonitor } = require('./services/healthMonitor');             
 
 // 💀 後勤系統
-const { graveyardJob } = require('./jobs/graveyardJob');                   // 死囚火化排程 (收租)
-const { janitorJob } = require('./jobs/janitorJob');                       // 🚀 新增：清道夫排程 (收租)
+const { graveyardJob } = require('./jobs/graveyardJob');                   
+const { janitorJob } = require('./jobs/janitorJob');                       
 
 async function startApp() {
     console.log("======================================================");
     console.log("🚀 SOL_Trade V6.0 實盤防彈版啟動...");
     console.log("======================================================");
+
+    let isFirstLoad = true; // 🚀 新增：首次載入鎖，防開機洗版
 
     /**
      * 1. 🚀 指令線：監聽 system_config (熱更新開關與資金同步)
@@ -28,7 +29,6 @@ async function startApp() {
             'postgres_changes',
             { event: 'UPDATE', schema: 'public', table: 'system_config', filter: 'id=eq.1' },
             (payload) => {
-                const oldData = payload.old;
                 const newData = payload.new;
                 const portfolio = getPortfolio();
 
@@ -36,29 +36,30 @@ async function startApp() {
                 if (portfolio) {
                     if (newData.trade_mode === 'PAPER') {
                         if (Math.abs(portfolio.cash_sol - newData.simulated_balance) > 0.0001) {
-                            console.log(`\n💰 [PAPER 同步] 記憶體餘額刷新為 ${newData.simulated_balance.toFixed(4)} SOL`);
                             portfolio.cash_sol = newData.simulated_balance;
                             portfolio.reference_capital = newData.reference_capital;
                         }
                     } else if (newData.trade_mode === 'LIVE') {
                         if (Math.abs(portfolio.cash_sol - newData.live_wallet_balance) > 0.0001) {
-                            console.log(`\n💰 [LIVE 同步] 實盤記憶體餘額刷新為 ${newData.live_wallet_balance.toFixed(4)} SOL`);
                             portfolio.cash_sol = newData.live_wallet_balance;
                             portfolio.reference_capital = newData.live_wallet_balance;
                         }
                     }
                 }
 
-                if (oldData && oldData.is_running === newData.is_running && oldData.trade_mode === newData.trade_mode) {
-                    return; 
+                // 🛡️ 終極防洗版鎖：只有當開關或模式【真的發生改變】時，才處理並印出 Log
+                if (global.isRunning === newData.is_running && global.tradeMode === newData.trade_mode) {
+                    return; // 狀態沒變，純粹係 60 秒餘額同步，直接忽略！
                 }
 
-                console.log(`\n🔔 [遠端指令] 狀態: ${newData.is_running ? '🟢 運行中' : '🔴 已暫停'} | 模式: ${newData.trade_mode}`);
-                
                 global.isRunning = newData.is_running;
                 global.tradeMode = newData.trade_mode;
 
-                updateSystemStatus(newData.is_running ? "🟢 系統指令：開始作戰" : "🛑 系統指令：暫停交易");
+                if (!isFirstLoad) {
+                    console.log(`\n🔔 [遠端指令] 狀態: ${newData.is_running ? '🟢 運行中' : '🔴 已暫停'} | 模式: ${newData.trade_mode}`);
+                    updateSystemStatus(newData.is_running ? "🟢 系統指令：開始作戰" : "🛑 系統指令：暫停交易");
+                }
+                isFirstLoad = false;
             }
         )
         .subscribe();
@@ -71,20 +72,20 @@ async function startApp() {
     }
 
     // ==========================================
-    // 3. 🚀 啟動全軍列陣 (V6.0 核心模組) - 統一在此呼叫！
+    // 3. 🚀 啟動全軍列陣 (V6.0 核心模組)
     // ==========================================
-    startMarketMonitor();        // 啟動 Express Webhook, 滴水撈魚, 橫盤接回, 監軍逃生 (無內部 Cron)
-    macroMonitorService.start(); // 啟動 BTC/SOL 雙龍防禦 (每 6 小時)
-    blueChipJob.start();         // 啟動 Binance RSI 老幣抄底雷達 (每 5 分鐘)
-    retrospectiveJob.start();    // 啟動 12AM/PM AI 參數微調排程 (每日 2 次)
-    janitorJob.start();          // 啟動清道夫回收 0 餘額 ATA 租金 (每日凌晨 4 點)
+    startMarketMonitor();        
+    macroMonitorService.start(); 
+    blueChipJob.start();         
+    retrospectiveJob.start();    
+    janitorJob.start();          
     
     if (graveyardJob && typeof graveyardJob.start === 'function') {
-        graveyardJob.start();    // 啟動死囚火化排程 (每日凌晨 3 點)
+        graveyardJob.start();    
     }
 
     /**
-     * 4. 💤 回報線：一體化「單行戰報」Loop (每 60 秒印一次)
+     * 4. 💤 回報線：一體化「單行戰報」Loop
      */
     async function backgroundReportLoop() {
         try {

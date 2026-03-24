@@ -7,8 +7,7 @@ let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;
 const { PublicKey } = require('@solana/web3.js');
 
-// 💡 僅引入哨兵需要的武器
-const { runSellPipeline } = require('./tradeService');
+const { runSellPipeline, executeBuy } = require('./tradeService');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
 const { consensusService, getPendingMemeCount } = require('./consensusService');
@@ -21,6 +20,7 @@ const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
 let NGROK_URL = process.env.NGROK_URL;
 
+// 🚀 修正：正確的 Helius URL
 const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
 const RAYDIUM_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
@@ -104,12 +104,15 @@ app.post('/webhook', async (req, res) => {
                             mintAddress = pubkey;
                             break;
                         }
-                    } catch (e) {}
+                    } catch (e) {
+                        console.warn(`⚠️ [Webhook] 解析代幣地址失敗:`, e.message);
+                    }
                 }
             }
 
             if (mintAddress) {
                 await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
+                console.log(`🌟 [Webhook] 漁網成功捕捉新幣，放入冷宮: ${mintAddress.substring(0,6)}...`);
             }
         }
     } catch (err) {
@@ -120,18 +123,16 @@ app.post('/webhook', async (req, res) => {
 // ==========================================
 // 🎣 滴水式撈魚監控 (方案 B：DB + RAM 雙層過濾 + AI 防撞鎖)
 // ==========================================
-const ramSecondaryPool = new Map(); // 格式: { mintAddress: { failCount: 0, nextProcessTime: Date } }
-let isAiReviewing = false;          // 🚦 全局 AI 防撞鎖
+const ramSecondaryPool = new Map(); 
+let isAiReviewing = false;          
 
-// 輔助函式：觸發買入管道 (內建 AI 防撞鎖)
 async function triggerBuyPipeline(mintAddress, secResult, config) {
-    // 🚦 等待鎖：確保同時間只有一隻幣畀 AI Review
     while (isAiReviewing) {
         console.log(`🚦 [AI Lock] 系統正處理另一代幣，${mintAddress.substring(0,6)} 稍等 1 秒避開撞機...`);
         await new Promise(r => setTimeout(r, 1000));
     }
 
-    isAiReviewing = true; // 鎖上大腦
+    isAiReviewing = true; 
     try {
         if (secResult.isBlindSnipe) {
             console.log(`🎯 [BlindSnipe] 觸發盲狙模式，即刻呼叫大腦！`);
@@ -139,7 +140,6 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
         const aiDecision = await consensusService.runMemeConsensus(mintAddress, secResult.marketData);
         
         if (aiDecision.buy) {
-            const { executeBuy } = require('./tradeService'); // 動態加載避免頂部漏 import
             const strategy = secResult.isBlindSnipe ? 'MEME_BLIND' : 'MEME_SNIPE';
             await executeBuy(mintAddress, secResult.marketData.symbol, strategy, aiDecision.score, aiDecision.reason, config.trade_amount_sol);
         } else {
@@ -148,7 +148,7 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
     } catch (err) {
         console.error(`❌ [AI Review Error]`, err.message);
     } finally {
-        isAiReviewing = false; // 絕對確保解鎖
+        isAiReviewing = false; 
     }
 }
 
@@ -173,7 +173,6 @@ function startDatabaseNurseryMonitor() {
                 isNurseryRunning = false; return;
             }
 
-            // --- 🚀 第一部分：處理 RAM 二次緩衝區 (10/15 分鐘緩刑重審) ---
             const now = Date.now();
             for (const [mint, data] of ramSecondaryPool.entries()) {
                 if (now >= data.nextProcessTime) {
@@ -192,7 +191,6 @@ function startDatabaseNurseryMonitor() {
                             console.log(`🚫 [Three-Strikes] ${mint.substring(0,6)} 三振出局，永久放棄。`);
                             ramSecondaryPool.delete(mint);
                         } else {
-                            // 第三次緩刑改為等 15 分鐘
                             data.nextProcessTime = Date.now() + (15 * 60 * 1000);
                             console.log(`⏳ [Security] 二次攔截: ${mint.substring(0,6)} 進入最後 15 分鐘緩刑。`);
                         }
@@ -200,7 +198,6 @@ function startDatabaseNurseryMonitor() {
                 }
             }
 
-            // --- 🚀 第二部分：處理 DB 冷宮裡面的「新手幣」 ---
             const { data: oldestToken } = await supabase
                 .from('nursery_pool')
                 .select('*')
@@ -219,7 +216,6 @@ function startDatabaseNurseryMonitor() {
                     const { securityGuard } = require('./securityGuard');
                     const secResult = await securityGuard.checkAll(mintAddress);
 
-                    // 💡 無論結果如何，都從 DB Nursery 刪除，讓出空位畀下一個幣
                     await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
 
                     if (secResult.isSafe) {
@@ -228,7 +224,6 @@ function startDatabaseNurseryMonitor() {
                     } else {
                         console.log(`🛡️ [Security] 攔截: ${secResult.reason}`);
                         if (secResult.isPurgatory) {
-                            // 轉移到 RAM，並定時 10 分鐘後重審
                             ramSecondaryPool.set(mintAddress, {
                                 failCount: 1, 
                                 nextProcessTime: Date.now() + (10 * 60 * 1000)
@@ -294,7 +289,6 @@ function startWatchlistMonitor() {
                     const decisionObj = await analyzeReentry(item.mint_address, item.token_symbol, baseline);
                     
                     if (decisionObj.decision === 'BUY') {
-                        const { executeBuy } = require('./tradeService');
                         await executeBuy(item.mint_address, item.token_symbol, 'MEME_REENTRY', 95, decisionObj.reason, config.trade_amount_sol);
                     } else {
                         console.log(`🧠 [Reentry Rejected] 否決: ${decisionObj.reason}`);
@@ -472,7 +466,6 @@ function startCommandListener() {
     }, 5000);
 }
 
-// 🚀 保持乾淨，只啟動哨兵迴圈
 function startMarketMonitor() {
     app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
         console.log('🔄 [System] 系統啟動，正在強制作業 Helius Webhook 重新連線...');
