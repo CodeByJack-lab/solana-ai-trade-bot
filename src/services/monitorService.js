@@ -54,7 +54,7 @@ async function toggleHeliusWebhook(enable = true) {
 
         const payload = {
             webhookURL: targetUrl,
-            transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
+            transactionTypes: ["Any"], 
             accountAddresses: [
                 "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 
                 "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
@@ -118,7 +118,7 @@ function startWebhookStatsMonitor() {
     setInterval(() => {
         const discarded = stats_totalWebhookSignals - stats_addedToNursery;
         console.log(`\n========================================`);
-        console.log(`📡 [Webhook 戰況] 過去 10 分鐘雷達報告:`);
+        console.log(`📡 [Webhook 戰況] 過去 2 分鐘雷達報告:`);
         console.log(`   📥 總接收雜訊 : ${stats_totalWebhookSignals} 條`);
         console.log(`   💊 包含發射幣 : ${stats_pumpFunCreates} 隻`);
         console.log(`   🐟 成功入魚池 : ${stats_addedToNursery} 隻`);
