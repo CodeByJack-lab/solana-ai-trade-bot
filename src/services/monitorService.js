@@ -22,6 +22,8 @@ const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-producti
 
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
+// 🚀 新增 SOL_MINT 變數，用於獲取正確定價
+const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
 // 🚀 核心升級：RPC 備援陣列 (Fallback Array)
 const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
@@ -150,7 +152,6 @@ app.post('/webhook/helius', async (req, res) => {
                 const pubkey = acc.account;
                 if (pubkey !== PUMP_FUN_PROGRAM_ID && pubkey !== SYSTEM_PROGRAM_ID) {
                     try {
-                        // 🚀 套用 RPC 備援陣列去查家宅
                         const accountInfo = await fetchAccountInfoWithFallback(pubkey);
                         const data = accountInfo?.result?.value?.data;
                         
@@ -393,7 +394,8 @@ function startPositionMonitor() {
             
             let pricesMap = {};
             try {
-                const jupUrl = `https://api.jup.ag/price/v2?ids=${mints.join(',')}`;
+                // 🚀 BUG FIX: Jupiter API 預設返回 USDC 價格，必須指定 vsToken 為 SOL 才能換算正確 PNL！
+                const jupUrl = `https://api.jup.ag/price/v2?ids=${mints.join(',')}&vsToken=${SOL_MINT_ADDRESS}`;
                 const jupRes = await axios.get(jupUrl, { timeout: 3000 });
                 const jupData = jupRes.data?.data || {};
                 
@@ -419,6 +421,7 @@ function startPositionMonitor() {
                             const { getSolPriceInHKD } = require('./priceService');
                             const solPriceHKD = await getSolPriceInHKD();
                             const solPriceUSD = solPriceHKD / 7.8;
+                            // Dexscreener 備援正確，將 USD 轉換為 SOL
                             pricesMap[mint] = parseFloat(pair.priceUsd) / solPriceUSD; 
                         }
                     }
