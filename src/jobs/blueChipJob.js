@@ -57,12 +57,6 @@ function calculateMACD(closes) {
     };
 }
 
-function checkVolumeShrinkage(volumes) {
-    if (volumes.length < 3) return false;
-    const recentVols = volumes.slice(-3);
-    return recentVols[2] < recentVols[1] && recentVols[1] < recentVols[0]; 
-}
-
 let isRunning = false; 
 
 const blueChipJob = {
@@ -99,17 +93,20 @@ const blueChipJob = {
                     minVolUsd: params?.bluechip_min_vol || 500000 
                 };
 
-                // --- 篩選目標 (只睇陰跌/暴跌，徹底刪除突破追高) ---
+                // --- 🔓 解鎖 1：放寬跌幅條件 (加入 24H 陰跌判定) ---
                 const targetTokens = [];
+                const targetDrop = Math.abs(bluechipLimits.minDropPct);
+                
                 for (const token of pool) {
                     const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === token.mint_address);
                     const h1Change = pair ? parseFloat(pair.priceChange?.h1 || 0) : 0;
+                    const h24Change = pair ? parseFloat(pair.priceChange?.h24 || 0) : 0; // 🚀 新增 24H 跌幅
                     const vol24h = pair ? parseFloat(pair.volume?.h24 || 0) : 0;
                     
                     if (vol24h < bluechipLimits.minVolUsd) continue;
                     
-                    // 🚀 FIX: 必須是跌幅大於設定值 (例如跌超過 -2%) 才能入選。絕不買升！
-                    if (h1Change <= -Math.abs(bluechipLimits.minDropPct)) {
+                    // 只要 1 小時內急跌 (要求減半) OR 24 小時內陰跌 (全數要求)，即刻入圍！
+                    if (h1Change <= -(targetDrop / 2) || h24Change <= -targetDrop) {
                         targetTokens.push(token);
                     }
                 }
@@ -130,7 +127,6 @@ const blueChipJob = {
                         const items = birdeyeRes.data?.data?.items || [];
                         if (items.length >= 30) {
                             const closes = items.map(k => parseFloat(k.o));
-                            const volumes = items.map(k => parseFloat(k.v));
                             const currentPrice = closes[closes.length - 1];
 
                             const rsiHist = getRSIHistory(closes);
@@ -139,11 +135,11 @@ const blueChipJob = {
                             const bb = calculateBollingerBands(closes);
                             const macdData = calculateMACD(closes);
 
-                            const isVolumeShrinking = checkVolumeShrinkage(volumes);
                             const isRsiHook = prevRsi <= bluechipLimits.maxRSI && currentRsi > prevRsi; 
                             
-                            // 🚀 FIX: 徹底刪除 isBreakout (右側突破) 邏輯，只做恐慌拋售後的右側抄底！
-                            const isDip = isRsiHook && bb && currentPrice <= (bb.lower * 1.05) && isVolumeShrinking;
+                            // --- 🔓 解鎖 2：廢除縮量悖論 (只要跌穿布林底 + RSI勾頭就當係 Dip) ---
+                            // 放寬布林帶邊界至 1.05 (允許輕微誤差)
+                            const isDip = isRsiHook && bb && currentPrice <= (bb.lower * 1.05);
 
                             if (isDip) {
                                 const signalType = '右側抄底(RSI勾頭)';
