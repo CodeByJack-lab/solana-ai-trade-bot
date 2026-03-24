@@ -74,63 +74,43 @@ async function toggleHeliusWebhook(enable = true) {
 }
 
 app.post('/webhook/helius', async (req, res) => {
-    res.status(200).send('OK');
+    res.status(200).send('OK'); // 快速回覆 Helius
 
     try {
-        const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
-        if (!config || !config.is_running) {
-            healthMonitor.setStatus('Meme_Radar', '🟡 系統已暫停');
-            return;
-        }
-
         const events = req.body;
-        if (!Array.isArray(events)) return;
-
-        stats_totalWebhookSignals += events.length;
+        if (!Array.isArray(events) || events.length === 0) return;
 
         for (const event of events) {
+            // 🚀 [掃描儀啟動] 遍歷所有指令
             const instructions = event.instructions || [];
-            let mintAddress = null;
-
-            // 🚀 直接從智能合約 Bytecode 提取代幣地址！極速且無懼限流！
-            function extractMintFromPumpFun(ix) {
+            
+            for (const [index, ix] of instructions.entries()) {
+                // 只要係 Pump.fun 嘅交易就捉入嚟驗屍
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
-                    if (typeof dataObj === 'string' && dataObj.length > 0) {
+                    if (dataObj.length > 0) {
                         try {
                             const decodedBytes = bs58.decode(dataObj);
                             const hexString = Buffer.from(decodedBytes).toString('hex');
-                            if (hexString.startsWith('181ec828051c0777')) {
-                                if (ix.accounts && ix.accounts.length > 0) {
-                                    return ix.accounts[0]; 
-                                }
+                            const prefix = hexString.substring(0, 16); // 攞前 8 bytes (16位)
+
+                            // 🔍 暴力 Log：印出所有經過 Pump.fun 嘅數據頭段
+                            console.log(`📡 [Scanner] 發現數據 | Sig: ${event.signature.substring(0,8)}...`);
+                            console.log(`   └─ 指令類型: ${event.type} | 密碼頭段: ${prefix}`);
+                            
+                            // 檢查是否包含 "CREATE" 關鍵字 (Helius 有時會解析到類型)
+                            if (event.type === 'UNKNOWN' || event.description?.includes('Create')) {
+                                console.log(`   ⭐ 呢條極大機會係發射指令！請記低呢串密碼: ${prefix}`);
                             }
-                        } catch (e) {}
+                        } catch (e) {
+                            // console.log('解析失敗，跳過');
+                        }
                     }
                 }
-                if (ix.innerInstructions && Array.isArray(ix.innerInstructions)) {
-                    for (const inner of ix.innerInstructions) {
-                        const mint = extractMintFromPumpFun(inner);
-                        if (mint) return mint;
-                    }
-                }
-                return null;
-            }
-
-            for (const ix of instructions) {
-                mintAddress = extractMintFromPumpFun(ix);
-                if (mintAddress) break;
-            }
-
-            if (mintAddress) {
-                stats_pumpFunCreates++; 
-                await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
-                stats_addedToNursery++; 
-                console.log(`🌟 [Webhook] 漁網成功捕捉新幣，放入冷宮: ${mintAddress.substring(0,6)}...`);
             }
         }
     } catch (err) {
-        console.error('❌ [Webhook Error]', err.message);
+        console.error('❌ [Scanner Error]', err.message);
     }
 });
 

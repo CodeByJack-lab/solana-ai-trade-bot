@@ -205,8 +205,7 @@ const blueChipJob = {
                                     }
                                 }
                             } else {
-                                console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達完美抄底條件 (目前 RSI: ${currentRsi.toFixed(1)}, 是否低於布林底: ${bb && currentPrice <= (bb.lower * 1.05) ? '是' : '否'})，放棄呼叫 AI。`);
-                            }
+                                console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達完美抄底條件 (目前 RSI: ${currentRsi.toFixed(1)}, 現價: $${currentPrice.toFixed(4)}, 布林底門檻: $${(bb.lower * 1.05).toFixed(4)})，放棄呼叫 AI。`);                            }
                         } else {
                             console.log(`⚠️ [Bluechip] ${token.token_symbol} K線數據不足 (僅 ${items.length}/30 支)，放棄技術分析。`);
                         }
