@@ -79,17 +79,34 @@ const blueChipJob = {
                 isRunning = false; return;
             }
 
-            const mints = pool.map(p => p.mint_address).join(',');
-            
             try {
-                // 1. DexScreener 批次獲取基礎數據
-                const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mints}`, { timeout: 5000 });
-                const dexPairs = dexRes.data?.pairs || [];
+                // 🚀 核心修復：DexScreener 批次獲取 (分批切肉法，上限 30 隻一碟)
+                let dexPairs = [];
+                const chunkSize = 30; 
+                for (let i = 0; i < pool.length; i += chunkSize) {
+                    const chunk = pool.slice(i, i + chunkSize);
+                    const chunkMints = chunk.map(p => p.mint_address).join(',');
+                    
+                    try {
+                        const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${chunkMints}`, { timeout: 5000 });
+                        if (dexRes.data && dexRes.data.pairs) {
+                            dexPairs = dexPairs.concat(dexRes.data.pairs);
+                        }
+                    } catch (e) {
+                        if (e.response && e.response.status === 429) {
+                            console.warn(`⚠️ [Bluechip] 觸發 429 限流，自動冷卻 2 秒...`);
+                            await new Promise(r => setTimeout(r, 2000));
+                        } else {
+                            console.warn(`⚠️ [Bluechip] DexScreener 批次請求警告:`, e.message);
+                        }
+                    }
+                    await new Promise(r => setTimeout(r, 500)); // 🛑 每批冷卻 0.5 秒，保護 API
+                }
 
                 const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
                 const bluechipLimits = {
-                    maxRSI: params?.bluechip_max_rsi || 35,
-                    minDropPct: params?.bluechip_min_drop_pct || 3,
+                    maxRSI: params?.bluechip_max_rsi || 40, // 預設放寬至 40
+                    minDropPct: params?.bluechip_min_drop_pct || 2, // 預設跌幅 2%
                     minVolUsd: params?.bluechip_min_vol || 500000 
                 };
 
@@ -100,7 +117,7 @@ const blueChipJob = {
                 for (const token of pool) {
                     const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === token.mint_address);
                     const h1Change = pair ? parseFloat(pair.priceChange?.h1 || 0) : 0;
-                    const h24Change = pair ? parseFloat(pair.priceChange?.h24 || 0) : 0; // 🚀 新增 24H 跌幅
+                    const h24Change = pair ? parseFloat(pair.priceChange?.h24 || 0) : 0; 
                     const vol24h = pair ? parseFloat(pair.volume?.h24 || 0) : 0;
                     
                     if (vol24h < bluechipLimits.minVolUsd) continue;
