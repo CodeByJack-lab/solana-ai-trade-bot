@@ -275,7 +275,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     // 🚀 計算真實入袋 SOL (對撞終點)
     let actualSolReceived = 0;
-    if (isLive && tradeSuccess && finalTxid.startsWith('3') && globalWalletPublicKey) { // Jito TXID 通常長過一般 string，以此判斷真 TX
+    if (isLive && tradeSuccess && !finalTxid.startsWith('SELL_') && globalWalletPublicKey) {// Jito TXID 通常長過一般 string，以此判斷真 TX
         console.log(`🔍 [Live Check] 正在驗證鏈上真實 SOL 收益 (等待 5 秒確認區塊)...`);
         await new Promise(r => setTimeout(r, 5000));
         try {

@@ -5,8 +5,8 @@ const path = require('path');
 // 🛡️ 強制覆蓋：讀取 .env
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-const alchemyUrl = process.env.ALCHEMY_RPC_URL;
-const heliusUrl = process.env.HELIUS_RPC_URL;
+const alchemyUrl = process.env.ALCHEMY_RPC_URL || 'https://api.mainnet-beta.solana.com';
+const heliusUrl = process.env.HELIUS_RPC_URL || 'https://api.mainnet-beta.solana.com';
 
 console.log(`\n🔌 [System] 初始化 Solana 雙核連線 (具備 2 秒極速超時切換)...`);
 if (!alchemyUrl || !heliusUrl) {
