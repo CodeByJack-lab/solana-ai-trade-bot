@@ -53,7 +53,7 @@ async function toggleHeliusWebhook(enable = true) {
             webhookType: "enhanced"
         };
 
-        await axios.put(currentUrl, payload);
+        //await axios.put(currentUrl, payload);
         
         if (enable) {
             console.log('✅ [Webhook Manager] Helius Webhook 已成功啟動！');
