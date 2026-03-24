@@ -1,22 +1,23 @@
-// src/index.js - V5.5 終極對沖基金全自動化架構
+// src/index.js - V6.0 終極對沖基金全自動化架構
 
 const { supabase } = require('./config/supabase'); 
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
 const { startMarketMonitor } = require('./services/monitorService'); // Meme Webhook + 撈魚 + 橫盤
 const { getSolPriceInHKD } = require('./services/priceService'); 
 
-// 🚨 V5.5 新增模組匯入
+// 🚨 核心模組匯入
 const { macroMonitorService } = require('./services/macroMonitorService'); // 雙龍大盤防禦
 const { blueChipJob } = require('./jobs/blueChipJob');                     // 老幣抄底雷達
 const { retrospectiveJob } = require('./jobs/retrospectiveJob');           // AI 12AM/PM 復盤大腦
 const { healthMonitor } = require('./services/healthMonitor');             // 全局健康看板
 
-// 💀 墓地系統 (保留原有)
-const { graveyardJob } = require('./jobs/graveyardJob'); 
+// 💀 後勤系統
+const { graveyardJob } = require('./jobs/graveyardJob');                   // 死囚火化排程 (收租)
+const { janitorJob } = require('./jobs/janitorJob');                       // 🚀 新增：清道夫排程 (收租)
 
 async function startApp() {
     console.log("======================================================");
-    console.log("🚀 SOL_Trade V5.5 終極雙軌並行 + 跨廠 AI 備援版啟動...");
+    console.log("🚀 SOL_Trade V6.0 實盤防彈版啟動...");
     console.log("======================================================");
 
     /**
@@ -70,19 +71,20 @@ async function startApp() {
     }
 
     // ==========================================
-    // 3. 🚀 啟動全軍列陣 (V5.5 核心模組)
+    // 3. 🚀 啟動全軍列陣 (V6.0 核心模組) - 統一在此呼叫！
     // ==========================================
-    startMarketMonitor();        // 啟動 Express Webhook, 滴水撈魚, 橫盤接回, 監軍逃生
-    macroMonitorService.start(); // 啟動 BTC/SOL 雙龍防禦
-    blueChipJob.start();         // 啟動 Binance RSI 老幣抄底雷達
-    retrospectiveJob.start();    // 啟動 12AM/PM AI 參數微調排程
+    startMarketMonitor();        // 啟動 Express Webhook, 滴水撈魚, 橫盤接回, 監軍逃生 (無內部 Cron)
+    macroMonitorService.start(); // 啟動 BTC/SOL 雙龍防禦 (每 6 小時)
+    blueChipJob.start();         // 啟動 Binance RSI 老幣抄底雷達 (每 5 分鐘)
+    retrospectiveJob.start();    // 啟動 12AM/PM AI 參數微調排程 (每日 2 次)
+    janitorJob.start();          // 啟動清道夫回收 0 餘額 ATA 租金 (每日凌晨 4 點)
     
     if (graveyardJob && typeof graveyardJob.start === 'function') {
-        graveyardJob.start();    // 啟動死囚火化排程
+        graveyardJob.start();    // 啟動死囚火化排程 (每日凌晨 3 點)
     }
 
     /**
-     * 4. 💤 回報線：一體化「單行戰報」Loop (每 60 秒印一次，加入 Health Board)
+     * 4. 💤 回報線：一體化「單行戰報」Loop (每 60 秒印一次)
      */
     async function backgroundReportLoop() {
         try {
@@ -103,12 +105,11 @@ async function startApp() {
             const totalCapitalSol = currentCache.cash_sol + investedSol;
             const totalCapitalHkd = totalCapitalSol * solHkdPrice;
             
-            // 📢 構建終極戰報 (結合資金與全局監控狀態)
             console.log(`\n========================================`);
             console.log(`📊 [實時戰報] 總資產: $${totalCapitalHkd.toFixed(2)} HKD | 現金: ${currentCache.cash_sol.toFixed(4)} SOL`);
             console.log(`持倉數: ${currentCache.positions.length} 隻`);
             console.log(`--- 🩺 系統健康看板 ---`);
-            console.log(healthMonitor.getHealthReport()); // 💡 印出所有模組嘅 🟢/🔴 狀態
+            console.log(healthMonitor.getHealthReport()); 
             console.log(`========================================`);
             
             await updateSystemStatus(`🦅 監控中 | 總資產: $${totalCapitalHkd.toFixed(2)} HKD`);
