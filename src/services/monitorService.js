@@ -83,7 +83,7 @@ app.post('/webhook/helius', async (req, res) => {
         const events = req.body;
         if (!Array.isArray(events)) return;
 
-        stats_totalWebhookSignals += events.length; // ✅ 加返計數機，戰報唔會再係 0
+        stats_totalWebhookSignals += events.length; 
 
         for (const event of events) {
             const instructions = event.instructions || [];
@@ -96,23 +96,44 @@ app.post('/webhook/helius', async (req, res) => {
                             const decodedBytes = bs58.decode(dataObj);
                             const hexString = Buffer.from(decodedBytes).toString('hex');
                             
-                            // 🚀 根據 Log 修正：識別新的 Pump.fun 發射密碼
                             const isNewMeme = 
-                                hexString.startsWith('181ec828051c0777') || // 經典密碼
-                                hexString.startsWith('d6904cec5f8b31b4') || // ✅ 你 Log 入面顯示嘅 CREATE
-                                hexString.startsWith('253a237ebe35e4c5') ||  // ✅ 你 Log 入面顯示嘅 UNKNOWN
+                                hexString.startsWith('181ec828051c0777') || 
+                                hexString.startsWith('d6904cec5f8b31b4') || 
+                                hexString.startsWith('253a237ebe35e4c5') || 
                                 hexString.startsWith('a572670079cef751') ||
                                 hexString.startsWith('66063d1201daebea');
 
                             if (isNewMeme) {
-                                // 提取 Mint Address (通常係第一個 Account)
                                 const mintAddress = ix.accounts[0];
                                 if (mintAddress) {
                                     stats_pumpFunCreates++; 
-                                    // 放入魚池 (nursery_pool)
-                                    await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
-                                    stats_addedToNursery++; 
-                                    console.log(`🌟 [Webhook] 成功捕捉新幣入池: ${mintAddress}`);
+
+                                    // 🚀 核心改動：限制魚池上限 50
+                                    // 1. 檢查目前魚池數量
+                                    const { count } = await supabase.from('nursery_pool').select('*', { count: 'exact', head: true });
+
+                                    // 2. 如果魚池已滿 (>= 50)，先刪除最舊的一隻魚
+                                    if (count >= 50) {
+                                        const { data: oldestFish } = await supabase
+                                            .from('nursery_pool')
+                                            .select('mint_address')
+                                            .order('created_at', { ascending: true }) // 搵出最舊嘅時間
+                                            .limit(1)
+                                            .single();
+
+                                        if (oldestFish) {
+                                            await supabase.from('nursery_pool').delete().eq('mint_address', oldestFish.mint_address);
+                                            console.log(`🧹 [Nursery] 魚池滿員，已自動清理最舊魚隻: ${oldestFish.mint_address}`);
+                                        }
+                                    }
+
+                                    // 3. 放入最新嘅魚
+                                    const { error } = await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
+                                    
+                                    if (!error) {
+                                        stats_addedToNursery++; 
+                                        console.log(`🌟 [Webhook] 成功捕捉新幣入池 (50限額內): ${mintAddress}`);
+                                    }
                                 }
                             }
                         } catch (e) { }
