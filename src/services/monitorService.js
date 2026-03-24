@@ -99,6 +99,7 @@ app.post('/webhook/helius', async (req, res) => {
                             const isNewMeme = 
                                 hexString.startsWith('181ec828051c0777') || 
                                 hexString.startsWith('d6904cec5f8b31b4') || 
+                                hexString.startsWith('253a237ebe35e4c5') || 
                                 hexString.startsWith('a572670079cef751') ||
                                 hexString.startsWith('66063d1201daebea');
 
@@ -107,34 +108,18 @@ app.post('/webhook/helius', async (req, res) => {
                                 if (mintAddress) {
                                     stats_pumpFunCreates++; 
 
-                             // 🚀 1. 直接插入新魚
-                                const { error: insErr } = await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
-        
-                                    if (!insErr) {
-                                        stats_addedToNursery++;
-                                        console.log(`🌟 [Webhook] 新幣入池: ${mintAddress}`);
+                                    // 🚀 核心改動：呼叫剛才建立的 SQL RPC 函數
+                                    // 佢會自動幫你 Check 係咪夠 50 隻
+                                    const { data: isInserted, error } = await supabase.rpc('insert_fish_with_limit', {
+                                        new_mint_address: mintAddress
+                                    });
 
-                             // 🚀 2. 暴力清理：只保留最新 50 隻，其餘全部刪除
-                             // 呢句 SQL 邏輯係：刪除所有「唔喺最新 50 名內」嘅魚
-                                const { data: fishToKill } = await supabase
-                                    .from('nursery_pool')
-                                    .select('mint_address')
-                                    .order('created_at', { ascending: false }) // 由新到舊排
-                                    .range(50, 100); // 攞第 51 隻開始打後嘅魚
-
-     if (fishToKill && fishToKill.length > 0) {
-         const targets = fishToKill.map(f => f.mint_address);
-         await supabase.from('nursery_pool').delete().in('mint_address', targets);
-         console.log(`🧹 [Nursery] 已清理 ${targets.length} 隻舊魚，維持 50 隻限額。`);
-                                        }
-                                    }
-
-                                    // 3. 放入最新嘅魚
-                                    const { error } = await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
-                                    
-                                    if (!error) {
+                                    if (isInserted) {
                                         stats_addedToNursery++; 
-                                        console.log(`🌟 [Webhook] 成功捕捉新幣入池 (50限額內): ${mintAddress}`);
+                                        console.log(`🌟 [Webhook] 魚池未滿，成功加入新魚: ${mintAddress}`);
+                                    } else {
+                                        // 呢度就是 50 隻爆咗嘅情況
+                                        console.log(`🛑 [Nursery] 魚池已達 50 隻上限，拒收新魚: ${mintAddress}`);
                                     }
                                 }
                             }
