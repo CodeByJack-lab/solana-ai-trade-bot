@@ -125,6 +125,10 @@ const macroMonitorService = {
                         await supabase.from('system_config').update({ is_running: false, status_msg: `避險中 (指數:${newsScore})` }).eq('id', 1);
                         sendTelegramAlert(`🚨 <b>大盤崩盤確認</b>\n跌幅: ${priceAlertMsg}\nAI 災難分: ${newsScore}`);
                         pauseCooldownUntil = now + (30 * 60 * 1000); 
+                        setTimeout(async () => {
+                            await supabase.from('system_config').update({ is_running: true, status_msg: '避險期結束，系統自動恢復' }).eq('id', 1);
+                            sendAdminAlert("✅ <b>[自動恢復]</b> 30分鐘避險期已滿，系統已重新著機。");
+                        }, 30 * 60 * 1000);
                     }
                 }
             } catch (err) {
