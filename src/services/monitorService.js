@@ -497,7 +497,7 @@ function startPositionMonitor() {
             console.error(`❌ [Position Monitor] 監控迴圈異常:`, err.message);
             healthMonitor.setStatus('AI_Overseer', `🔴 監控異常: ${err.message}`);
         }
-    }, 60000); 
+    }, 120000); 
 }
 
 function startCommandListener() {

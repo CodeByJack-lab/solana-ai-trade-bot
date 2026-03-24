@@ -132,7 +132,7 @@ const macroMonitorService = {
                 healthMonitor.setStatus('Macro_Radar', `🔴 異常: ${err.message}`);
                 useCoinGeckoNext = !useCoinGeckoNext;
             }
-        }, 120000); 
+        }, 180000); 
     }
 };
 
