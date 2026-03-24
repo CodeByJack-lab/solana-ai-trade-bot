@@ -65,6 +65,10 @@ const blueChipJob = {
         isRunning = true;
         healthMonitor.setStatus('Bluechip_Radar', '🟢 掃描中...');
 
+        // 🚀 控制 Terminal Log 頻率：每逢 0分、10分、20分... 印出一次心跳日誌
+        const currentMinute = new Date().getMinutes();
+        const shouldLog = (currentMinute % 10 === 0);
+
         try {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
             if (!config || !config.is_running) {
@@ -79,8 +83,12 @@ const blueChipJob = {
                 isRunning = false; return;
             }
 
+            if (shouldLog) {
+                console.log(`\n💎 [Bluechip Radar] 每10分鐘例行報告: 目前雷達正鎖定 ${pool.length} 隻老幣進行靜默掃描...`);
+            }
+
             try {
-                // 🚀 核心修復：DexScreener 批次獲取 (分批切肉法，上限 30 隻一碟)
+                // 🚀 DexScreener 批次獲取 (分批切肉法，上限 30 隻一碟)
                 let dexPairs = [];
                 const chunkSize = 30; 
                 for (let i = 0; i < pool.length; i += chunkSize) {
@@ -96,21 +104,19 @@ const blueChipJob = {
                         if (e.response && e.response.status === 429) {
                             console.warn(`⚠️ [Bluechip] 觸發 429 限流，自動冷卻 2 秒...`);
                             await new Promise(r => setTimeout(r, 2000));
-                        } else {
-                            console.warn(`⚠️ [Bluechip] DexScreener 批次請求警告:`, e.message);
                         }
                     }
-                    await new Promise(r => setTimeout(r, 500)); // 🛑 每批冷卻 0.5 秒，保護 API
+                    await new Promise(r => setTimeout(r, 500)); 
                 }
 
                 const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
                 const bluechipLimits = {
-                    maxRSI: params?.bluechip_max_rsi || 40, // 預設放寬至 40
-                    minDropPct: params?.bluechip_min_drop_pct || 2, // 預設跌幅 2%
+                    maxRSI: params?.bluechip_max_rsi || 40,
+                    minDropPct: params?.bluechip_min_drop_pct || 2, 
                     minVolUsd: params?.bluechip_min_vol || 500000 
                 };
 
-                // --- 🔓 解鎖 1：放寬跌幅條件 (加入 24H 陰跌判定) ---
+                // --- 🔓 篩選跌破門檻的老幣 ---
                 const targetTokens = [];
                 const targetDrop = Math.abs(bluechipLimits.minDropPct);
                 
@@ -129,11 +135,17 @@ const blueChipJob = {
                 }
 
                 if (targetTokens.length === 0) {
+                    if (shouldLog) {
+                        console.log(`💎 [Bluechip Radar] 掃描完畢: ${pool.length} 隻老幣均未觸發急跌門檻，大盤企穩中。`);
+                    }
                     healthMonitor.setStatus('Bluechip_Radar', '🟢 巡邏完畢 (無跌破目標)');
                     isRunning = false; return;
                 }
 
-                // --- 核心分析迴圈 ---
+                // 🚨 只要有幣達標，無視 10 分鐘規則，強制爆響警報！
+                console.log(`\n🚨 [Bluechip Radar] 警報！發現 ${targetTokens.length} 隻老幣觸發跌幅門檻，啟動 Birdeye 深度技術分析...`);
+
+                // --- 核心技術分析迴圈 ---
                 for (const token of targetTokens) {
                     try {
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&limit=30`, {
@@ -154,15 +166,13 @@ const blueChipJob = {
 
                             const isRsiHook = prevRsi <= bluechipLimits.maxRSI && currentRsi > prevRsi; 
                             
-                            // --- 🔓 解鎖 2：廢除縮量悖論 (只要跌穿布林底 + RSI勾頭就當係 Dip) ---
-                            // 放寬布林帶邊界至 1.05 (允許輕微誤差)
+                            // 跌穿布林底 + RSI勾頭
                             const isDip = isRsiHook && bb && currentPrice <= (bb.lower * 1.05);
 
                             if (isDip) {
                                 const signalType = '右側抄底(RSI勾頭)';
-                                console.log(`🚨 [Bluechip] ${token.token_symbol} 觸發【${signalType}】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})，讀取 AI 記憶庫...`);
+                                console.log(`🎯 [Bluechip] ${token.token_symbol} 觸發【${signalType}】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})，讀取 AI 記憶庫...`);
                                 
-                                // 🌟 1. 讀取「大腦記憶體」
                                 let { data: memory } = await supabase.from('bluechip_pool').select('last_ai_comment, last_observed_at').eq('mint_address', token.mint_address).single();
                                 
                                 let pastComment = "無歷史紀錄 (首次觀測)";
@@ -173,7 +183,6 @@ const blueChipJob = {
                                     pastTime = new Date(memory.last_observed_at).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
                                 }
 
-                                // 🌟 2. 構建大腦所需的市場數據
                                 const marketData = {
                                     symbol: token.token_symbol,
                                     currentPrice: currentPrice,
@@ -183,23 +192,19 @@ const blueChipJob = {
                                     lastTime: pastTime
                                 };
 
-                                // 🌟 3. 呼叫大腦進行決策
                                 const decisionObj = await consensusService.runBluechipConsensus(token.mint_address, marketData);
 
-                                // 🌟 4. 執行狀態機邏輯
                                 if (decisionObj.buy) {
                                     await executeBuy(token.mint_address, token.token_symbol, 'BLUECHIP_SWING', 100, decisionObj.reason, config.trade_amount_sol);
-                                    // 買完清空記憶
                                     await supabase.from('bluechip_pool').update({ last_ai_comment: null, last_observed_at: null }).eq('mint_address', token.mint_address);
                                 } else {
+                                    console.log(`🧠 [Bluechip AI] ${token.token_symbol} 抄底被否決: ${decisionObj.reason}`);
                                     if (decisionObj.reason.includes('ONHOLD')) {
-                                        // 寫入記憶庫，等下次比對
                                         await supabase.from('bluechip_pool').update({ 
                                             last_ai_comment: decisionObj.reason, 
                                             last_observed_at: new Date() 
                                         }).eq('mint_address', token.mint_address);
                                     } else if (decisionObj.reason.includes('ABORT')) {
-                                        // 判斷趨勢已死，清空記憶放棄跟蹤
                                         await supabase.from('bluechip_pool').update({ last_ai_comment: null, last_observed_at: null }).eq('mint_address', token.mint_address);
                                     }
                                 }
@@ -227,7 +232,7 @@ const blueChipJob = {
 
     start() {
         cron.schedule('*/5 * * * *', () => { this.runRoutine(); });
-        console.log(`📡 [Bluechip] 老幣抄底雷達已啟動 (每 5 分鐘掃描一次)`);
+        console.log(`📡 [Bluechip] 老幣抄底雷達已啟動 (背景靜默掃描，每 10 分鐘印出戰報)`);
     }
 };
 
