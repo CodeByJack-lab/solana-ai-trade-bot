@@ -20,9 +20,17 @@ const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
 const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
 
-const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
+
+// 🚀 核心升級：RPC 備援陣列 (Fallback Array)
+const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
+const FALLBACK_RPCS = [
+    HELIUS_RPC_URL,                           // 首選：Helius 專屬節點
+    "https://rpc.ankr.com/solana",            // 備援一：Ankr 公共節點
+    "https://solana-rpc.publicnode.com",      // 備援二：PublicNode
+    "https://api.mainnet-beta.solana.com"     // 備援三：Solana 官方主網 (墊底)
+];
 
 // 📊 Webhook 戰況統計計數器
 let stats_totalWebhookSignals = 0;
@@ -56,6 +64,27 @@ async function toggleHeliusWebhook(enable = true) {
     }
 }
 
+// 🚀 核心升級：具備自動切換功能的 RPC 請求器
+async function fetchAccountInfoWithFallback(pubkey) {
+    const payload = {
+        jsonrpc: "2.0", id: 1, method: "getAccountInfo",
+        params: [pubkey, { encoding: "jsonParsed" }]
+    };
+
+    for (let i = 0; i < FALLBACK_RPCS.length; i++) {
+        try {
+            const res = await axios.post(FALLBACK_RPCS[i], payload, { timeout: 3500 });
+            if (res.data && !res.data.error) {
+                return res.data; // 成功攞到資料，即刻 Return
+            }
+        } catch (err) {
+            const rpcName = new URL(FALLBACK_RPCS[i]).hostname;
+            // 靜默處理，避免洗版，只在背景切換
+        }
+    }
+    throw new Error("所有 RPC 節點均無法連線或被限流");
+}
+
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK');
 
@@ -76,7 +105,7 @@ app.post('/webhook/helius', async (req, res) => {
             const instructions = event.instructions || [];
             let isPumpFunCreate = false;
 
-            // 🚀 核心大升級：深度掃描 innerInstructions 突破俄羅斯套娃！
+            // 深度掃描 innerInstructions 突破俄羅斯套娃
             function checkIsPumpFunCreate(ix) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
@@ -121,17 +150,16 @@ app.post('/webhook/helius', async (req, res) => {
                 const pubkey = acc.account;
                 if (pubkey !== PUMP_FUN_PROGRAM_ID && pubkey !== SYSTEM_PROGRAM_ID) {
                     try {
-                        const accountInfo = await axios.post(HELIUS_RPC_URL, {
-                            jsonrpc: "2.0", id: 1, method: "getAccountInfo",
-                            params: [pubkey, { encoding: "jsonParsed" }]
-                        });
-                        const data = accountInfo.data?.result?.value?.data;
+                        // 🚀 套用 RPC 備援陣列去查家宅
+                        const accountInfo = await fetchAccountInfoWithFallback(pubkey);
+                        const data = accountInfo?.result?.value?.data;
+                        
                         if (data && data.program === "spl-token" && data.parsed?.type === "mint") {
                             mintAddress = pubkey;
                             break;
                         }
                     } catch (e) {
-                        console.warn(`⚠️ [Webhook] 解析代幣地址失敗:`, e.message);
+                        console.warn(`⚠️ [Webhook] 解析代幣地址失敗 (${pubkey.substring(0,6)}):`, e.message);
                     }
                 }
             }
