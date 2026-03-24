@@ -54,7 +54,7 @@ async function toggleHeliusWebhook(enable = true) {
 
         const payload = {
             webhookURL: targetUrl,
-            transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
+            transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT", "UNKNOWN"], 
             accountAddresses: [
                 "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 
                 "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
