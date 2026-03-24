@@ -9,7 +9,7 @@ const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
 // ==========================================
-// 🧠 本地指標運算庫 (CPU 處理，0 API 消耗)
+// 🧠 本地指標運算庫
 // ==========================================
 function getRSIHistory(closes, periods = 14) {
     if (closes.length <= periods) return [50, 50, 50]; 
@@ -140,9 +140,13 @@ const blueChipJob = {
 
                 console.log(`\n🚨 [Bluechip Radar] 警報！發現 ${targetTokens.length} 隻老幣觸發跌幅門檻，啟動 Birdeye 深度技術分析...`);
 
+                // 🚀 FIX: 加入精確時間戳，解決 Birdeye 0/30 K線數據問題
+                const time_to = Math.floor(Date.now() / 1000);
+                const time_from = time_to - (30 * 15 * 60); 
+
                 for (const token of targetTokens) {
                     try {
-                        const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&limit=30`, {
+                        const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&time_from=${time_from}&time_to=${time_to}`, {
                             headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' },
                             timeout: 5000
                         });
@@ -204,7 +208,6 @@ const blueChipJob = {
                                 console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達完美抄底條件 (目前 RSI: ${currentRsi.toFixed(1)}, 是否低於布林底: ${bb && currentPrice <= (bb.lower * 1.05) ? '是' : '否'})，放棄呼叫 AI。`);
                             }
                         } else {
-                            // 🚀 這是你要求的補齊邏輯：若少於 30 支 K 線，印出交代
                             console.log(`⚠️ [Bluechip] ${token.token_symbol} K線數據不足 (僅 ${items.length}/30 支)，放棄技術分析。`);
                         }
                     } catch (err) {

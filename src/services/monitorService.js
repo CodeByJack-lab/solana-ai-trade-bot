@@ -22,8 +22,6 @@ const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-producti
 
 const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
-const RAYDIUM_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
-const JUPITER_PROGRAM_ID = "JUP6LkbZbjS1jKKwapdH67f95g8436LLs1PapwerTqE";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 
 // 📊 Webhook 戰況統計計數器
@@ -78,26 +76,38 @@ app.post('/webhook/helius', async (req, res) => {
             const instructions = event.instructions || [];
             let isPumpFunCreate = false;
 
-            // 🚀 修正: 安全的 Enhanced 模式解析方式
-            for (const ix of instructions) {
+            // 🚀 核心大升級：深度掃描 innerInstructions 突破俄羅斯套娃！
+            function checkIsPumpFunCreate(ix) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
                     if (typeof dataObj === 'string' && dataObj.length > 0) {
                         try {
                             const decodedBytes = bs58.decode(dataObj);
                             const hexString = Buffer.from(decodedBytes).toString('hex');
-                            if (hexString.startsWith('181ec828051c0777')) {
-                                isPumpFunCreate = true;
-                                break;
-                            }
-                        } catch (e) {
-                             // 如果 bs58 fail，fallback 檢查 Helius 增強事件類型
-                             if (event.type === 'TOKEN_MINT' || event.type === 'UNKNOWN') {
-                                 isPumpFunCreate = true;
-                                 break;
-                             }
-                        }
+                            if (hexString.startsWith('181ec828051c0777')) return true;
+                        } catch (e) {}
                     }
+                }
+                if (ix.innerInstructions && Array.isArray(ix.innerInstructions)) {
+                    for (const inner of ix.innerInstructions) {
+                        if (checkIsPumpFunCreate(inner)) return true;
+                    }
+                }
+                return false;
+            }
+
+            for (const ix of instructions) {
+                if (checkIsPumpFunCreate(ix)) {
+                    isPumpFunCreate = true;
+                    break;
+                }
+            }
+
+            // Helius Enhanced 雙重保險
+            if (!isPumpFunCreate && (event.type === 'TOKEN_MINT' || event.type === 'CREATE_POOL')) {
+                const accountsList = (event.accountData || []).map(a => a.account);
+                if (accountsList.includes(PUMP_FUN_PROGRAM_ID)) {
+                     isPumpFunCreate = true;
                 }
             }
 
@@ -137,9 +147,6 @@ app.post('/webhook/helius', async (req, res) => {
     }
 });
 
-// ==========================================
-// 📊 10 分鐘 Webhook 戰況結算雷達
-// ==========================================
 function startWebhookStatsMonitor() {
     setInterval(() => {
         const discarded = stats_totalWebhookSignals - stats_addedToNursery;
@@ -157,9 +164,6 @@ function startWebhookStatsMonitor() {
     }, 10 * 60 * 1000); 
 }
 
-// ==========================================
-// 🎣 滴水式撈魚監控 (方案 B：DB + RAM 雙層過濾 + AI 防撞鎖)
-// ==========================================
 const ramSecondaryPool = new Map(); 
 let isAiReviewing = false;          
 
@@ -488,7 +492,7 @@ function startCommandListener() {
                 } 
                 else if (cmd.command_type === 'PAUSE_BUY') {
                     await supabase.from('system_config').update({ is_running: false, status_msg: '已暫停新開倉' }).eq('id', 1);
-                    sendAdminAlert(`⏸️ <b>系統已暫停買入</b>\n持 practised倉監控會繼續運作，但不會買入新幣。`);
+                    sendAdminAlert(`⏸️ <b>系統已暫停買入</b>\n持倉監控會繼續運作，但不會買入新幣。`);
                 }
                 else if (cmd.command_type === 'RESUME_BUY') {
                     await supabase.from('system_config').update({ is_running: true, status_msg: '正常運作中' }).eq('id', 1);
