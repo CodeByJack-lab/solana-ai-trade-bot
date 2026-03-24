@@ -8,12 +8,29 @@ const newsSentimentService = {
     async getDisasterScore() {
         console.log('📰 [News_AI] 收到大盤暴跌信號！啟動 RSS 突發新聞掃描...');
         try {
-            // 1. 抓取 CoinTelegraph 最新 RSS 標題 (完全免費，免 API Key)
-            const feed = await parser.parseURL('https://cointelegraph.com/rss');
-            // 抽最新 8 條標題出嚟
-            const recentTitles = feed.items.slice(0, 8).map(item => `- ${item.title}`).join('\n');
+            // 🚀 修正 1：手動用 axios 獲取 RSS，並加上瀏覽器 Header，防止被 CoinTelegraph 攔截
+            const rssUrl = 'https://cointelegraph.com/rss';
+            const response = await axios.get(rssUrl, {
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                    'Accept': 'application/rss+xml, application/xml;q=0.9, */*;q=0.8'
+                },
+                timeout: 8000
+            });
 
-            // 2. 準備 Groq 嘅 Prompt
+            // 將獲取到的 XML 字串傳給 parser
+            const feed = await parser.parseString(response.data);
+            
+            if (!feed.items || feed.items.length === 0) {
+                console.log('⚠️ [News_AI] RSS 抓取成功但內容為空，跳過評分。');
+                return 50;
+            }
+
+            // 抽最新 8 條標題
+            const recentTitles = feed.items.slice(0, 8).map(item => `- ${item.title}`).join('\n');
+            console.log(`📑 [News_AI] 成功抓取 ${feed.items.length} 條新聞，準備分析...`);
+
+            // 🚀 修正 2：準備 Groq API 呼叫 (增加防呆)
             const groqApiKey = process.env.GROQ_API_KEY; 
             if (!groqApiKey) throw new Error("環境變數缺少 GROQ_API_KEY");
 
@@ -26,19 +43,19 @@ const newsSentimentService = {
 最新新聞標題：
 ${recentTitles}`;
 
-            // 3. Call 你現有嘅 Groq API (用極速 Llama 3)
             const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
                 model: "llama3-70b-8192",
                 messages: [{ role: "user", content: prompt }],
-                temperature: 0.1 // 越低越冷靜，唔好發夢
+                temperature: 0.1
             }, {
                 headers: { 
-                    'Authorization': `Bearer ${groqApiKey}`, 
+                    'Authorization': `Bearer ${groqApiKey.replace(/['"]/g, '').trim()}`, 
                     'Content-Type': 'application/json' 
-                }
+                },
+                timeout: 10000
             });
 
-            // 4. 清理並提取分數
+            // 5. 提取分數
             const scoreStr = groqRes.data.choices[0].message.content.trim();
             const score = parseInt(scoreStr.replace(/\D/g, ''), 10) || 50; 
 
@@ -46,8 +63,13 @@ ${recentTitles}`;
             return score;
 
         } catch (error) {
-            console.error('❌ [News_AI] 新聞評分失敗，預設返回 50 分以保安全:', error.message);
-            return 50; // 萬一斷網，當普通跌市處理
+            // 🚀 修正 3：更詳細的報錯，幫你分清楚係 RSS 定係 Groq 出事
+            if (error.response) {
+                console.error(`❌ [News_AI] API 報錯 (Status ${error.response.status}):`, error.response.data);
+            } else {
+                console.error('❌ [News_AI] 系統錯誤:', error.message);
+            }
+            return 50; 
         }
     }
 };
