@@ -4,17 +4,14 @@ const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } =
 const { startMarketMonitor } = require('./services/monitorService'); 
 const { getSolPriceInHKD } = require('./services/priceService'); 
 
-// 🚨 核心模組匯入
 const { macroMonitorService } = require('./services/macroMonitorService'); 
 const { blueChipJob } = require('./jobs/blueChipJob');                     
 const { retrospectiveJob } = require('./jobs/retrospectiveJob');           
 const { healthMonitor } = require('./services/healthMonitor');             
 
-// 💀 後勤系統
 const { graveyardJob } = require('./jobs/graveyardJob');                   
 const { janitorJob } = require('./jobs/janitorJob');                       
 
-// 🚀 獨立抽出的狀態更新引擎 (解決切換 Mode 延遲問題)
 async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
     try {
         const currentCache = getPortfolio();
@@ -44,7 +41,6 @@ async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
             console.log(`========================================`);
         }
         
-        // 🚀 一步到位：同時覆蓋 Icon、模式與資產
         await updateSystemStatus(`${statusIcon} | ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD`);
     } catch (e) {
         console.error("⚠️ 狀態更新失敗:", e.message);
@@ -58,21 +54,22 @@ async function startApp() {
 
     let isFirstLoad = true; 
 
-    /**
-     * 1. 🚀 指令線：監聽 system_config
-     */
     supabase.channel('system_config_monitor')
         .on(
             'postgres_changes',
             { event: 'UPDATE', schema: 'public', table: 'system_config', filter: 'id=eq.1' },
-            (payload) => {
+            async (payload) => {
                 const newData = payload.new;
-                const portfolio = getPortfolio();
+                
+                // 🚀 FIX: 當偵測到模式 (PAPER/LIVE) 發生切換時，強制清洗並重新載入整個 Portfolio 記憶體！
+                if (global.tradeMode !== newData.trade_mode) {
+                    console.log(`\n🔄 [系統指令] 偵測到交易模式切換 (${global.tradeMode} ➡️ ${newData.trade_mode})`);
+                    console.log(`🧹 正在清洗大腦記憶體，重新載入 ${newData.trade_mode} 專屬數據庫...`);
+                    await initPortfolio(); // 強制重刷
+                }
 
+                const portfolio = getPortfolio();
                 if (portfolio) {
-                    // 🚀 致命 Bug 修正：即時將 Bot 底層記憶體切換為實盤/模擬盤！
-                    portfolio.mode = newData.trade_mode; 
-                    
                     if (newData.trade_mode === 'PAPER') {
                         if (Math.abs(portfolio.cash_sol - newData.simulated_balance) > 0.0001) {
                             portfolio.cash_sol = newData.simulated_balance;
@@ -86,17 +83,14 @@ async function startApp() {
                     }
                 }
 
-                if (global.isRunning === newData.is_running && global.tradeMode === newData.trade_mode) {
-                    return; 
-                }
+                if (global.isRunning === newData.is_running && global.tradeMode === newData.trade_mode) return;
 
                 global.isRunning = newData.is_running;
                 global.tradeMode = newData.trade_mode;
 
                 if (!isFirstLoad) {
                     console.log(`\n🔔 [遠端指令] 狀態: ${newData.is_running ? '🟢 運行中' : '🔴 已暫停'} | 模式: ${newData.trade_mode}`);
-                    // 🚀 呼叫獨立引擎，一撳掣 0 秒即刻轉字眼！
-                    forceUpdateStatusAndPrint(newData, false); 
+                    await forceUpdateStatusAndPrint(newData, false); 
                 }
                 isFirstLoad = false;
             }
@@ -107,6 +101,9 @@ async function startApp() {
     if (!portfolio) {
         process.exit(1);
     }
+    
+    global.isRunning = true;
+    global.tradeMode = portfolio.mode;
 
     startMarketMonitor();        
     macroMonitorService.start(); 
@@ -118,15 +115,11 @@ async function startApp() {
         graveyardJob.start();    
     }
 
-    /**
-     * 4. 💤 回報線：一體化「單行戰報」Loop
-     */
     async function backgroundReportLoop() {
         if (global.isRunning === false) {
             console.log("💤 系統暫停中...");
         } else {
             await syncLiveBalanceToDB();
-            // 🚀 直接呼叫共用函數
             await forceUpdateStatusAndPrint(null, true);
         }
         setTimeout(backgroundReportLoop, 60000); 

@@ -3,7 +3,7 @@ const axios = require('axios');
 const { supabase } = require('../config/supabase');
 const { sendTelegramAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
-const { newsSentimentService } = require('./newsSentimentService'); // 🚀 1. 新增：引入情報局
+const { newsSentimentService } = require('./newsSentimentService'); 
 
 let pauseCooldownUntil = 0; 
 let useCoinGeckoNext = true; 
@@ -35,27 +35,29 @@ const macroMonitorService = {
     },
 
     // ==========================================
-    // 🌐 數據源 B：CryptoCompare
+    // 🚀 數據源 B：KuCoin (棄用 Binance/CryptoCompare，完美避開 Geo-block 與 429)
     // ==========================================
-    async fetchHighAndDropCryptoCompare(symbol) {
-        const fsym = symbol.replace('USDT', '');
-        const url = `https://min-api.cryptocompare.com/data/v2/histominute?fsym=${fsym}&tsym=USD&limit=75`;
+    async fetchHighAndDropKuCoin(symbol) {
+        // KuCoin 嘅 Symbol 格式係 BTC-USDT
+        const formattedSymbol = symbol.replace('USDT', '-USDT');
+        const url = `https://api.kucoin.com/api/v1/market/candles?type=15min&symbol=${formattedSymbol}`;
         const res = await axios.get(url, { timeout: 8000 });
         
-        if (res.data?.Response === 'Error') throw new Error(`CryptoCompare 報錯: ${res.data.Message}`);
-        
-        const klines = res.data?.Data?.Data; 
+        const klines = res.data?.data; 
         if (!klines || !Array.isArray(klines) || klines.length === 0) {
-            throw new Error(`CryptoCompare 數據格式異常 (${symbol})`);
+            throw new Error(`KuCoin 數據格式異常 (${symbol})`);
         }
         
+        // KuCoin 返回的陣列是「最新時間在最前面」(index 0 = current)
+        const recentKlines = klines.slice(0, 15);
+        
         let highestPrice = 0;
-        for (const k of klines) {
-            const high = parseFloat(k.high); 
+        for (const k of recentKlines) {
+            const high = parseFloat(k[3]); // 索引 3 是 High
             if (high > highestPrice) highestPrice = high;
         }
         
-        const currentPrice = parseFloat(klines[klines.length - 1].close);
+        const currentPrice = parseFloat(recentKlines[0][2]); // 索引 2 是 Close
         const dropPct = ((currentPrice - highestPrice) / highestPrice) * 100;
         return { currentPrice, highestPrice, dropPct };
     },
@@ -67,6 +69,7 @@ const macroMonitorService = {
         console.log(`🌍 [Macro] 大盤防禦雷達運作中 (結合 AI 新聞情報局)...`);
         healthMonitor.setStatus('Macro_Radar', '🟢 監聽中');
 
+        // 🚀 FIX: 將輪詢間隔拉長至 3 分鐘 (180000ms)，徹底解決所有 Rate Limit 封鎖問題
         setInterval(async () => {
             const now = Date.now();
             
@@ -88,10 +91,10 @@ const macroMonitorService = {
                         this.fetchHighAndDropCoinGecko('solana')
                     ]);
                 } else {
-                    sourceName = 'CryptoCompare';
+                    sourceName = 'KuCoin'; // 🚀 切換為 KuCoin
                     [btcData, solData] = await Promise.all([
-                        this.fetchHighAndDropCryptoCompare('BTCUSDT'),
-                        this.fetchHighAndDropCryptoCompare('SOLUSDT')
+                        this.fetchHighAndDropKuCoin('BTCUSDT'),
+                        this.fetchHighAndDropKuCoin('SOLUSDT')
                     ]);
                 }
 

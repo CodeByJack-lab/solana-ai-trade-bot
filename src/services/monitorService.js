@@ -24,14 +24,6 @@ const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
-const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
-const FALLBACK_RPCS = [
-    HELIUS_RPC_URL,                           
-    "https://rpc.ankr.com/solana",            
-    "https://solana-rpc.publicnode.com",      
-    "https://api.mainnet-beta.solana.com"     
-];
-
 let stats_totalWebhookSignals = 0;
 let stats_pumpFunCreates = 0;
 let stats_addedToNursery = 0;
@@ -54,7 +46,6 @@ async function toggleHeliusWebhook(enable = true) {
             console.log('🛑 [Helius] 正在切斷 Webhook 接收...');
         }
 
-        // 🚀 FIX: 終極純淨 Payload！唔再 merge 舊數據，防止 Helius 報 400 Bad Request！
         const payload = {
             webhookURL: targetUrl,
             transactionTypes: ["Any"],
@@ -76,24 +67,6 @@ async function toggleHeliusWebhook(enable = true) {
     }
 }
 
-async function fetchAccountInfoWithFallback(pubkey) {
-    const payload = {
-        jsonrpc: "2.0", id: 1, method: "getAccountInfo",
-        params: [pubkey, { encoding: "jsonParsed" }]
-    };
-
-    for (let i = 0; i < FALLBACK_RPCS.length; i++) {
-        try {
-            const res = await axios.post(FALLBACK_RPCS[i], payload, { timeout: 3500 });
-            if (res.data && !res.data.error) {
-                return res.data; 
-            }
-        } catch (err) {
-        }
-    }
-    throw new Error("所有 RPC 節點均無法連線或被限流");
-}
-
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK');
 
@@ -110,67 +83,42 @@ app.post('/webhook/helius', async (req, res) => {
         stats_totalWebhookSignals += events.length;
 
         for (const event of events) {
-            
             const instructions = event.instructions || [];
-            let isPumpFunCreate = false;
+            let mintAddress = null;
 
-            function checkIsPumpFunCreate(ix) {
+            // 🚀 FIX: 繞過 RPC 查詢，直接從智能合約 Bytecode 提取代幣地址！極速且無懼限流！
+            function extractMintFromPumpFun(ix) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
                     if (typeof dataObj === 'string' && dataObj.length > 0) {
                         try {
                             const decodedBytes = bs58.decode(dataObj);
                             const hexString = Buffer.from(decodedBytes).toString('hex');
-                            if (hexString.startsWith('181ec828051c0777')) return true;
+                            // 判斷是否為 Pump.fun 的 'Create' 指令 (181ec828051c0777)
+                            if (hexString.startsWith('181ec828051c0777')) {
+                                if (ix.accounts && ix.accounts.length > 0) {
+                                    return ix.accounts[0]; // 創建指令的第一個 Account 必定是新幣的 Mint 地址
+                                }
+                            }
                         } catch (e) {}
                     }
                 }
                 if (ix.innerInstructions && Array.isArray(ix.innerInstructions)) {
                     for (const inner of ix.innerInstructions) {
-                        if (checkIsPumpFunCreate(inner)) return true;
+                        const mint = extractMintFromPumpFun(inner);
+                        if (mint) return mint;
                     }
                 }
-                return false;
+                return null;
             }
 
             for (const ix of instructions) {
-                if (checkIsPumpFunCreate(ix)) {
-                    isPumpFunCreate = true;
-                    break;
-                }
-            }
-
-            if (!isPumpFunCreate && (event.type === 'TOKEN_MINT' || event.type === 'CREATE_POOL')) {
-                const accountsList = (event.accountData || []).map(a => a.account);
-                if (accountsList.includes(PUMP_FUN_PROGRAM_ID)) {
-                     isPumpFunCreate = true;
-                }
-            }
-
-            if (isPumpFunCreate) stats_pumpFunCreates++; 
-            if (!isPumpFunCreate) continue;
-
-            const accounts = event.accountData || [];
-            let mintAddress = null;
-
-            for (const acc of accounts) {
-                const pubkey = acc.account;
-                if (pubkey !== PUMP_FUN_PROGRAM_ID && pubkey !== SYSTEM_PROGRAM_ID) {
-                    try {
-                        const accountInfo = await fetchAccountInfoWithFallback(pubkey);
-                        const data = accountInfo?.result?.value?.data;
-                        
-                        if (data && data.program === "spl-token" && data.parsed?.type === "mint") {
-                            mintAddress = pubkey;
-                            break;
-                        }
-                    } catch (e) {
-                        console.warn(`⚠️ [Webhook] 解析代幣地址失敗 (${pubkey.substring(0,6)}):`, e.message);
-                    }
-                }
+                mintAddress = extractMintFromPumpFun(ix);
+                if (mintAddress) break;
             }
 
             if (mintAddress) {
+                stats_pumpFunCreates++; 
                 await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
                 stats_addedToNursery++; 
                 console.log(`🌟 [Webhook] 漁網成功捕捉新幣，放入冷宮: ${mintAddress.substring(0,6)}...`);
@@ -381,7 +329,6 @@ function startWatchlistMonitor() {
 function startPositionMonitor() {
     console.log('👁️ [Radar] 智能雙引擎 (Jup V3/Dex) 批次持倉監控啟動 (2分鐘循環防限流)...');
     
-    // 🚀 FIX: 將持倉報價掃描由 60000 (1分鐘) 改為 120000 (2分鐘)，防止 Jupiter 429 限流！
     setInterval(async () => {
         try {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -397,40 +344,44 @@ function startPositionMonitor() {
             }
 
             const mints = positions.map(p => p.mint_address);
-            
             let pricesMap = {};
-            try {
-                const jupUrl = `https://api.jup.ag/price/v2?ids=${mints.join(',')}&vsToken=${SOL_MINT_ADDRESS}`;
-                const jupRes = await axios.get(jupUrl, { timeout: 3000 });
-                const jupData = jupRes.data?.data || {};
-                
-                for (const [mint, info] of Object.entries(jupData)) {
-                    if (info && info.price) {
-                        pricesMap[mint] = parseFloat(info.price);
-                    }
-                }
-            } catch (jupErr) {
-                console.warn(`⚠️ [Radar] Jupiter V3 報價失敗，切換 DexScreener 備援...`);
-            }
+            let missingMints = [...mints]; 
 
-            const missingMints = mints.filter(m => !pricesMap[m]);
-            if (missingMints.length > 0) {
-                try {
-                    const dexUrl = `https://api.dexscreener.com/latest/dex/tokens/${missingMints.join(',')}`;
-                    const dexRes = await axios.get(dexUrl, { timeout: 3000 });
-                    const dexPairs = dexRes.data?.pairs || [];
-                    
-                    for (const mint of missingMints) {
+            try {
+                const dexUrl = `https://api.dexscreener.com/latest/dex/tokens/${mints.join(',')}`;
+                const dexRes = await axios.get(dexUrl, { timeout: 4000 });
+                const dexPairs = dexRes.data?.pairs || [];
+                
+                if (dexPairs.length > 0) {
+                    const { getSolPriceInHKD } = require('./priceService');
+                    const solPriceHKD = await getSolPriceInHKD();
+                    const solPriceUSD = solPriceHKD / 7.8;
+
+                    for (const mint of mints) {
                         const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === mint);
                         if (pair && pair.priceUsd) {
-                            const { getSolPriceInHKD } = require('./priceService');
-                            const solPriceHKD = await getSolPriceInHKD();
-                            const solPriceUSD = solPriceHKD / 7.8;
                             pricesMap[mint] = parseFloat(pair.priceUsd) / solPriceUSD; 
+                            missingMints = missingMints.filter(m => m !== mint);
                         }
                     }
-                } catch (dexErr) {
-                    console.warn(`⚠️ [Radar] DexScreener 報價亦失敗。`);
+                }
+            } catch (dexErr) {
+                console.warn(`⚠️ [Radar] DexScreener 報價失敗，準備切換 Jupiter 備援...`);
+            }
+
+            if (missingMints.length > 0) {
+                try {
+                    const jupUrl = `https://api.jup.ag/price/v2?ids=${missingMints.join(',')}&vsToken=${SOL_MINT_ADDRESS}`;
+                    const jupRes = await axios.get(jupUrl, { timeout: 3000 });
+                    const jupData = jupRes.data?.data || {};
+                    
+                    for (const [mint, info] of Object.entries(jupData)) {
+                        if (info && info.price) {
+                            pricesMap[mint] = parseFloat(info.price);
+                        }
+                    }
+                } catch (jupErr) {
+                    console.warn(`⚠️ [Radar] Jupiter V3 報價亦失敗。`);
                 }
             }
 
@@ -501,7 +452,7 @@ function startPositionMonitor() {
             console.error(`❌ [Position Monitor] 監控迴圈異常:`, err.message);
             healthMonitor.setStatus('AI_Overseer', `🔴 監控異常: ${err.message}`);
         }
-    }, 120000); // 🚀 1分鐘 -> 2分鐘
+    }, 120000); 
 }
 
 function startCommandListener() {

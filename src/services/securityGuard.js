@@ -11,14 +11,11 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
 
 const securityGuard = {
-    // ==========================================
-    // 🧠 核心升級：本地 CPU 垃圾特徵預篩選庫 
-    // ==========================================
     isGarbageToken(name, symbol) {
         const target = `${name} ${symbol}`.toLowerCase();
         
         const badPatterns = [
-            /^unknown/i,        
+            // 🚀 FIX: 移除了 /^unknown/i，防止剛開盤 DexScreener 未抓取名稱時導致友軍誤殺！
             /\.com/i,           
             /\.io/i,
             /\.org/i,
@@ -58,7 +55,6 @@ const securityGuard = {
             const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
             if (dbErr) throw new Error("無法讀取動態參數");
 
-            // 🚀 動態流動性門檻：大市差，要求自動提高 1.5 倍！
             let requiredLiq = params.min_liquidity || 10000;
             const newsScore = config?.latest_news_score || 0;
             if (newsScore >= 40) {
@@ -89,7 +85,7 @@ const securityGuard = {
                         socials: "未知 (極高風險)",
                         symbol: "BLIND_SNIPE",
                         name: "UNKNOWN",
-                        pairCreatedAt: Date.now() // 🚀 FIX: 盲狙視為剛剛出生
+                        pairCreatedAt: Date.now() 
                     };
                 } else {
                     return { isSafe: false, reason: '🛑 查無報價 (Dex/Birdeye 皆無)' };
@@ -101,7 +97,6 @@ const securityGuard = {
                 }
 
                 if (marketData.liquidity < limits.minLiq) {
-                    // ⏳ 緩刑機制啟動
                     if (marketData.liquidity >= 5000) {
                         return { 
                             isSafe: false, 
@@ -211,7 +206,7 @@ const securityGuard = {
                 buys5m: pair.txns?.m5?.buys || 0,
                 sells5m: pair.txns?.m5?.sells || 0,
                 socials: hasSocials,
-                pairCreatedAt: pair.pairCreatedAt || 0 // 🚀 FIX: 提取代幣池建立時間
+                pairCreatedAt: pair.pairCreatedAt || 0
             };
         } catch (err) {
             return null;
