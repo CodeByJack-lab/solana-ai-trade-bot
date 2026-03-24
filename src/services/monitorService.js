@@ -20,12 +20,16 @@ const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
 let NGROK_URL = process.env.NGROK_URL;
 
-// 🚀 修正：正確的 Helius URL
 const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
 const RAYDIUM_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const JUPITER_PROGRAM_ID = "JUP6LkbZbjS1jKKwapdH67f95g8436LLs1PapwerTqE";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
+
+// 📊 Webhook 戰況統計計數器
+let stats_totalWebhookSignals = 0;
+let stats_pumpFunCreates = 0;
+let stats_addedToNursery = 0;
 
 async function toggleHeliusWebhook(enable = true) {
     if (!HELIUS_API_KEY || !WEBHOOK_ID || !NGROK_URL) return;
@@ -67,6 +71,9 @@ app.post('/webhook', async (req, res) => {
         const events = req.body;
         if (!Array.isArray(events)) return;
 
+        // 📈 增加總訊號計數
+        stats_totalWebhookSignals += events.length;
+
         for (const event of events) {
             if (event.type !== 'UNKNOWN') continue;
             
@@ -86,6 +93,7 @@ app.post('/webhook', async (req, res) => {
                 }
             }
 
+            if (isPumpFunCreate) stats_pumpFunCreates++; // 📈 紀錄符合 Pump.fun 的數量
             if (!isPumpFunCreate) continue;
 
             const accounts = event.accountData || [];
@@ -112,6 +120,7 @@ app.post('/webhook', async (req, res) => {
 
             if (mintAddress) {
                 await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
+                stats_addedToNursery++; // 📈 紀錄成功入池的數量
                 console.log(`🌟 [Webhook] 漁網成功捕捉新幣，放入冷宮: ${mintAddress.substring(0,6)}...`);
             }
         }
@@ -119,6 +128,27 @@ app.post('/webhook', async (req, res) => {
         console.error('❌ [Webhook Error]', err.message);
     }
 });
+
+// ==========================================
+// 📊 10 分鐘 Webhook 戰況結算雷達
+// ==========================================
+function startWebhookStatsMonitor() {
+    setInterval(() => {
+        const discarded = stats_totalWebhookSignals - stats_addedToNursery;
+        console.log(`\n========================================`);
+        console.log(`📡 [Webhook 戰況] 過去 10 分鐘雷達報告:`);
+        console.log(`   📥 總接收雜訊 : ${stats_totalWebhookSignals} 條`);
+        console.log(`   💊 包含發射幣 : ${stats_pumpFunCreates} 隻`);
+        console.log(`   🐟 成功入魚池 : ${stats_addedToNursery} 隻`);
+        console.log(`   🗑️ 已拋棄雜訊 : ${discarded} 條`);
+        console.log(`========================================\n`);
+        
+        // 歸零重新計算下一個 10 分鐘
+        stats_totalWebhookSignals = 0;
+        stats_pumpFunCreates = 0;
+        stats_addedToNursery = 0;
+    }, 10 * 60 * 1000); // 10分鐘執行一次
+}
 
 // ==========================================
 // 🎣 滴水式撈魚監控 (方案 B：DB + RAM 雙層過濾 + AI 防撞鎖)
@@ -476,6 +506,7 @@ function startMarketMonitor() {
         startWatchlistMonitor(); 
         startPositionMonitor();
         startCommandListener();
+        startWebhookStatsMonitor(); // 🚀 啟動 10 分鐘 Webhook 戰況報告
     });
 }
 
