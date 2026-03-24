@@ -99,6 +99,11 @@ async function startApp() {
             const currentCache = getPortfolio();
             const solHkdPrice = await getSolPriceInHKD();
             
+            // 🚀 新增：即時去 Database 查下而家行緊咩 Mode
+            const { data: config } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
+            const isPaper = config?.trade_mode === 'PAPER';
+            const modeText = isPaper ? '📝 模擬盤' : '🔥 實盤';
+            
             const investedSol = currentCache.positions.reduce((sum, pos) => {
                 return sum + ((pos.quantity || 0) * (pos.entry_price_sol || 0));
             }, 0);
@@ -107,13 +112,15 @@ async function startApp() {
             const totalCapitalHkd = totalCapitalSol * solHkdPrice;
             
             console.log(`\n========================================`);
-            console.log(`📊 [實時戰報] 總資產: $${totalCapitalHkd.toFixed(2)} HKD | 現金: ${currentCache.cash_sol.toFixed(4)} SOL`);
+            // 🚀 更新：Terminal 戰報加埋 Mode 標籤
+            console.log(`📊 [實時戰報] ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD | 現金: ${currentCache.cash_sol.toFixed(4)} SOL`);
             console.log(`持倉數: ${currentCache.positions.length} 隻`);
             console.log(`--- 🩺 系統健康看板 ---`);
             console.log(healthMonitor.getHealthReport()); 
             console.log(`========================================`);
             
-            await updateSystemStatus(`🦅 監控中 | 總資產: $${totalCapitalHkd.toFixed(2)} HKD`);
+            // 🚀 更新：Supabase Database 狀態加埋 Mode 標籤
+            await updateSystemStatus(`🦅 監控中 | ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD`);
             
         } catch (loopErr) {
             console.error("⚠️ 戰報 Loop 發生錯誤:", loopErr.message);
