@@ -108,22 +108,25 @@ app.post('/webhook/helius', async (req, res) => {
                                 if (mintAddress) {
                                     stats_pumpFunCreates++; 
 
-                                    // 🚀 核心改動：限制魚池上限 50
-                                    // 1. 檢查目前魚池數量
-                                    const { count } = await supabase.from('nursery_pool').select('*', { count: 'exact', head: true });
+                             // 🚀 1. 直接插入新魚
+                                const { error: insErr } = await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
+        
+                                    if (!insErr) {
+                                        stats_addedToNursery++;
+                                        console.log(`🌟 [Webhook] 新幣入池: ${mintAddress}`);
 
-                                    // 2. 如果魚池已滿 (>= 50)，先刪除最舊的一隻魚
-                                    if (count >= 50) {
-                                        const { data: oldestFish } = await supabase
-                                            .from('nursery_pool')
-                                            .select('mint_address')
-                                            .order('created_at', { ascending: true }) // 搵出最舊嘅時間
-                                            .limit(1)
-                                            .single();
+                             // 🚀 2. 暴力清理：只保留最新 50 隻，其餘全部刪除
+                             // 呢句 SQL 邏輯係：刪除所有「唔喺最新 50 名內」嘅魚
+                                const { data: fishToKill } = await supabase
+                                    .from('nursery_pool')
+                                    .select('mint_address')
+                                    .order('created_at', { ascending: false }) // 由新到舊排
+                                    .range(50, 100); // 攞第 51 隻開始打後嘅魚
 
-                                        if (oldestFish) {
-                                            await supabase.from('nursery_pool').delete().eq('mint_address', oldestFish.mint_address);
-                                            console.log(`🧹 [Nursery] 魚池滿員，已自動清理最舊魚隻: ${oldestFish.mint_address}`);
+     if (fishToKill && fishToKill.length > 0) {
+         const targets = fishToKill.map(f => f.mint_address);
+         await supabase.from('nursery_pool').delete().in('mint_address', targets);
+         console.log(`🧹 [Nursery] 已清理 ${targets.length} 隻舊魚，維持 50 隻限額。`);
                                         }
                                     }
 
