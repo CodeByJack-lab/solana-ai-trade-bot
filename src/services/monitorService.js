@@ -18,9 +18,13 @@ app.use(express.json());
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
+
+// 🚀 確保這裡是你真正的 Railway 網址
 const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
 
-const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
+// 🎯 終極修正：真正的 Pump.fun 官方 Program ID！
+const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
@@ -46,14 +50,24 @@ async function toggleHeliusWebhook(enable = true) {
             console.log('🛑 [Helius] 正在切斷 Webhook 接收...');
         }
 
+        // 🚀 根據你手動設定的設定值進行精確同步
         const payload = {
             webhookURL: targetUrl,
-            transactionTypes: ["Any"],
-            accountAddresses: [PUMP_FUN_PROGRAM_ID],
-            webhookType: "enhanced"
+            // 1. 同步 Transaction Types
+            transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
+            // 2. 同步兩個 Program Accounts (Pump.fun + Raydium V4)
+           accountAddresses: [
+               "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 
+               "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+            ],
+           // 3. 保持 Enhanced 格式
+           webhookType: "enhanced",
+           // 4. 根據截圖同步交易狀態為成功
+           txnStatus: "success" 
         };
 
-        //await axios.put(currentUrl, payload);
+        // 🔓 解除封印！依家地址啱咗，可以放心畀隻 Bot 自動更新 Helius！
+        await axios.put(currentUrl, payload);
         
         if (enable) {
             console.log('✅ [Webhook Manager] Helius Webhook 已成功啟動！');
@@ -86,7 +100,7 @@ app.post('/webhook/helius', async (req, res) => {
             const instructions = event.instructions || [];
             let mintAddress = null;
 
-            // 🚀 FIX: 繞過 RPC 查詢，直接從智能合約 Bytecode 提取代幣地址！極速且無懼限流！
+            // 🚀 直接從智能合約 Bytecode 提取代幣地址！極速且無懼限流！
             function extractMintFromPumpFun(ix) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
@@ -94,10 +108,9 @@ app.post('/webhook/helius', async (req, res) => {
                         try {
                             const decodedBytes = bs58.decode(dataObj);
                             const hexString = Buffer.from(decodedBytes).toString('hex');
-                            // 判斷是否為 Pump.fun 的 'Create' 指令 (181ec828051c0777)
                             if (hexString.startsWith('181ec828051c0777')) {
                                 if (ix.accounts && ix.accounts.length > 0) {
-                                    return ix.accounts[0]; // 創建指令的第一個 Account 必定是新幣的 Mint 地址
+                                    return ix.accounts[0]; 
                                 }
                             }
                         } catch (e) {}
