@@ -40,28 +40,45 @@ let stats_pumpFunCreates = 0;
 let stats_addedToNursery = 0;
 
 async function toggleHeliusWebhook(enable = true) {
-    if (!HELIUS_API_KEY || !WEBHOOK_ID || !NGROK_URL) return;
+    if (!HELIUS_API_KEY || !WEBHOOK_ID || !NGROK_URL) {
+        console.warn('⚠️ [Helius] 缺少 API Key, Webhook ID 或 NGROK URL，跳過連線。');
+        return;
+    }
 
     try {
         const currentUrl = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
+        
+        // 🚀 FIX: 不再盲目覆蓋，只提取並更新必要欄位以符合 Helius 嚴格校驗
         const currentRes = await axios.get(currentUrl);
-        const webhookData = currentRes.data;
+        const existingData = currentRes.data;
 
+        // 構建純淨的 Payload
+        let targetUrl = "https://example.com/disabled";
         if (enable) {
             const cleanUrl = NGROK_URL.replace(/\/$/, '');
-            webhookData.webhookURL = `${cleanUrl}/webhook/helius`;
-            console.log(`📡 [Helius] 正在重新連線 Webhook 至: ${webhookData.webhookURL}`);
+            targetUrl = `${cleanUrl}/webhook/helius`;
+            console.log(`📡 [Helius] 正在重新連線 Webhook 至: ${targetUrl}`);
         } else {
-            webhookData.webhookURL = "https://example.com/disabled";
             console.log('🛑 [Helius] 正在切斷 Webhook 接收...');
         }
 
-        await axios.put(currentUrl, webhookData);
+        const payload = {
+            webhookURL: targetUrl,
+            transactionTypes: existingData.transactionTypes || ["Any"],
+            accountAddresses: existingData.accountAddresses || [PUMP_FUN_PROGRAM_ID],
+            webhookType: existingData.webhookType || "enhanced"
+        };
+
+        await axios.put(currentUrl, payload);
+        
         if (enable) {
             console.log('✅ [Webhook Manager] Helius Webhook 已成功啟動！');
             healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
+        } else {
+            healthMonitor.setStatus('Meme_Radar', '🟡 等待啟動...');
         }
     } catch (err) {
+        console.error('❌ [Webhook Error] 更新失敗:', err.response?.data || err.message);
         healthMonitor.setStatus('Meme_Radar', `🔴 Webhook 錯誤: ${err.message}`);
     }
 }
