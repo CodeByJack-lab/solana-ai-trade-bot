@@ -54,7 +54,7 @@ async function toggleHeliusWebhook(enable = true) {
 
         const payload = {
             webhookURL: targetUrl,
-            transactionTypes: ["Any"], 
+            transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
             accountAddresses: [
                 "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 
                 "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
@@ -74,43 +74,52 @@ async function toggleHeliusWebhook(enable = true) {
 }
 
 app.post('/webhook/helius', async (req, res) => {
-    res.status(200).send('OK'); // 快速回覆 Helius
+    res.status(200).send('OK');
 
     try {
+        const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
+        if (!config || !config.is_running) return;
+
         const events = req.body;
-        if (!Array.isArray(events) || events.length === 0) return;
+        if (!Array.isArray(events)) return;
+
+        stats_totalWebhookSignals += events.length; // ✅ 加返計數機，戰報唔會再係 0
 
         for (const event of events) {
-            // 🚀 [掃描儀啟動] 遍歷所有指令
             const instructions = event.instructions || [];
             
-            for (const [index, ix] of instructions.entries()) {
-                // 只要係 Pump.fun 嘅交易就捉入嚟驗屍
+            for (const ix of instructions) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
                     if (dataObj.length > 0) {
                         try {
                             const decodedBytes = bs58.decode(dataObj);
                             const hexString = Buffer.from(decodedBytes).toString('hex');
-                            const prefix = hexString.substring(0, 16); // 攞前 8 bytes (16位)
-
-                            // 🔍 暴力 Log：印出所有經過 Pump.fun 嘅數據頭段
-                            console.log(`📡 [Scanner] 發現數據 | Sig: ${event.signature.substring(0,8)}...`);
-                            console.log(`   └─ 指令類型: ${event.type} | 密碼頭段: ${prefix}`);
                             
-                            // 檢查是否包含 "CREATE" 關鍵字 (Helius 有時會解析到類型)
-                            if (event.type === 'UNKNOWN' || event.description?.includes('Create')) {
-                                console.log(`   ⭐ 呢條極大機會係發射指令！請記低呢串密碼: ${prefix}`);
+                            // 🚀 根據 Log 修正：識別新的 Pump.fun 發射密碼
+                            const isNewMeme = 
+                                hexString.startsWith('181ec828051c0777') || // 經典密碼
+                                hexString.startsWith('d6904cec5f8b31b4') || // ✅ 你 Log 入面顯示嘅 CREATE
+                                hexString.startsWith('253a237ebe35e4c5');   // ✅ 你 Log 入面顯示嘅 UNKNOWN
+
+                            if (isNewMeme) {
+                                // 提取 Mint Address (通常係第一個 Account)
+                                const mintAddress = ix.accounts[0];
+                                if (mintAddress) {
+                                    stats_pumpFunCreates++; 
+                                    // 放入魚池 (nursery_pool)
+                                    await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
+                                    stats_addedToNursery++; 
+                                    console.log(`🌟 [Webhook] 成功捕捉新幣入池: ${mintAddress}`);
+                                }
                             }
-                        } catch (e) {
-                            // console.log('解析失敗，跳過');
-                        }
+                        } catch (e) { }
                     }
                 }
             }
         }
     } catch (err) {
-        console.error('❌ [Scanner Error]', err.message);
+        console.error('❌ [Webhook Error]', err.message);
     }
 });
 
