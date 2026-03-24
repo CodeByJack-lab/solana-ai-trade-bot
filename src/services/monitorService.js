@@ -41,7 +41,7 @@ async function toggleHeliusWebhook(enable = true) {
     try {
         const currentUrl = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
         
-        let targetUrl = "https://example.com/disabled";
+        let targetUrl = "https://solana-ai-trade-bot-production.up.railway.app/webhook/helius";
         if (enable) {
             const cleanUrl = NGROK_URL.replace(/\/$/, '');
             targetUrl = `${cleanUrl}/webhook/helius`;
