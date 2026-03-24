@@ -161,7 +161,6 @@ const blueChipJob = {
                             const isRsiHook = prevRsi <= bluechipLimits.maxRSI && currentRsi > prevRsi; 
                             const isDip = isRsiHook && bb && currentPrice <= (bb.lower * 1.05);
 
-                            // 🚀 加入透明化 Log，話畀大佬知點解唔買
                             if (isDip) {
                                 const signalType = '右側抄底(RSI勾頭)';
                                 console.log(`🎯 [Bluechip] ${token.token_symbol} 觸發【${signalType}】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})，讀取 AI 記憶庫...`);
@@ -202,9 +201,11 @@ const blueChipJob = {
                                     }
                                 }
                             } else {
-                                // 🚀 新增這行 Log，清楚話你知隻幣點解被濾走
                                 console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達完美抄底條件 (目前 RSI: ${currentRsi.toFixed(1)}, 是否低於布林底: ${bb && currentPrice <= (bb.lower * 1.05) ? '是' : '否'})，放棄呼叫 AI。`);
                             }
+                        } else {
+                            // 🚀 這是你要求的補齊邏輯：若少於 30 支 K 線，印出交代
+                            console.log(`⚠️ [Bluechip] ${token.token_symbol} K線數據不足 (僅 ${items.length}/30 支)，放棄技術分析。`);
                         }
                     } catch (err) {
                         console.warn(`⚠️ [Bluechip] 分析 ${token.token_symbol} 時發生錯誤:`, err.message);

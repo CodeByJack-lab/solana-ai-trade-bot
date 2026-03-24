@@ -18,8 +18,7 @@ app.use(express.json());
 
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
-// 🚀 修正 1：加入你的 Railway URL 做保底，確保 disable/enable 自動化絕對運行！
-let NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
+const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
 
 const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
@@ -42,7 +41,6 @@ async function toggleHeliusWebhook(enable = true) {
 
         if (enable) {
             const cleanUrl = NGROK_URL.replace(/\/$/, '');
-            // 🚀 修正 2：註冊時對準門牌號碼
             webhookData.webhookURL = `${cleanUrl}/webhook/helius`;
             console.log(`📡 [Helius] 正在重新連線 Webhook 至: ${webhookData.webhookURL}`);
         } else {
@@ -60,7 +58,6 @@ async function toggleHeliusWebhook(enable = true) {
     }
 }
 
-// 🚀 修正 3：接收端對準門牌號碼
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK');
 
@@ -74,29 +71,37 @@ app.post('/webhook/helius', async (req, res) => {
         const events = req.body;
         if (!Array.isArray(events)) return;
 
-        // 📈 增加總訊號計數
         stats_totalWebhookSignals += events.length;
 
         for (const event of events) {
-            if (event.type !== 'UNKNOWN') continue;
             
             const instructions = event.instructions || [];
             let isPumpFunCreate = false;
 
+            // 🚀 修正: 安全的 Enhanced 模式解析方式
             for (const ix of instructions) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
-                    if (typeof dataObj === 'string' && dataObj.length >= 16) {
-                        const discriminator = dataObj.substring(0, 16);
-                        if (discriminator === '181ec828051c0777') {
-                            isPumpFunCreate = true;
-                            break;
+                    if (typeof dataObj === 'string' && dataObj.length > 0) {
+                        try {
+                            const decodedBytes = bs58.decode(dataObj);
+                            const hexString = Buffer.from(decodedBytes).toString('hex');
+                            if (hexString.startsWith('181ec828051c0777')) {
+                                isPumpFunCreate = true;
+                                break;
+                            }
+                        } catch (e) {
+                             // 如果 bs58 fail，fallback 檢查 Helius 增強事件類型
+                             if (event.type === 'TOKEN_MINT' || event.type === 'UNKNOWN') {
+                                 isPumpFunCreate = true;
+                                 break;
+                             }
                         }
                     }
                 }
             }
 
-            if (isPumpFunCreate) stats_pumpFunCreates++; // 📈 紀錄符合 Pump.fun 的數量
+            if (isPumpFunCreate) stats_pumpFunCreates++; 
             if (!isPumpFunCreate) continue;
 
             const accounts = event.accountData || [];
@@ -123,7 +128,7 @@ app.post('/webhook/helius', async (req, res) => {
 
             if (mintAddress) {
                 await supabase.from('nursery_pool').insert([{ mint_address: mintAddress }]);
-                stats_addedToNursery++; // 📈 紀錄成功入池的數量
+                stats_addedToNursery++; 
                 console.log(`🌟 [Webhook] 漁網成功捕捉新幣，放入冷宮: ${mintAddress.substring(0,6)}...`);
             }
         }
@@ -146,11 +151,10 @@ function startWebhookStatsMonitor() {
         console.log(`   🗑️ 已拋棄雜訊 : ${discarded} 條`);
         console.log(`========================================\n`);
         
-        // 歸零重新計算下一個 10 分鐘
         stats_totalWebhookSignals = 0;
         stats_pumpFunCreates = 0;
         stats_addedToNursery = 0;
-    }, 10 * 60 * 1000); // 10分鐘執行一次
+    }, 10 * 60 * 1000); 
 }
 
 // ==========================================
@@ -484,7 +488,7 @@ function startCommandListener() {
                 } 
                 else if (cmd.command_type === 'PAUSE_BUY') {
                     await supabase.from('system_config').update({ is_running: false, status_msg: '已暫停新開倉' }).eq('id', 1);
-                    sendAdminAlert(`⏸️ <b>系統已暫停買入</b>\n持倉監控會繼續運作，但不會買入新幣。`);
+                    sendAdminAlert(`⏸️ <b>系統已暫停買入</b>\n持 practised倉監控會繼續運作，但不會買入新幣。`);
                 }
                 else if (cmd.command_type === 'RESUME_BUY') {
                     await supabase.from('system_config').update({ is_running: true, status_msg: '正常運作中' }).eq('id', 1);
@@ -509,7 +513,7 @@ function startMarketMonitor() {
         startWatchlistMonitor(); 
         startPositionMonitor();
         startCommandListener();
-        startWebhookStatsMonitor(); // 🚀 啟動 10 分鐘 Webhook 戰況報告
+        startWebhookStatsMonitor(); 
     });
 }
 
