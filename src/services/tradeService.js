@@ -10,9 +10,40 @@ const { executeLiveSwapUAT } = require('./liveTradeService');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService'); 
 const { healthMonitor } = require('./healthMonitor');
 
+let bs58 = require('bs58');
+if (bs58.default) {
+    bs58 = bs58.default;
+}
+
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
+
+// 🚀 新增：實盤核數師 (獲取鏈上真實 SPL Token 餘額)
+async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
+    try {
+        const walletKey = new PublicKey(walletPubKeyStr);
+        const mintKey = new PublicKey(tokenMintStr);
+        
+        // 查所有 Token Accounts
+        const parsedTokenAccounts = await connection.getParsedTokenAccountsByOwner(walletKey, {
+            mint: mintKey
+        });
+
+        if (parsedTokenAccounts.value.length === 0) return 0;
+
+        // 總和所有同一個 Mint 嘅 Account 餘額 (通常只有一個)
+        let totalUiAmount = 0;
+        for (const accountInfo of parsedTokenAccounts.value) {
+            totalUiAmount += accountInfo.account.data.parsed.info.tokenAmount.uiAmount;
+        }
+        
+        return totalUiAmount;
+    } catch (e) {
+        console.error(`⚠️ [Balance Check] 無法獲取真實代幣餘額 (${tokenMintStr.substring(0,6)}):`, e.message);
+        return null; // 查唔到就回傳 null，等上面決定點做
+    }
+}
 
 async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
     try {
@@ -29,7 +60,9 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
             ? new BigNumber(amount).times(1e9).integerValue().toString() 
             : new BigNumber(amount).times(new BigNumber(10).pow(decimals)).integerValue().toString();
 
-        const SLIPPAGE_BPS = isBuying ? 800 : 1000; 
+        // 🚀 實盤生存指南：拉高滑點容忍度
+        // 買入 10%，賣出逃命 15%
+        const SLIPPAGE_BPS = isBuying ? 1000 : 1500; 
 
         const baseUrl = (process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag').replace(/\/$/, '');
         const endpoint = baseUrl.includes('quote-api') ? '/v6/quote' : '/swap/v1/quote';
@@ -99,7 +132,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     if (!quoteData) return false;
     
     const buyPriceSol = quoteData.pricePerToken;
-    const tokenQuantity = new BigNumber(configTradeAmountSol).div(buyPriceSol).toNumber(); 
+    let tokenQuantity = new BigNumber(configTradeAmountSol).div(buyPriceSol).toNumber(); 
     let tradeSuccess = true;
     let finalTxid = "BUY_" + Math.random().toString(36).substring(2, 8).toUpperCase(); 
 
@@ -108,6 +141,33 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         tradeSuccess = liveResult?.success || false;
         if (tradeSuccess && liveResult?.txid) {
             finalTxid = liveResult.txid; 
+            
+            // 🚀 實盤保險：買入成功後，等 5 秒查下區塊鏈真正收到幾多粒！
+            console.log(`🔍 [Live Check] 正在驗證鏈上真實到帳數量...`);
+            await new Promise(r => setTimeout(r, 5000));
+            
+            let walletPublicKey = null;
+            const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
+            if (rawKey) {
+                if (rawKey.startsWith('[')) {
+                    walletPublicKey = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey.toString();
+                } else {
+                    walletPublicKey = Keypair.fromSecretKey(bs58.decode(rawKey)).publicKey.toString();
+                }
+            }
+
+            if (walletPublicKey) {
+                const realBal = await getRealTokenBalance(walletPublicKey, mintAddress);
+                if (realBal !== null && realBal > 0) {
+                    console.log(`✅ [Live Check] 預期: ${tokenQuantity.toFixed(4)} | 鏈上真實: ${realBal.toFixed(4)}`);
+                    tokenQuantity = realBal; // 以真實餘額為準！
+                } else if (realBal === 0) {
+                    console.error(`🚨 [FATAL] Jito 報告成功，但鏈上查無餘額！可能是假成功/跌單，放棄寫入 DB！`);
+                    return false; // 終止寫入幽靈持倉
+                }
+            }
+        } else {
+            return false; // Jito 失敗直接撤退
         }
     } 
 
@@ -156,9 +216,36 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     const pos = portfolio.positions[posIndex];
     const tokenSymbol = pos.token_symbol || 'UNKNOWN';
     const isLive = portfolio.mode === 'LIVE';
-    const sellQuantity = new BigNumber(pos.quantity).times(sellFraction).toNumber();
+    
+    let sellQuantity = new BigNumber(pos.quantity).times(sellFraction).toNumber();
 
-    console.log(`\n⚡ [Sell] 正在嘗試平倉: ${tokenSymbol} (比例: ${sellFraction * 100}%)`);
+    console.log(`\n⚡ [Sell] 正在嘗試平倉: ${tokenSymbol} (預期比例: ${sellFraction * 100}%)`);
+
+    // 🚀 實盤保險：賣出前核對真實餘額！
+    if (isLive) {
+        let walletPublicKey = null;
+        const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
+        if (rawKey) {
+            walletPublicKey = rawKey.startsWith('[') 
+                ? Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey.toString()
+                : Keypair.fromSecretKey(bs58.decode(rawKey)).publicKey.toString();
+        }
+
+        if (walletPublicKey) {
+            const realBal = await getRealTokenBalance(walletPublicKey, mintAddress);
+            if (realBal !== null) {
+                if (realBal === 0) {
+                    console.error(`🚨 [FATAL] 鏈上餘額為 0，無法賣出！自動執行本地撇帳。`);
+                    await forceWriteOff(mintAddress, "實盤餘額為 0，假持倉撇帳");
+                    return false;
+                }
+                
+                // 計算需要賣出的真實數量
+                sellQuantity = new BigNumber(realBal).times(sellFraction).toNumber();
+                console.log(`🔍 [Live Check] 調整真實賣出數量為: ${sellQuantity.toFixed(4)}`);
+            }
+        }
+    }
 
     const quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity);
     
@@ -185,7 +272,8 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     if (tradeSuccess) {
         const sellValueSol = new BigNumber(sellQuantity).times(finalPriceSol).toNumber();
-        const entryTotalValue = new BigNumber(sellQuantity).times(pos.entry_price_sol);
+        // PNL 計算依然用返當初買入嘅估算數量，保持財報一致
+        const entryTotalValue = new BigNumber(pos.quantity).times(sellFraction).times(pos.entry_price_sol);
         const pnlSol = new BigNumber(sellValueSol).minus(entryTotalValue).toNumber();
         const pnlPct = new BigNumber(pnlSol).div(entryTotalValue).times(100).toNumber();
 
@@ -235,7 +323,6 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     } else {
         const newQty = new BigNumber(pos.quantity).minus(sellQuantity).toNumber();
         
-        // 🚀 FIX: 必須同步更新 RAM 入面嘅數量同策略標籤，否則下次會因為餘額不足無法賣出！
         pos.quantity = newQty;
         pos.strategy_type = safeStrategyType + '_HALF_SOLD';
 
