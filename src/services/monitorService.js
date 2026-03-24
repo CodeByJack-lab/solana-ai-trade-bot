@@ -100,7 +100,9 @@ app.post('/webhook/helius', async (req, res) => {
                             const isNewMeme = 
                                 hexString.startsWith('181ec828051c0777') || // 經典密碼
                                 hexString.startsWith('d6904cec5f8b31b4') || // ✅ 你 Log 入面顯示嘅 CREATE
-                                hexString.startsWith('253a237ebe35e4c5');   // ✅ 你 Log 入面顯示嘅 UNKNOWN
+                                hexString.startsWith('253a237ebe35e4c5') ||  // ✅ 你 Log 入面顯示嘅 UNKNOWN
+                                hexString.startsWith('a572670079cef751') ||
+                                hexString.startsWith('66063d1201daebea');
 
                             if (isNewMeme) {
                                 // 提取 Mint Address (通常係第一個 Account)
