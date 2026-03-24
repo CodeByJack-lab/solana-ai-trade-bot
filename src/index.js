@@ -14,15 +14,52 @@ const { healthMonitor } = require('./services/healthMonitor');
 const { graveyardJob } = require('./jobs/graveyardJob');                   
 const { janitorJob } = require('./jobs/janitorJob');                       
 
+// 🚀 獨立抽出的狀態更新引擎 (解決切換 Mode 延遲問題)
+async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
+    try {
+        const currentCache = getPortfolio();
+        const solHkdPrice = await getSolPriceInHKD();
+        
+        let config = newData;
+        if (!config) {
+            const { data } = await supabase.from('system_config').select('*').eq('id', 1).single();
+            config = data;
+        }
+        if (!config) return;
+
+        const isPaper = config.trade_mode === 'PAPER';
+        const modeText = isPaper ? '📝 模擬盤' : '🔥 實盤';
+        const statusIcon = config.is_running ? '🟢 監控中' : '🛑 已暫停';
+        
+        const investedSol = currentCache.positions.reduce((sum, pos) => sum + ((pos.quantity || 0) * (pos.entry_price_sol || 0)), 0);
+        const totalCapitalSol = currentCache.cash_sol + investedSol;
+        const totalCapitalHkd = totalCapitalSol * solHkdPrice;
+        
+        if (isFromLoop) {
+            console.log(`\n========================================`);
+            console.log(`📊 [實時戰報] ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD | 現金: ${currentCache.cash_sol.toFixed(4)} SOL`);
+            console.log(`持倉數: ${currentCache.positions.length} 隻`);
+            console.log(`--- 🩺 系統健康看板 ---`);
+            console.log(healthMonitor.getHealthReport()); 
+            console.log(`========================================`);
+        }
+        
+        // 🚀 一步到位：同時覆蓋 Icon、模式與資產
+        await updateSystemStatus(`${statusIcon} | ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD`);
+    } catch (e) {
+        console.error("⚠️ 狀態更新失敗:", e.message);
+    }
+}
+
 async function startApp() {
     console.log("======================================================");
     console.log("🚀 SOL_Trade V6.0 實盤防彈版啟動...");
     console.log("======================================================");
 
-    let isFirstLoad = true; // 🚀 新增：首次載入鎖，防開機洗版
+    let isFirstLoad = true; 
 
     /**
-     * 1. 🚀 指令線：監聽 system_config (熱更新開關與資金同步)
+     * 1. 🚀 指令線：監聽 system_config
      */
     supabase.channel('system_config_monitor')
         .on(
@@ -32,8 +69,10 @@ async function startApp() {
                 const newData = payload.new;
                 const portfolio = getPortfolio();
 
-                // 💡 資金同步邏輯
                 if (portfolio) {
+                    // 🚀 致命 Bug 修正：即時將 Bot 底層記憶體切換為實盤/模擬盤！
+                    portfolio.mode = newData.trade_mode; 
+                    
                     if (newData.trade_mode === 'PAPER') {
                         if (Math.abs(portfolio.cash_sol - newData.simulated_balance) > 0.0001) {
                             portfolio.cash_sol = newData.simulated_balance;
@@ -47,9 +86,8 @@ async function startApp() {
                     }
                 }
 
-                // 🛡️ 終極防洗版鎖：只有當開關或模式【真的發生改變】時，才處理並印出 Log
                 if (global.isRunning === newData.is_running && global.tradeMode === newData.trade_mode) {
-                    return; // 狀態沒變，純粹係 60 秒餘額同步，直接忽略！
+                    return; 
                 }
 
                 global.isRunning = newData.is_running;
@@ -57,23 +95,19 @@ async function startApp() {
 
                 if (!isFirstLoad) {
                     console.log(`\n🔔 [遠端指令] 狀態: ${newData.is_running ? '🟢 運行中' : '🔴 已暫停'} | 模式: ${newData.trade_mode}`);
-                    updateSystemStatus(newData.is_running ? "🟢 系統指令：開始作戰" : "🛑 系統指令：暫停交易");
+                    // 🚀 呼叫獨立引擎，一撳掣 0 秒即刻轉字眼！
+                    forceUpdateStatusAndPrint(newData, false); 
                 }
                 isFirstLoad = false;
             }
         )
         .subscribe();
 
-    // 2. 🏰 初始化資產數據與資金鎖
     const portfolio = await initPortfolio();
     if (!portfolio) {
-        console.error("❌ 系統初始化失敗，程序退出。");
         process.exit(1);
     }
 
-    // ==========================================
-    // 3. 🚀 啟動全軍列陣 (V6.0 核心模組)
-    // ==========================================
     startMarketMonitor();        
     macroMonitorService.start(); 
     blueChipJob.start();         
@@ -88,44 +122,13 @@ async function startApp() {
      * 4. 💤 回報線：一體化「單行戰報」Loop
      */
     async function backgroundReportLoop() {
-        try {
-            if (global.isRunning === false) {
-                console.log("💤 系統暫停中...");
-                setTimeout(backgroundReportLoop, 60000);
-                return;
-            }
-
+        if (global.isRunning === false) {
+            console.log("💤 系統暫停中...");
+        } else {
             await syncLiveBalanceToDB();
-            const currentCache = getPortfolio();
-            const solHkdPrice = await getSolPriceInHKD();
-            
-            // 🚀 新增：即時去 Database 查下而家行緊咩 Mode
-            const { data: config } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
-            const isPaper = config?.trade_mode === 'PAPER';
-            const modeText = isPaper ? '📝 模擬盤' : '🔥 實盤';
-            
-            const investedSol = currentCache.positions.reduce((sum, pos) => {
-                return sum + ((pos.quantity || 0) * (pos.entry_price_sol || 0));
-            }, 0);
-            
-            const totalCapitalSol = currentCache.cash_sol + investedSol;
-            const totalCapitalHkd = totalCapitalSol * solHkdPrice;
-            
-            console.log(`\n========================================`);
-            // 🚀 更新：Terminal 戰報加埋 Mode 標籤
-            console.log(`📊 [實時戰報] ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD | 現金: ${currentCache.cash_sol.toFixed(4)} SOL`);
-            console.log(`持倉數: ${currentCache.positions.length} 隻`);
-            console.log(`--- 🩺 系統健康看板 ---`);
-            console.log(healthMonitor.getHealthReport()); 
-            console.log(`========================================`);
-            
-            // 🚀 更新：Supabase Database 狀態加埋 Mode 標籤
-            await updateSystemStatus(`🦅 監控中 | ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD`);
-            
-        } catch (loopErr) {
-            console.error("⚠️ 戰報 Loop 發生錯誤:", loopErr.message);
+            // 🚀 直接呼叫共用函數
+            await forceUpdateStatusAndPrint(null, true);
         }
-
         setTimeout(backgroundReportLoop, 60000); 
     }
 
