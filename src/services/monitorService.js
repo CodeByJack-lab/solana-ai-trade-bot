@@ -22,19 +22,16 @@ const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-producti
 
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfPjglfu6zcjENQZ4UU";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
-// 🚀 新增 SOL_MINT 變數，用於獲取正確定價
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
-// 🚀 核心升級：RPC 備援陣列 (Fallback Array)
 const HELIUS_RPC_URL = `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY}`;
 const FALLBACK_RPCS = [
-    HELIUS_RPC_URL,                           // 首選：Helius 專屬節點
-    "https://rpc.ankr.com/solana",            // 備援一：Ankr 公共節點
-    "https://solana-rpc.publicnode.com",      // 備援二：PublicNode
-    "https://api.mainnet-beta.solana.com"     // 備援三：Solana 官方主網 (墊底)
+    HELIUS_RPC_URL,                           
+    "https://rpc.ankr.com/solana",            
+    "https://solana-rpc.publicnode.com",      
+    "https://api.mainnet-beta.solana.com"     
 ];
 
-// 📊 Webhook 戰況統計計數器
 let stats_totalWebhookSignals = 0;
 let stats_pumpFunCreates = 0;
 let stats_addedToNursery = 0;
@@ -48,11 +45,6 @@ async function toggleHeliusWebhook(enable = true) {
     try {
         const currentUrl = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
         
-        // 🚀 FIX: 不再盲目覆蓋，只提取並更新必要欄位以符合 Helius 嚴格校驗
-        const currentRes = await axios.get(currentUrl);
-        const existingData = currentRes.data;
-
-        // 構建純淨的 Payload
         let targetUrl = "https://example.com/disabled";
         if (enable) {
             const cleanUrl = NGROK_URL.replace(/\/$/, '');
@@ -62,11 +54,12 @@ async function toggleHeliusWebhook(enable = true) {
             console.log('🛑 [Helius] 正在切斷 Webhook 接收...');
         }
 
+        // 🚀 FIX: 終極純淨 Payload！唔再 merge 舊數據，防止 Helius 報 400 Bad Request！
         const payload = {
             webhookURL: targetUrl,
-            transactionTypes: existingData.transactionTypes || ["Any"],
-            accountAddresses: existingData.accountAddresses || [PUMP_FUN_PROGRAM_ID],
-            webhookType: existingData.webhookType || "enhanced"
+            transactionTypes: ["Any"],
+            accountAddresses: [PUMP_FUN_PROGRAM_ID],
+            webhookType: "enhanced"
         };
 
         await axios.put(currentUrl, payload);
@@ -79,11 +72,10 @@ async function toggleHeliusWebhook(enable = true) {
         }
     } catch (err) {
         console.error('❌ [Webhook Error] 更新失敗:', err.response?.data || err.message);
-        healthMonitor.setStatus('Meme_Radar', `🔴 Webhook 錯誤: ${err.message}`);
+        healthMonitor.setStatus('Meme_Radar', `🔴 Webhook 錯誤: ${err.response?.status || err.message}`);
     }
 }
 
-// 🚀 核心升級：具備自動切換功能的 RPC 請求器
 async function fetchAccountInfoWithFallback(pubkey) {
     const payload = {
         jsonrpc: "2.0", id: 1, method: "getAccountInfo",
@@ -94,11 +86,9 @@ async function fetchAccountInfoWithFallback(pubkey) {
         try {
             const res = await axios.post(FALLBACK_RPCS[i], payload, { timeout: 3500 });
             if (res.data && !res.data.error) {
-                return res.data; // 成功攞到資料，即刻 Return
+                return res.data; 
             }
         } catch (err) {
-            const rpcName = new URL(FALLBACK_RPCS[i]).hostname;
-            // 靜默處理，避免洗版，只在背景切換
         }
     }
     throw new Error("所有 RPC 節點均無法連線或被限流");
@@ -124,7 +114,6 @@ app.post('/webhook/helius', async (req, res) => {
             const instructions = event.instructions || [];
             let isPumpFunCreate = false;
 
-            // 深度掃描 innerInstructions 突破俄羅斯套娃
             function checkIsPumpFunCreate(ix) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
@@ -151,7 +140,6 @@ app.post('/webhook/helius', async (req, res) => {
                 }
             }
 
-            // Helius Enhanced 雙重保險
             if (!isPumpFunCreate && (event.type === 'TOKEN_MINT' || event.type === 'CREATE_POOL')) {
                 const accountsList = (event.accountData || []).map(a => a.account);
                 if (accountsList.includes(PUMP_FUN_PROGRAM_ID)) {
@@ -391,8 +379,9 @@ function startWatchlistMonitor() {
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] 智能雙引擎 (Jup V3/Dex) 批次持倉監控啟動 (1分鐘循環)...');
+    console.log('👁️ [Radar] 智能雙引擎 (Jup V3/Dex) 批次持倉監控啟動 (2分鐘循環防限流)...');
     
+    // 🚀 FIX: 將持倉報價掃描由 60000 (1分鐘) 改為 120000 (2分鐘)，防止 Jupiter 429 限流！
     setInterval(async () => {
         try {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -411,7 +400,6 @@ function startPositionMonitor() {
             
             let pricesMap = {};
             try {
-                // 🚀 BUG FIX: Jupiter API 預設返回 USDC 價格，必須指定 vsToken 為 SOL 才能換算正確 PNL！
                 const jupUrl = `https://api.jup.ag/price/v2?ids=${mints.join(',')}&vsToken=${SOL_MINT_ADDRESS}`;
                 const jupRes = await axios.get(jupUrl, { timeout: 3000 });
                 const jupData = jupRes.data?.data || {};
@@ -438,7 +426,6 @@ function startPositionMonitor() {
                             const { getSolPriceInHKD } = require('./priceService');
                             const solPriceHKD = await getSolPriceInHKD();
                             const solPriceUSD = solPriceHKD / 7.8;
-                            // Dexscreener 備援正確，將 USD 轉換為 SOL
                             pricesMap[mint] = parseFloat(pair.priceUsd) / solPriceUSD; 
                         }
                     }
@@ -514,7 +501,7 @@ function startPositionMonitor() {
             console.error(`❌ [Position Monitor] 監控迴圈異常:`, err.message);
             healthMonitor.setStatus('AI_Overseer', `🔴 監控異常: ${err.message}`);
         }
-    }, 120000); 
+    }, 120000); // 🚀 1分鐘 -> 2分鐘
 }
 
 function startCommandListener() {
