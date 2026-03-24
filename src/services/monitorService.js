@@ -117,9 +117,44 @@ app.post('/webhook', async (req, res) => {
     }
 });
 
+// ==========================================
+// 🎣 滴水式撈魚監控 (方案 B：DB + RAM 雙層過濾 + AI 防撞鎖)
+// ==========================================
+const ramSecondaryPool = new Map(); // 格式: { mintAddress: { failCount: 0, nextProcessTime: Date } }
+let isAiReviewing = false;          // 🚦 全局 AI 防撞鎖
+
+// 輔助函式：觸發買入管道 (內建 AI 防撞鎖)
+async function triggerBuyPipeline(mintAddress, secResult, config) {
+    // 🚦 等待鎖：確保同時間只有一隻幣畀 AI Review
+    while (isAiReviewing) {
+        console.log(`🚦 [AI Lock] 系統正處理另一代幣，${mintAddress.substring(0,6)} 稍等 1 秒避開撞機...`);
+        await new Promise(r => setTimeout(r, 1000));
+    }
+
+    isAiReviewing = true; // 鎖上大腦
+    try {
+        if (secResult.isBlindSnipe) {
+            console.log(`🎯 [BlindSnipe] 觸發盲狙模式，即刻呼叫大腦！`);
+        }
+        const aiDecision = await consensusService.runMemeConsensus(mintAddress, secResult.marketData);
+        
+        if (aiDecision.buy) {
+            const { executeBuy } = require('./tradeService'); // 動態加載避免頂部漏 import
+            const strategy = secResult.isBlindSnipe ? 'MEME_BLIND' : 'MEME_SNIPE';
+            await executeBuy(mintAddress, secResult.marketData.symbol, strategy, aiDecision.score, aiDecision.reason, config.trade_amount_sol);
+        } else {
+            console.log(`🧠 [AI Rejected] 否決: ${aiDecision.reason}`);
+        }
+    } catch (err) {
+        console.error(`❌ [AI Review Error]`, err.message);
+    } finally {
+        isAiReviewing = false; // 絕對確保解鎖
+    }
+}
+
 let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
-    console.log('🐟 [Nursery Radar] 滴水式雷達已啟動 (每 10 秒撈 1 魚)...');
+    console.log('🐟 [Nursery Radar] 雙層過濾系統已啟動 (DB -> RAM -> Out)');
     
     setInterval(async () => {
         if (isNurseryRunning) return;
@@ -138,6 +173,34 @@ function startDatabaseNurseryMonitor() {
                 isNurseryRunning = false; return;
             }
 
+            // --- 🚀 第一部分：處理 RAM 二次緩衝區 (10/15 分鐘緩刑重審) ---
+            const now = Date.now();
+            for (const [mint, data] of ramSecondaryPool.entries()) {
+                if (now >= data.nextProcessTime) {
+                    console.log(`⏳ [RAM Secondary] 緩刑期滿，重審: ${mint.substring(0,6)} (次數: ${data.failCount + 1}/3)`);
+                    const { securityGuard } = require('./securityGuard');
+                    const secResult = await securityGuard.checkAll(mint);
+
+                    if (secResult.isSafe) {
+                        console.log(`🛡️ [Security] RAM 幣過關！準備呼叫大腦...`);
+                        await triggerBuyPipeline(mint, secResult, config);
+                        ramSecondaryPool.delete(mint);
+                    } else {
+                        console.log(`🛡️ [Security] 攔截: ${secResult.reason}`);
+                        data.failCount++;
+                        if (data.failCount >= 3) {
+                            console.log(`🚫 [Three-Strikes] ${mint.substring(0,6)} 三振出局，永久放棄。`);
+                            ramSecondaryPool.delete(mint);
+                        } else {
+                            // 第三次緩刑改為等 15 分鐘
+                            data.nextProcessTime = Date.now() + (15 * 60 * 1000);
+                            console.log(`⏳ [Security] 二次攔截: ${mint.substring(0,6)} 進入最後 15 分鐘緩刑。`);
+                        }
+                    }
+                }
+            }
+
+            // --- 🚀 第二部分：處理 DB 冷宮裡面的「新手幣」 ---
             const { data: oldestToken } = await supabase
                 .from('nursery_pool')
                 .select('*')
@@ -145,58 +208,36 @@ function startDatabaseNurseryMonitor() {
                 .limit(1)
                 .maybeSingle();
 
-            if (!oldestToken) {
-                healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
-                isNurseryRunning = false; return;
-            }
+            if (oldestToken) {
+                const mintAddress = oldestToken.mint_address;
+                const ageMins = (Date.now() - new Date(oldestToken.created_at).getTime()) / 60000;
 
-            const mintAddress = oldestToken.mint_address;
-            const createdAtMs = new Date(oldestToken.created_at).getTime();
-            const ageMins = (Date.now() - createdAtMs) / (1000 * 60);
+                if (ageMins > config.max_age_mins) {
+                    await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
+                } else if (ageMins >= config.min_age_mins) {
+                    console.log(`\n🎣 [Nursery] DB 撈出成熟代幣 ${mintAddress.substring(0,6)} (坐監已滿 ${config.min_age_mins} 分)`);
+                    const { securityGuard } = require('./securityGuard');
+                    const secResult = await securityGuard.checkAll(mintAddress);
 
-            if (ageMins > config.max_age_mins) {
-                await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
-                isNurseryRunning = false; return;
-            }
+                    // 💡 無論結果如何，都從 DB Nursery 刪除，讓出空位畀下一個幣
+                    await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
 
-            if (ageMins >= config.min_age_mins) {
-                console.log(`\n🎣 [Nursery] 撈出成熟代幣 ${mintAddress.substring(0,6)}... 交由 Security Guard 處理`);
-                const { securityGuard } = require('./securityGuard'); 
-                const secResult = await securityGuard.checkAll(mintAddress);
-
-                if (secResult.isSafe) {
-                    console.log(`🛡️ [Security] 通過: ${mintAddress.substring(0,6)}`);
-                    
-                    if (secResult.isBlindSnipe) {
-                        console.log(`🎯 [BlindSnipe] 觸發盲狙模式，即刻呼叫大腦！`);
-                        const aiDecision = await consensusService.runMemeConsensus(mintAddress, secResult.marketData);
-                        if (aiDecision.buy) {
-                            const { executeBuy } = require('./tradeService');
-                            await executeBuy(mintAddress, secResult.marketData.symbol, 'MEME_BLIND', aiDecision.score, aiDecision.reason, config.trade_amount_sol);
-                        } else {
-                            console.log(`🧠 [AI Rejected] 盲狙否決: ${aiDecision.reason}`);
-                        }
+                    if (secResult.isSafe) {
+                        console.log(`🛡️ [Security] 通過: ${mintAddress.substring(0,6)}`);
+                        await triggerBuyPipeline(mintAddress, secResult, config);
                     } else {
-                        const aiDecision = await consensusService.runMemeConsensus(mintAddress, secResult.marketData);
-                        if (aiDecision.buy) {
-                            const { executeBuy } = require('./tradeService');
-                            await executeBuy(mintAddress, secResult.marketData.symbol, 'MEME_SNIPE', aiDecision.score, aiDecision.reason, config.trade_amount_sol);
-                        } else {
-                            console.log(`🧠 [AI Rejected] 否決: ${aiDecision.reason}`);
+                        console.log(`🛡️ [Security] 攔截: ${secResult.reason}`);
+                        if (secResult.isPurgatory) {
+                            // 轉移到 RAM，並定時 10 分鐘後重審
+                            ramSecondaryPool.set(mintAddress, {
+                                failCount: 1, 
+                                nextProcessTime: Date.now() + (10 * 60 * 1000)
+                            });
+                            console.log(`📦 [Migration] ${mintAddress.substring(0,6)} 轉移至 RAM 緩衝區 (10 分鐘後重審)`);
                         }
                     }
                 } else {
-                    console.log(`🛡️ [Security] 攔截: ${secResult.reason}`);
-                    if (secResult.isPurgatory) {
-                        const originalTime = new Date(oldestToken.created_at).getTime();
-                        const newFakeTime = new Date(originalTime + 5 * 60000); 
-                        await supabase.from('nursery_pool').update({ created_at: newFakeTime.toISOString() }).eq('mint_address', mintAddress);
-                        console.log(`⏳ 已將 ${mintAddress.substring(0,6)} 重新押後 5 分鐘出獄。`);
-                    }
-                }
-                
-                if (!secResult.isPurgatory) {
-                    await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
+                    healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
                 }
             } else {
                 healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
