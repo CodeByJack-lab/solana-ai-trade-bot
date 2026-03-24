@@ -65,7 +65,6 @@ const blueChipJob = {
         isRunning = true;
         healthMonitor.setStatus('Bluechip_Radar', '🟢 掃描中...');
 
-        // 🚀 控制 Terminal Log 頻率：每逢 0分、10分、20分... 印出一次心跳日誌
         const currentMinute = new Date().getMinutes();
         const shouldLog = (currentMinute % 10 === 0);
 
@@ -88,7 +87,6 @@ const blueChipJob = {
             }
 
             try {
-                // 🚀 DexScreener 批次獲取 (分批切肉法，上限 30 隻一碟)
                 let dexPairs = [];
                 const chunkSize = 30; 
                 for (let i = 0; i < pool.length; i += chunkSize) {
@@ -116,7 +114,6 @@ const blueChipJob = {
                     minVolUsd: params?.bluechip_min_vol || 500000 
                 };
 
-                // --- 🔓 篩選跌破門檻的老幣 ---
                 const targetTokens = [];
                 const targetDrop = Math.abs(bluechipLimits.minDropPct);
                 
@@ -128,7 +125,6 @@ const blueChipJob = {
                     
                     if (vol24h < bluechipLimits.minVolUsd) continue;
                     
-                    // 只要 1 小時內急跌 (要求減半) OR 24 小時內陰跌 (全數要求)，即刻入圍！
                     if (h1Change <= -(targetDrop / 2) || h24Change <= -targetDrop) {
                         targetTokens.push(token);
                     }
@@ -142,10 +138,8 @@ const blueChipJob = {
                     isRunning = false; return;
                 }
 
-                // 🚨 只要有幣達標，無視 10 分鐘規則，強制爆響警報！
                 console.log(`\n🚨 [Bluechip Radar] 警報！發現 ${targetTokens.length} 隻老幣觸發跌幅門檻，啟動 Birdeye 深度技術分析...`);
 
-                // --- 核心技術分析迴圈 ---
                 for (const token of targetTokens) {
                     try {
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&limit=30`, {
@@ -165,10 +159,9 @@ const blueChipJob = {
                             const macdData = calculateMACD(closes);
 
                             const isRsiHook = prevRsi <= bluechipLimits.maxRSI && currentRsi > prevRsi; 
-                            
-                            // 跌穿布林底 + RSI勾頭
                             const isDip = isRsiHook && bb && currentPrice <= (bb.lower * 1.05);
 
+                            // 🚀 加入透明化 Log，話畀大佬知點解唔買
                             if (isDip) {
                                 const signalType = '右側抄底(RSI勾頭)';
                                 console.log(`🎯 [Bluechip] ${token.token_symbol} 觸發【${signalType}】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})，讀取 AI 記憶庫...`);
@@ -208,6 +201,9 @@ const blueChipJob = {
                                         await supabase.from('bluechip_pool').update({ last_ai_comment: null, last_observed_at: null }).eq('mint_address', token.mint_address);
                                     }
                                 }
+                            } else {
+                                // 🚀 新增這行 Log，清楚話你知隻幣點解被濾走
+                                console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達完美抄底條件 (目前 RSI: ${currentRsi.toFixed(1)}, 是否低於布林底: ${bb && currentPrice <= (bb.lower * 1.05) ? '是' : '否'})，放棄呼叫 AI。`);
                             }
                         }
                     } catch (err) {
