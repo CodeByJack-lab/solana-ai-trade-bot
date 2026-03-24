@@ -119,7 +119,6 @@ const consensusService = {
         return memeQueue.add(async () => {
             console.log(`\n🏛️ [Meme 議事廳] 開始審核: ${marketData.symbol || mintAddress.substring(0,6)}`);
             
-            // 🚀 FIX: 每次審核前，獲取最新嘅宏觀災難指數！
             let currentNewsScore = 0;
             try {
                 const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
@@ -137,7 +136,7 @@ const consensusService = {
                 sell_txs: marketData.sells5m,
                 social_links: marketData.socials,
                 description: options.isReentry ? "【注意：橫盤30分鐘後接回】" : "無",
-                latest_news_score: currentNewsScore // 🚀 FIX: 正式注入！
+                latest_news_score: currentNewsScore 
             };
 
             const [pScout, pStrat, pAudit] = await Promise.all([
@@ -169,7 +168,6 @@ const consensusService = {
         return bluechipQueue.add(async () => {
             console.log(`\n🏛️ [老幣 議事廳] 開始審核: ${marketData.symbol}`);
             
-            // 🚀 FIX: 每次審核前，獲取最新嘅宏觀災難指數！
             let currentNewsScore = 0;
             try {
                 const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
@@ -178,7 +176,6 @@ const consensusService = {
                 console.warn(`⚠️ [老幣 議事廳] 無法獲取大盤災難指數，預設為 0`);
             }
 
-            // 🚀 FIX: 將 news_sentiment 換成 latest_news_score，與 DB 完美對齊！
             const pStrat = await this.getPrompt('bluechip_strategist', { 
                 token_symbol: marketData.symbol, 
                 latest_news_score: currentNewsScore 
@@ -187,8 +184,17 @@ const consensusService = {
             const strategist = await callWithFallback('Strategist_Bluechip', {provider:'GOOGLE', model:'gemini-3.1-flash-lite-preview'}, {provider:'MISTRAL', model:'mistral-large-latest'}, pStrat);
             
             console.log(`🧠 老幣軍師: ${strategist.decision} | 理由: ${strategist.reason}`);
-            if (strategist.decision === 'ABORT') return { buy: false, reason: `🚨 攔截: ${strategist.reason}` };
-            return { buy: true, reason: `✅ 安全: ${strategist.reason}` };
+            
+            // 🚀 修正後的精準決策邏輯
+            if (strategist.decision === 'PASS') {
+                return { buy: true, reason: `✅ 安全: ${strategist.reason}` };
+            } else if (strategist.decision === 'ONHOLD') {
+                // 返回 buy: false，理由包含 ONHOLD，讓 Job 層更新 Database 評語
+                return { buy: false, reason: `⏳ ONHOLD: ${strategist.reason}` }; 
+            } else {
+                // ABORT 或其他異常，均視為攔截
+                return { buy: false, reason: `🚨 攔截: ${strategist.reason}` };
+            }
         });
     }
 };
