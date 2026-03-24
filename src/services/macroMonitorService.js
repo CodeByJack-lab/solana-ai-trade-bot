@@ -11,129 +11,127 @@ let useCoinGeckoNext = true;
 const macroMonitorService = {
     
     // ==========================================
-    // 🌐 數據源 A：CoinGecko (時間窗約 75 分鐘)
+    // 🌐 數據源 A：CoinGecko
     // ==========================================
     async fetchHighAndDropCoinGecko(coinId) {
         const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=1`;
-        const res = await axios.get(url, { timeout: 10000 });
+        const res = await axios.get(url, { 
+            headers: { 'User-Agent': 'Mozilla/5.0' }, // 🚀 加個 Agent 減少被當成純 Bot
+            timeout: 10000 
+        });
         const prices = res.data?.prices;
-        
-        if (!prices || !Array.isArray(prices) || prices.length < 15) {
-            throw new Error(`CoinGecko 數據不足 (${coinId})`);
-        }
+        if (!prices || prices.length < 15) throw new Error(`CoinGecko 數據不足`);
         
         const recentPrices = prices.slice(-15);
         let highestPrice = 0;
         for (const p of recentPrices) {
-            const price = parseFloat(p[1]);
-            if (price > highestPrice) highestPrice = price;
+            if (p[1] > highestPrice) highestPrice = p[1];
         }
-        
-        const currentPrice = parseFloat(prices[prices.length - 1][1]);
+        const currentPrice = prices[prices.length - 1][1];
         const dropPct = ((currentPrice - highestPrice) / highestPrice) * 100;
         return { currentPrice, highestPrice, dropPct };
     },
 
     // ==========================================
-    // 🚀 數據源 B：KuCoin (棄用 Binance/CryptoCompare，完美避開 Geo-block 與 429)
+    // 🚀 數據源 B：KuCoin (通常比 CG 穩定)
     // ==========================================
     async fetchHighAndDropKuCoin(symbol) {
-        // KuCoin 嘅 Symbol 格式係 BTC-USDT
         const formattedSymbol = symbol.replace('USDT', '-USDT');
         const url = `https://api.kucoin.com/api/v1/market/candles?type=15min&symbol=${formattedSymbol}`;
         const res = await axios.get(url, { timeout: 8000 });
-        
         const klines = res.data?.data; 
-        if (!klines || !Array.isArray(klines) || klines.length === 0) {
-            throw new Error(`KuCoin 數據格式異常 (${symbol})`);
-        }
+        if (!klines || klines.length === 0) throw new Error(`KuCoin 數據異常`);
         
-        // KuCoin 返回的陣列是「最新時間在最前面」(index 0 = current)
         const recentKlines = klines.slice(0, 15);
-        
         let highestPrice = 0;
         for (const k of recentKlines) {
-            const high = parseFloat(k[3]); // 索引 3 是 High
+            const high = parseFloat(k[3]);
             if (high > highestPrice) highestPrice = high;
         }
-        
-        const currentPrice = parseFloat(recentKlines[0][2]); // 索引 2 是 Close
+        const currentPrice = parseFloat(recentKlines[0][2]);
         const dropPct = ((currentPrice - highestPrice) / highestPrice) * 100;
         return { currentPrice, highestPrice, dropPct };
     },
 
-    // ==========================================
-    // 🚀 主程序
-    // ==========================================
-    start() {
-        console.log(`🌍 [Macro] 大盤防禦雷達運作中 (結合 AI 新聞情報局)...`);
-        healthMonitor.setStatus('Macro_Radar', '🟢 監聽中');
+    async getMarketData() {
+        // 🚀 核心升級：唔再用 Promise.all，改用逐個叫，中間停 2 秒避開併發封鎖
+        let btcData, solData, sourceName;
 
-        // 🚀 FIX: 將輪詢間隔拉長至 3 分鐘 (180000ms)，徹底解決所有 Rate Limit 封鎖問題
+        try {
+            if (useCoinGeckoNext) {
+                sourceName = 'CoinGecko';
+                btcData = await this.fetchHighAndDropCoinGecko('bitcoin');
+                await new Promise(r => setTimeout(r, 2000)); // ⏳ 停 2 秒
+                solData = await this.fetchHighAndDropCoinGecko('solana');
+            } else {
+                sourceName = 'KuCoin';
+                btcData = await this.fetchHighAndDropKuCoin('BTCUSDT');
+                await new Promise(r => setTimeout(r, 2000)); // ⏳ 停 2 秒
+                solData = await this.fetchHighAndDropKuCoin('SOLUSDT');
+            }
+            return { btcData, solData, sourceName };
+        } catch (err) {
+            // 🚨 如果目前的數據源爆 429，即刻嘗試用另一個 Source 救火
+            if (err.response?.status === 429) {
+                console.warn(`⚠️ [Macro] ${sourceName} 觸發限流，即刻切換數據源備援...`);
+                useCoinGeckoNext = !useCoinGeckoNext; 
+                // 嘗試另一個 Source
+                if (sourceName === 'CoinGecko') {
+                    return {
+                        btcData: await this.fetchHighAndDropKuCoin('BTCUSDT'),
+                        solData: await this.fetchHighAndDropKuCoin('SOLUSDT'),
+                        sourceName: 'KuCoin (備援)'
+                    };
+                }
+            }
+            throw err;
+        }
+    },
+
+    start() {
+        console.log(`🌍 [Macro] 大盤防禦雷達已就位...`);
+        
         setInterval(async () => {
             const now = Date.now();
-            
-            if (now < pauseCooldownUntil) {
-                healthMonitor.setStatus('Macro_Radar', '🟡 冷卻避險中');
-                return; 
-            }
+            if (now < pauseCooldownUntil) return;
 
             try {
                 const { data: config } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
                 if (!config?.is_running) return;
 
-                let btcData, solData, sourceName;
-
-                if (useCoinGeckoNext) {
-                    sourceName = 'CoinGecko';
-                    [btcData, solData] = await Promise.all([
-                        this.fetchHighAndDropCoinGecko('bitcoin'),
-                        this.fetchHighAndDropCoinGecko('solana')
-                    ]);
-                } else {
-                    sourceName = 'KuCoin'; // 🚀 切換為 KuCoin
-                    [btcData, solData] = await Promise.all([
-                        this.fetchHighAndDropKuCoin('BTCUSDT'),
-                        this.fetchHighAndDropKuCoin('SOLUSDT')
-                    ]);
-                }
-
+                // 🚀 執行防彈版獲取
+                const { btcData, solData, sourceName } = await this.getMarketData();
+                
                 useCoinGeckoNext = !useCoinGeckoNext;
                 healthMonitor.setStatus('Macro_Radar', `🟢 正常 (${sourceName})`);
 
                 let isPriceTriggered = false;
                 let priceAlertMsg = '';
 
-                // 觸發條件 (純粹價格跌幅)
                 if (btcData.dropPct <= -2.0) {
                     isPriceTriggered = true;
-                    priceAlertMsg = `BTC 回撤 <b>${btcData.dropPct.toFixed(2)}%</b> (高位 $${btcData.highestPrice.toFixed(0)})`;
+                    priceAlertMsg = `BTC 回撤 ${btcData.dropPct.toFixed(2)}%`;
                 } else if (solData.dropPct <= -3.0) {
                     isPriceTriggered = true;
-                    priceAlertMsg = `SOL 回撤 <b>${solData.dropPct.toFixed(2)}%</b> (高位 $${solData.highestPrice.toFixed(0)})`;
+                    priceAlertMsg = `SOL 回撤 ${solData.dropPct.toFixed(2)}%`;
                 }
 
-                // 🚀 2. 新增：當價格觸發警報，即刻 Call 情報局睇新聞做 Double Check！
                 if (isPriceTriggered) {
-                    console.log(`🚨 [Macro] 偵測到大盤急跌，立即啟動 AI 新聞查證...`);
+                    console.log(`🚨 [Macro] 價格異常，呼叫 AI 審查新聞...`);
                     const newsScore = await newsSentimentService.getDisasterScore();
-                    
-                    // 將最新分數寫入 DB，等大腦可以睇到
                     await supabase.from('system_config').update({ latest_news_score: newsScore }).eq('id', 1);
 
-                    // 決策邏輯：如果真係黑天鵝 (Score >= 50)，即刻拉大掣！
                     if (newsScore >= 50) {
-                        await supabase.from('system_config').update({ is_running: false, status_msg: `黑天鵝避險 (災難指數:${newsScore})` }).eq('id', 1);
-                        sendTelegramAlert(`🚨 <b>大盤崩盤預警 + AI 災難確認</b>\n\n📉 <b>觸發:</b> ${priceAlertMsg}\n📰 <b>新聞災難指數:</b> <b>${newsScore}/100</b> (黑天鵝級別)\n\n🛑 <b>系統動作</b>: 已自動關閉新交易總掣\n⏳ <b>狀態</b>: 進入 30 分鐘冷卻期`);
+                        await supabase.from('system_config').update({ is_running: false, status_msg: `避險中 (指數:${newsScore})` }).eq('id', 1);
+                        sendTelegramAlert(`🚨 <b>大盤崩盤確認</b>\n跌幅: ${priceAlertMsg}\nAI 災難分: ${newsScore}`);
                         pauseCooldownUntil = now + (30 * 60 * 1000); 
-                    } else {
-                        console.log(`ℹ️ [Macro] AI 判斷為常規洗盤 (指數 ${newsScore})，不觸發熔斷。`);
                     }
                 }
             } catch (err) {
-                console.error(`❌ [Macro_Radar] Error: ${err.message}`);
-                healthMonitor.setStatus('Macro_Radar', `🔴 異常: ${err.message}`);
-                useCoinGeckoNext = !useCoinGeckoNext;
+                console.error(`❌ [Macro_Radar] 發生錯誤: ${err.message}`);
+                healthMonitor.setStatus('Macro_Radar', `🔴 數據中斷: ${err.message}`);
+                // 萬一真係全線爆 429，就休息長一點時間
+                if (err.response?.status === 429) pauseCooldownUntil = Date.now() + (5 * 60 * 1000);
             }
         }, 180000); 
     }

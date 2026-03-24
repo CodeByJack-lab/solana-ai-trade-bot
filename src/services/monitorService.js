@@ -38,43 +38,35 @@ async function toggleHeliusWebhook(enable = true) {
         return;
     }
 
+    // 🚀 核心修正：如果係「關閉」訊號，我哋直接返出去，唔好再 call axios.put 去改你個 Dashboard
+    if (!enable) {
+        console.log('🛑 [Helius] 系統關閉，保留 Helius Dashboard 現有設定，不作修改。');
+        return; 
+    }
+
     try {
         const currentUrl = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
         
-        let targetUrl = "https://solana-ai-trade-bot-production.up.railway.app/webhook/helius";
-        if (enable) {
-            const cleanUrl = NGROK_URL.replace(/\/$/, '');
-            targetUrl = `${cleanUrl}/webhook/helius`;
-            console.log(`📡 [Helius] 正在重新連線 Webhook 至: ${targetUrl}`);
-        } else {
-            console.log('🛑 [Helius] 正在切斷 Webhook 接收...');
-        }
+        // 只有在 enable 為 true（啟動）時，先至去對齊設定
+        const cleanUrl = NGROK_URL.replace(/\/$/, '');
+        const targetUrl = `${cleanUrl}/webhook/helius`;
+        console.log(`📡 [Helius] 正在確保 Webhook 連線至: ${targetUrl}`);
 
-        // 🚀 根據你手動設定的設定值進行精確同步
         const payload = {
             webhookURL: targetUrl,
-            // 1. 同步 Transaction Types
             transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
-            // 2. 同步兩個 Program Accounts (Pump.fun + Raydium V4)
-           accountAddresses: [
-               "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 
-               "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
+            accountAddresses: [
+                "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 
+                "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
             ],
-           // 3. 保持 Enhanced 格式
-           webhookType: "enhanced",
-           // 4. 根據截圖同步交易狀態為成功
-           txnStatus: "success" 
+            webhookType: "enhanced",
+            txnStatus: "success" 
         };
 
-        // 🔓 解除封印！依家地址啱咗，可以放心畀隻 Bot 自動更新 Helius！
         await axios.put(currentUrl, payload);
-        
-        if (enable) {
-            console.log('✅ [Webhook Manager] Helius Webhook 已成功啟動！');
-            healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
-        } else {
-            healthMonitor.setStatus('Meme_Radar', '🟡 等待啟動...');
-        }
+        console.log('✅ [Webhook Manager] Helius Webhook 設定同步成功！');
+        healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
+
     } catch (err) {
         console.error('❌ [Webhook Error] 更新失敗:', err.response?.data || err.message);
         healthMonitor.setStatus('Meme_Radar', `🔴 Webhook 錯誤: ${err.response?.status || err.message}`);
