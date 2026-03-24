@@ -1,13 +1,31 @@
 // src/services/portfolioService.js
 const { supabase } = require('../config/supabase'); 
 const { connection } = require('../config/solana');
-const { PublicKey } = require('@solana/web3.js');
+const { PublicKey, Keypair } = require('@solana/web3.js'); // 🚀 加入 Keypair
 const path = require('path');
 const { healthMonitor } = require('./healthMonitor');
 
+let bs58 = require('bs58');
+if (bs58.default) {
+    bs58 = bs58.default;
+}
+
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-const walletPublicKey = process.env.MY_WALLET_PUBLIC_KEY ? new PublicKey(process.env.MY_WALLET_PUBLIC_KEY) : null;
+// 🚀 FIX 1: 直接由 Private Key 推算 Public Key，免除 .env 填漏風險
+let walletPublicKey = null;
+try {
+    const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
+    if (rawKey) {
+        if (rawKey.startsWith('[')) {
+            walletPublicKey = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey;
+        } else {
+            walletPublicKey = Keypair.fromSecretKey(bs58.decode(rawKey)).publicKey;
+        }
+    }
+} catch (e) {
+    console.error("⚠️ [Portfolio] 無法解析 Private Key，實盤餘額將無法同步");
+}
 
 let my_portfolio = {
     mode: 'PAPER',
@@ -46,15 +64,27 @@ async function initPortfolio() {
 
         const tableName = my_portfolio.mode === 'PAPER' ? 'active_positions_paper' : 'active_positions_live';
 
+        // 🚀 FIX 2: 無論 LIVE 定 PAPER，都在後台默默更新一次真錢餘額畀 Dashboard 睇！
+        if (walletPublicKey) {
+            try {
+                const lamports = await connection.getBalance(walletPublicKey);
+                const liveSol = lamports / 1e9;
+                await supabase.from('system_config').update({ live_wallet_balance: liveSol }).eq('id', 1);
+                
+                // 如果真正打緊真軍，先將內部 cash_sol 指向真錢
+                if (my_portfolio.mode === 'LIVE') {
+                    my_portfolio.cash_sol = liveSol;
+                    my_portfolio.reference_capital = liveSol;
+                }
+            } catch (chainErr) {
+                console.error("⚠️ [Portfolio] 獲取鏈上真實餘額失敗:", chainErr.message);
+            }
+        }
+
+        // 如果係模擬模式，內部運作資金用返模擬數字
         if (my_portfolio.mode === 'PAPER') {
             my_portfolio.reference_capital = config?.reference_capital || 10;
             my_portfolio.cash_sol = config?.simulated_balance || 10;
-        } else if (walletPublicKey) {
-            const lamports = await connection.getBalance(walletPublicKey);
-            const liveSol = lamports / 1e9;
-            my_portfolio.cash_sol = liveSol;
-            my_portfolio.reference_capital = liveSol; 
-            await supabase.from('system_config').update({ live_wallet_balance: liveSol }).eq('id', 1);
         }
 
         const { data: positions } = await supabase.from(tableName).select('*');
@@ -82,12 +112,15 @@ async function initPortfolio() {
 }
 
 async function syncLiveBalanceToDB() {
-    if (my_portfolio.mode === 'LIVE' && walletPublicKey) {
+    // 🚀 FIX 3: 定時同步亦都不受 PAPER 模式限制，確保 Dashboard 一直見到真錢跳動
+    if (walletPublicKey) {
         try {
             const lamports = await connection.getBalance(walletPublicKey);
             const liveSol = lamports / 1e9;
-            my_portfolio.cash_sol = liveSol;
             await supabase.from('system_config').update({ live_wallet_balance: liveSol }).eq('id', 1);
+            if (my_portfolio.mode === 'LIVE') {
+                my_portfolio.cash_sol = liveSol;
+            }
         } catch (err) {}
     }
 }
@@ -98,37 +131,23 @@ function getPortfolio() { return my_portfolio; }
 // 🛡️ V5.5 核心：資金與倉位絕對鎖 (The Money Gate)
 // ==========================================
 
-/**
- * 獲取動態倉位上限 (採用 60% 新幣 : 40% 老幣比例)
- * 如果總數是 5，即變成 3 新 2 老！
- */
 function getPositionLimits() {
     const maxMeme = Math.ceil(globalMaxPositions * 0.6); 
     const maxBluechip = globalMaxPositions - maxMeme;
     return { maxMeme, maxBluechip };
 }
 
-/**
- * 獲取當前 Meme 幣 (新幣 + 接回) 的持倉數量
- * 標籤對應: MEME_HUNTER, MEME_REENTRY
- */
 function getMemeCount() {
     return my_portfolio.positions.filter(p => 
         p.strategy_type && p.strategy_type.includes('MEME')
     ).length;
 }
 
-/**
- * 獲取當前 老幣波段 的持倉數量
- * 標籤對應: BLUECHIP_SWING
- */
 function getBlueChipCount() {
     return my_portfolio.positions.filter(p => 
         p.strategy_type && p.strategy_type.includes('BLUECHIP')
     ).length;
 }
-
-// ==========================================
 
 function updateCache(action, solAmount, positionData = null) {
     if (action === 'BUY') {
