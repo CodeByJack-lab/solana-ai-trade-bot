@@ -537,6 +537,10 @@ function startPositionMonitor() {
                     reason = `AI 指示: ${reviewResult.reason}`;
                     
                     if (action === 'EXIT') action = 'SELL';
+                    
+                    if (action === 'HOLD') {
+                        console.log(`🛡️ [AI 決策] ${pos.token_symbol} 繼續持有。理由: ${reviewResult.reason}\n`);
+                    }
                 }
 
                 if (action === 'SELL') {
