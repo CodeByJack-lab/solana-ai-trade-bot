@@ -94,7 +94,7 @@ async function toggleHeliusWebhook(enable = true) {
            const payload3 = {
                 webhookURL: targetUrl,
                 // 🚀 修正 Webhook 3: 使用明確的交易類型避免 -32603 錯誤
-                transactionTypes: ["TRANSFER", "SWAP", "BUY", "SELL"], 
+                transactionTypes: ["ANY"], 
                 accountAddresses: [botWallet], 
                 webhookType: "enhanced",
                 txnStatus: "success"
