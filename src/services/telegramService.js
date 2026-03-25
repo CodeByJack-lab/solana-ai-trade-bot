@@ -9,8 +9,8 @@ const TRADE_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TRADE_CHAT_ID = process.env.TELEGRAM_CHANNEL_ID;
 
 // ⚙️ 系統管理員 Bot (Admin) - 使用新命名，如果未設定，自動 Fallback 用 Main Bot
-const ADMIN_BOT_TOKEN = process.env.TELEGRAM_ADMIN_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
-const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID || process.env.TELEGRAM_CHAT_ID;
+const ADMIN_BOT_TOKEN = process.env.TELEGRAM_ADMIN_BOT_TOKEN;
+const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID;
 
 /**
  * 底層發送邏輯 (防 HTML 衝突)
