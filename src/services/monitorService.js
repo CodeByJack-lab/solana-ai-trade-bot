@@ -118,21 +118,6 @@ async function toggleHeliusWebhook(enable = true) {
     }
 }
 
-// ==========================================
-// 🚀 秘密開關：手動強制觸發 Master AI 進化
-// ==========================================
-app.get('/force-evolution', (req, res) => {
-    console.log('\n========================================');
-    console.log('👑 [Admin] 管理員已手動強制喚醒 Master AI！');
-    console.log('========================================\n');
-    
-    // 立即回覆瀏覽器，避免 Timeout
-    res.status(200).send('<h1>🚀 Master AI 已被強制喚醒！</h1><p>請返回 Terminal 查看詳細的 Console Log 戰報。</p>');
-    
-    // 呼叫帶有 Retry 機制的新版進化函數
-    retrospectiveJob.runEvolutionWithRetry(1);
-});
-
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK'); // 🚀 優先回覆 Helius 避免 Timeout
 
@@ -176,20 +161,47 @@ app.post('/webhook/helius', async (req, res) => {
             }
 
             // ==========================================
-            // 🔫 分流 B：原本的交易雷達 (Pump.fun 偵測)
+            // 🔫 分流 B：強化版交易雷達 (Pump.fun & Raydium 偵測)
             // ==========================================
-            if (event.type === "TOKEN_MINT" || event.type === "PUMP_FUN_CREATE") {
-                const instructions = event.instructions || [];
-                for (const ix of instructions) {
-                    if (ix.programId === PUMP_FUN_PROGRAM_ID) {
-                        const mintAddress = ix.accounts[0];
-                        if (mintAddress) {
-                            stats_pumpFunCreates++; 
-                            const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
-                                new_mint_address: mintAddress
-                            });
-                            if (isInserted) stats_addedToNursery++; 
+            if (event.type === "TOKEN_MINT" || event.type === "CREATE_POOL" || event.type === "ADD_LIQUIDITY" || event.type === "PUMP_FUN_CREATE") {
+                
+                let mintAddress = null;
+
+                // 🚀 拆法 A：直接從 Token 轉帳紀錄搵 (Helius 標配)
+                if (event.tokenTransfers && event.tokenTransfers.length > 0) {
+                    mintAddress = event.tokenTransfers[0].mint;
+                }
+
+                // 🚀 拆法 B：如果 A 失敗，去 instructions 搵 (應對 Pump.fun 特殊封包)
+                if (!mintAddress && event.instructions) {
+                    for (const ix of event.instructions) {
+                        if ((ix.programId === PUMP_FUN_PROGRAM_ID || ix.programId === RAYDIUM_V4_PROGRAM_ID) && ix.accounts && ix.accounts.length > 0) {
+                            // 通常 instructions 嘅第一個 account 就係 mint
+                            mintAddress = ix.accounts[0]; 
+                            break;
                         }
+                    }
+                }
+
+                // ✅ 成功抽到 Mint Address，掟入魚池！
+                if (mintAddress) {
+                    stats_pumpFunCreates++; 
+                    const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
+                        new_mint_address: mintAddress
+                    });
+                    if (isInserted) stats_addedToNursery++; 
+                } 
+                else {
+                    // 🚨 建築師 Debug 陷阱：如果 Helius 轉咗格式搞到我哋抽唔到
+                    if (stats_totalWebhookSignals === 1 || stats_totalWebhookSignals === 50) {
+                        console.log(`\n🔍 [Debug] 發現無法解析嘅 ${event.type}！Helius 傳來嘅 JSON 如下：`);
+                        console.log(JSON.stringify({
+                            description: event.description,
+                            type: event.type,
+                            tokenTransfers: event.tokenTransfers,
+                            instructions: event.instructions?.map(i => i.programId) 
+                        }, null, 2));
+                        console.log(`========================================\n`);
                     }
                 }
             }
@@ -199,25 +211,25 @@ app.post('/webhook/helius', async (req, res) => {
     }
 });
 
-            // ==========================================
-            // 🚀 秘密開關：手動強制觸發 Master AI 進化
-            // ==========================================
-            app.get('/force-evolution', async (req, res) => {
-                console.log('\n========================================');
-                console.log('👑 [Admin] 管理員已手動強制喚醒 Master AI！');
-                console.log('========================================\n');
-    
-              // 1. 立即回覆，防止瀏覽器轉圈圈到超時
-                res.status(200).send(`
-                    <div style="font-family: sans-serif; text-align: center; padding: 50px;">
-                        <h1 style="color: #4CAF50;">🚀 Master AI 已被強制喚醒！</h1>
-                        <p style="font-size: 18px;">系統正準備進行自我進化分析...</p>
-                        <p style="color: #666;">請返回 Railway / Terminal 查看詳細的 Console Log 戰報。</p>
-                        <hr style="width: 200px; margin: 30px auto;">
-                        <p style="font-size: 14px; color: #999;">Status: Processing (Attempt 1)</p>
-                    </div>
-                `);
-    
+// ==========================================
+// 🚀 秘密開關：手動強制觸發 Master AI 進化
+// ==========================================
+app.get('/force-evolution', async (req, res) => {
+    console.log('\n========================================');
+    console.log('👑 [Admin] 管理員已手動強制喚醒 Master AI！');
+    console.log('========================================\n');
+
+    // 1. 立即回覆，防止瀏覽器轉圈圈到超時
+    res.status(200).send(`
+        <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+            <h1 style="color: #4CAF50;">🚀 Master AI 已被強制喚醒！</h1>
+            <p style="font-size: 18px;">系統正準備進行自我進化分析...</p>
+            <p style="color: #666;">請返回 Railway / Terminal 查看詳細的 Console Log 戰報。</p>
+            <hr style="width: 200px; margin: 30px auto;">
+            <p style="font-size: 14px; color: #999;">Status: Processing (Attempt 1)</p>
+        </div>
+    `);
+
     // 2. 異步執行進化邏輯
     try {
         const { retrospectiveJob } = require('../jobs/retrospectiveJob');
