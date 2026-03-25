@@ -31,17 +31,21 @@ async function getDynamicPrompt(promptId, data) {
 // 🛡️ 監軍部門 (Reviewer) - 主副雙修 AI 分離
 // ==========================================
 async function reviewActivePosition(mintAddress, positionData) {
-    // 💡 1. 判斷兵種，選擇對應的 Supabase Prompt ID
+    // 💡 1. 判斷兵種與時間
     const isBluechip = positionData.strategy_type === 'BLUECHIP_SWING';
     const promptId = isBluechip ? 'reviewer_bluechip' : 'reviewer_overseer';
+    
+    // 🚀 核心升級：計算持倉時間 (分鐘)
+    let holdingMinutes = 999; // 預設很久，防止出錯時鎖死
+    if (positionData.created_at) {
+        holdingMinutes = (Date.now() - new Date(positionData.created_at).getTime()) / 60000;
+    }
 
-    // 🚀 核心升級：實時獲取新聞災難指數，賦予監軍宏觀視野
+    // 🚀 獲取新聞指數
     let currentNewsScore = 0;
     try {
         const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
-        if (config && config.latest_news_score) {
-            currentNewsScore = config.latest_news_score;
-        }
+        if (config && config.latest_news_score) currentNewsScore = config.latest_news_score;
     } catch (e) {
         console.warn(`⚠️ [AI Engine] 無法獲取新聞指數，預設為 0`);
     }
@@ -50,10 +54,9 @@ async function reviewActivePosition(mintAddress, positionData) {
         token_symbol: positionData.token_symbol,
         pnl_pct: positionData.pnlPct.toFixed(2),
         ai_reason: positionData.ai_reason,
-        latest_news_score: currentNewsScore // 🚀 注入新變數
+        latest_news_score: currentNewsScore
     });
 
-    // 💡 2. 防呆機制 (萬一 DB 未加，提供硬編碼備援)
     if (!promptText && isBluechip) {
         promptText = `你是一個專業的華爾街量化分析師，負責評估「老幣波段交易 (Bluechip Swing)」倉位。
 目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason} | 大盤災難指數：${currentNewsScore}/100
@@ -64,9 +67,9 @@ async function reviewActivePosition(mintAddress, positionData) {
 請分析社群熱度與洗盤跡象，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD/EXIT", "reason": "分析"}。`;
     }
 
-    // 🚀 3. 強行注入「獨立審查指令」
+    // 🚀 將持倉時間告知 AI，並強調新幣保護原則
     const roleName = isBluechip ? "量化分析師" : "獨立監軍";
-    promptText += `\n\n【重要任務】\n當初買入這隻幣的理由是：「${positionData.ai_reason}」。\n請你作為${roleName}，嚴格審查目前市場情況是否已經偏離這個初衷。請給出你專屬的評語，**絕對不可**直接照抄買入理由！`;
+    promptText += `\n\n【重要任務】\n當初買入這隻幣的理由是：「${positionData.ai_reason}」。\n這筆交易目前已持倉 ${holdingMinutes.toFixed(1)} 分鐘。\n請你作為${roleName}，嚴格審查目前市場情況是否已經偏離這個初衷。請給出你專屬的評語，**絕對不可**直接照抄買入理由！`;
 
     let aiResult;
     let modelLabel = "";
@@ -105,7 +108,18 @@ async function reviewActivePosition(mintAddress, positionData) {
         }
     }
 
-    // 🚀 【同步核心】將 AI 評語更新回 Supabase
+    // 🚀 【終極防彈裝甲：10分鐘免死金牌】
+    // 如果 AI 決定要 EXIT，但持倉不足 10 分鐘，且利潤尚未跌穿 -10%，強制攔截並改為 HOLD！
+    if (aiResult && aiResult.decision === 'EXIT') {
+        const pnl = positionData.pnlPct;
+        if (holdingMinutes < 10 && pnl > -10.0) {
+            console.log(`🛡️ [Overseer Override] AI 提議賣出，但持倉僅 ${holdingMinutes.toFixed(1)} 分鐘且 PNL (${pnl.toFixed(2)}%) 未跌破 -10%。強制給予時間發酵，改為 HOLD。`);
+            aiResult.decision = 'HOLD';
+            aiResult.reason = `[強制持有] 建倉不足 10 分鐘且未觸發 -10% 止損，給予時間發酵。AI 原評語: ${aiResult.reason}`;
+        }
+    }
+
+    // 🚀 將 AI 評語更新回 Supabase
     if (aiResult && aiResult.reason) {
         try {
             const tableName = positionData.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
@@ -116,7 +130,6 @@ async function reviewActivePosition(mintAddress, positionData) {
                 .update({ last_review_comment: finalComment })
                 .eq('mint_address', mintAddress);
                 
-            console.log(`✅ [Review Sync] ${positionData.token_symbol} 評語已更新至 ${tableName}`);
         } catch (dbErr) {
             console.error(`❌ [Review Sync Failed] ${dbErr.message}`);
         }

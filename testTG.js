@@ -1,23 +1,51 @@
-// testTG.js
-const { sendTelegramAlert, sendAdminAlert } = require('./src/services/telegramService'); // 注意路徑是否需要改為 ./backend/services/telegramService
+// test-tg.js
+const axios = require('axios');
+require('dotenv').config();
+
+// 讀取你 .env 嘅變數
+const TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const PERSONAL_ID = process.env.TELEGRAM_CHAT_ID;
+const CHANNEL_ID = process.env.TELEGRAM_CHANNEL_ID;
+
+async function sendMsg(targetId, targetName) {
+    if (!targetId) {
+        console.log(`⚠️ 跳過 ${targetName} 測試：未設定 ID。`);
+        return;
+    }
+
+    const url = `https://api.telegram.org/bot${TOKEN}/sendMessage`;
+    const message = `🔔 <b>【${targetName} 連線測試】</b>\n\n狀態: 🟢 正常運作\n目標 ID: <code>${targetId}</code>`;
+
+    try {
+        await axios.post(url, {
+            chat_id: targetId,
+            text: message,
+            parse_mode: 'HTML'
+        });
+        console.log(`✅ 【成功】訊息已發送到 ${targetName} (${targetId})`);
+    } catch (err) {
+        console.error(`❌ 【失敗】${targetName} 發送失敗`);
+        console.error(`原因: ${err.response?.data?.description || err.message}`);
+    }
+}
 
 async function runTest() {
-    console.log("🚀 [TG 測試] 開始發送訊號到 Telegram...");
-
-    // 測試 1: 發送去 Main Bot (日常戰報)
-    console.log("📨 測試 1: 正在呼叫 Main Bot...");
-    await sendTelegramAlert("🟢 <b>[測試] 買入成功</b>\n這是一條來自 <b>Main Bot</b> 的日常交易戰報測試！\n代幣: $TEST\n狀態: 運作正常 ✅");
-
-    // 測試 2: 發送去 Admin Bot (救火/警報)
-    console.log("🚨 測試 2: 正在呼叫 Admin Bot...");
-    await sendAdminAlert("🔴 <b>[測試] 系統警報</b>\n這是一條來自 <b>Admin Bot</b> 的系統管理員警告測試！\n狀態: 測試分流功能是否正常運作 ⚙️");
-
-    console.log("✅ 測試指令已全部送出！請打開你嘅 Telegram 檢查下兩邊收唔收到。");
+    console.log(`🚀 正在啟動 Telegram 雙路測試...`);
     
-    // 等待 2 秒確保 Axios request 行完
-    setTimeout(() => {
-        process.exit(0);
-    }, 2000);
+    if (!TOKEN) {
+        console.error('❌ 錯誤: 缺少 TELEGRAM_BOT_TOKEN');
+        return;
+    }
+
+    // 1. 測試個人私聊
+    await sendMsg(PERSONAL_ID, "個人私聊 (TELEGRAM_CHAT_ID)");
+    
+    // 2. 測試頻道發送
+    await sendMsg(CHANNEL_ID, "Telegram 頻道 (TELEGRAM_CHANNEL_ID)");
+
+    console.log(`\n💡 如果 Channel 測試失敗，請檢查：`);
+    console.log(`1. 隻 Bot 係咪已經加咗入 Channel 做 Admin。`);
+    console.log(`2. CHANNEL_ID 係咪以 -100 開頭。`);
 }
 
 runTest();

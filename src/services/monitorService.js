@@ -17,15 +17,13 @@ const app = express();
 app.use(express.json());
 
 // 🚀 雙 Webhook 環境變數 (已對位)
-const HELIUS_API_KEY = process.env.HELIUS_API_KEY;           // Webhook 1 (Raydium)
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY;           
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
-const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;       // Webhook 2 (Pump.fun)
+const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;       
 const WEBHOOK_ID_2 = process.env.HELIUS_WEBHOOK_ID_2;
 
-// 🚀 確保這裡是你真正的 Railway 網址
 const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
 
-// 🎯 Program IDs
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
@@ -45,9 +43,6 @@ async function toggleHeliusWebhook(enable = true) {
     const targetUrl = `${cleanUrl}/webhook/helius`;
     console.log(`📡 [Helius] 正在確保雙 Webhook 連線至: ${targetUrl}`);
 
-    // ==========================================
-    // 🎯 Webhook 1: 專注 Raydium V4 (使用 API_KEY)
-    // ==========================================
     if (HELIUS_API_KEY && WEBHOOK_ID) {
         try {
             const url1 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
@@ -67,9 +62,6 @@ async function toggleHeliusWebhook(enable = true) {
         console.warn('⚠️ [Webhook 1] 缺少 HELIUS_API_KEY 或 HELIUS_WEBHOOK_ID，跳過設定。');
     }
 
-    // ==========================================
-    // 🎯 Webhook 2: 專注 Pump.fun (使用 API_KEY_2)
-    // ==========================================
     if (HELIUS_API_KEY_2 && WEBHOOK_ID_2) {
         try {
             const url2 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID_2}?api-key=${HELIUS_API_KEY_2}`;
@@ -106,7 +98,6 @@ app.post('/webhook/helius', async (req, res) => {
 
         for (const event of events) {
             const instructions = event.instructions || [];
-            
             for (const ix of instructions) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
                     const dataObj = ix.data || "";
@@ -126,20 +117,10 @@ app.post('/webhook/helius', async (req, res) => {
                                 const mintAddress = ix.accounts[0];
                                 if (mintAddress) {
                                     stats_pumpFunCreates++; 
-
-                                    // 🚀 呼叫 SQL RPC 函數自動管理 200 隻上限
                                     const { data: isInserted, error } = await supabase.rpc('insert_fish_with_limit', {
                                         new_mint_address: mintAddress
                                     });
-
-                                    if (isInserted) {
-                                        stats_addedToNursery++; 
-                                        // 🚀 已開啟加入魚池 Log
-                                        //console.log(`🌟 [Webhook] 魚池未滿，成功加入新魚: ${mintAddress}`);
-                                    } else {
-                                        // 🚀 修正文字 Bug：顯示 200 隻上限
-                                        //console.log(`🛑 [Nursery] 魚池已達 200 隻上限，拒收新魚: ${mintAddress}`);
-                                    }
+                                    if (isInserted) stats_addedToNursery++; 
                                 }
                             }
                         } catch (e) { }
@@ -174,7 +155,6 @@ let isAiReviewing = false;
 
 async function triggerBuyPipeline(mintAddress, secResult, config) {
     while (isAiReviewing) {
-        console.log(`🚦 [AI Lock] 系統正處理另一代幣，${mintAddress.substring(0,6)} 稍等 1 秒避開撞機...`);
         await new Promise(r => setTimeout(r, 1000));
     }
 
@@ -187,7 +167,17 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
         
         if (aiDecision.buy) {
             const strategy = secResult.isBlindSnipe ? 'MEME_BLIND' : 'MEME_SNIPE';
-            await executeBuy(mintAddress, secResult.marketData.symbol, strategy, aiDecision.score, aiDecision.reason, config.trade_amount_sol);
+            const buyResult = await executeBuy(mintAddress, secResult.marketData.symbol, strategy, aiDecision.score, aiDecision.reason, config.trade_amount_sol);
+            
+            // 🚀 耀眼的買入 Log
+            if (buyResult !== false) {
+                console.log(`\n======================================================`);
+                console.log(`✅ 🟢 【買入指令已送出 - ${secResult.marketData.symbol}】 🟢 ✅`);
+                console.log(`📍 策略: ${strategy}`);
+                console.log(`投入金額: ${config.trade_amount_sol} SOL`);
+                console.log(`🤖 AI 買入理由: ${aiDecision.reason}`);
+                console.log(`======================================================\n`);
+            }
         } else {
             console.log(`🧠 [AI Rejected] 否決: ${aiDecision.reason}`);
         }
@@ -202,7 +192,7 @@ let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
     console.log('🐟 [Nursery Radar] 雙層過濾系統已啟動 (DB -> RAM -> Out)');
     
-    // 🚀 5 秒一審，配合 200 魚池容量
+    // 🚀 改為 3 秒一審，加快消化速度
     setInterval(async () => {
         if (isNurseryRunning) return;
         
@@ -223,23 +213,26 @@ function startDatabaseNurseryMonitor() {
             const now = Date.now();
             for (const [mint, data] of ramSecondaryPool.entries()) {
                 if (now >= data.nextProcessTime) {
-                    console.log(`⏳ [RAM Secondary] 緩刑期滿，重審: ${mint.substring(0,6)} (次數: ${data.failCount + 1}/3)`);
                     const { securityGuard } = require('./securityGuard');
                     const secResult = await securityGuard.checkAll(mint);
 
                     if (secResult.isSafe) {
-                        console.log(`🛡️ [Security] RAM 幣過關！準備呼叫大腦...`);
+                        console.log(`\n======================================================`);
+                        console.log(`🎣 [RAM Nursery] 緩刑出獄: ${mint.substring(0,6)}`);
+                        console.log(`🛡️ [Security] 物理與合約防線通關！準備交由 AI 審查...`);
+                        console.log(`======================================================\n`);
                         await triggerBuyPipeline(mint, secResult, config);
                         ramSecondaryPool.delete(mint);
                     } else {
-                        console.log(`🛡️ [Security] 攔截: ${secResult.reason}`);
+                        const reason = secResult.reason || '';
+                        if (!reason.includes('查無報價') && !reason.includes('死水') && !reason.includes('流動性太窮')) {
+                            console.log(`🛡️ [Security] RAM二次攔截 ${mint.substring(0,6)}: ${reason}`);
+                        }
                         data.failCount++;
                         if (data.failCount >= 3) {
-                            console.log(`🚫 [Three-Strikes] ${mint.substring(0,6)} 三振出局，永久放棄。`);
                             ramSecondaryPool.delete(mint);
                         } else {
                             data.nextProcessTime = Date.now() + (15 * 60 * 1000);
-                            console.log(`⏳ [Security] 二次攔截: ${mint.substring(0,6)} 進入最後 15 分鐘緩刑。`);
                         }
                     }
                 }
@@ -259,23 +252,32 @@ function startDatabaseNurseryMonitor() {
                 if (ageMins > config.max_age_mins) {
                     await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
                 } else if (ageMins >= config.min_age_mins) {
-                    console.log(`\n🎣 [Nursery] DB 撈出成熟代幣 ${mintAddress.substring(0,6)} (坐監已滿 ${config.min_age_mins} 分鐘)`);
+                    // 🔇 取消這行擾人的 Console
+                    // console.log(`\n🎣 [Nursery] DB 撈出成熟代幣...`);
+                    
                     const { securityGuard } = require('./securityGuard');
                     const secResult = await securityGuard.checkAll(mintAddress);
 
                     await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
 
                     if (secResult.isSafe) {
-                        console.log(`🛡️ [Security] 通過: ${mintAddress.substring(0,6)}`);
+                        console.log(`\n======================================================`);
+                        console.log(`🎣 [Nursery] 撈出熟魚: ${mintAddress.substring(0,6)} (已坐監 ${config.min_age_mins} 分鐘)`);
+                        console.log(`🛡️ [Security] 物理與合約防線通關！準備交由 AI 審查...`);
+                        console.log(`======================================================\n`);
                         await triggerBuyPipeline(mintAddress, secResult, config);
                     } else {
-                        console.log(`🛡️ [Security] 攔截: ${secResult.reason}`);
+                        const reason = secResult.reason || '';
+                        // 🔇 靜音常見的垃圾攔截，只顯示特殊狀況
+                        if (!reason.includes('查無報價') && !reason.includes('死水') && !reason.includes('流動性太窮')) {
+                            console.log(`🛡️ [Security] 攔截 ${mintAddress.substring(0,6)}: ${reason}`);
+                        }
+
                         if (secResult.isPurgatory) {
                             ramSecondaryPool.set(mintAddress, {
                                 failCount: 1, 
                                 nextProcessTime: Date.now() + (10 * 60 * 1000)
                             });
-                            console.log(`📦 [Migration] ${mintAddress.substring(0,6)} 轉移至 RAM 緩衝區 (10 分鐘後重審)`);
                         }
                     }
                 } else {
@@ -291,7 +293,7 @@ function startDatabaseNurseryMonitor() {
         } finally {
             isNurseryRunning = false;
         }
-    }, 5000); 
+    }, 3000); 
 }
 
 function startWatchlistMonitor() {
@@ -336,7 +338,15 @@ function startWatchlistMonitor() {
                     const decisionObj = await analyzeReentry(item.mint_address, item.token_symbol, baseline);
                     
                     if (decisionObj.decision === 'BUY') {
-                        await executeBuy(item.mint_address, item.token_symbol, 'MEME_REENTRY', 95, decisionObj.reason, config.trade_amount_sol);
+                        const buyResult = await executeBuy(item.mint_address, item.token_symbol, 'MEME_REENTRY', 95, decisionObj.reason, config.trade_amount_sol);
+                        // 🚀 耀眼的接回 Log
+                        if (buyResult !== false) {
+                            console.log(`\n======================================================`);
+                            console.log(`✅ 🟢 【接回成功 - ${item.token_symbol}】 🟢 ✅`);
+                            console.log(`📍 策略: MEME_REENTRY`);
+                            console.log(`🤖 AI 買入理由: ${decisionObj.reason}`);
+                            console.log(`======================================================\n`);
+                        }
                     } else {
                         console.log(`🧠 [Reentry Rejected] 否決: ${decisionObj.reason}`);
                     }
@@ -454,20 +464,36 @@ function startPositionMonitor() {
                 }
 
                 if (action === 'SELL') {
+                    const pnlIcon = pnlPct > 0 ? '🚀 止盈' : '🩸 止損';
                     if (isBluechip && !isHalfSold && pnlPct > 0) {
                         const sellResult = await runSellPipeline(pos, currentPrice, `[老幣分批止盈] ${reason}`, 0.5);
+                        // 🚀 耀眼的賣出 Log
                         if (sellResult) {
+                            console.log(`\n======================================================`);
+                            console.log(`💳 🔴 【分批賣出成功 - ${pos.token_symbol}】 🔴 💳`);
+                            console.log(`📊 動作: 🚀 止盈 (+${pnlPct.toFixed(2)}%)`);
+                            console.log(`🤖 理由: [老幣分批止盈] ${reason}`);
+                            console.log(`======================================================\n`);
                             sendTelegramAlert(`🔵 <b>老幣波段止盈</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定利潤，剩餘倉位轉為零成本持有。`);
                         }
                     } else {
                         const sellResult = await runSellPipeline(pos, currentPrice, reason, 1.0);
-                        if (sellResult && !isBluechip && pnlPct >= 20) {
-                            await supabase.from('reentry_watchlist').insert([{
-                                mint_address: pos.mint_address, token_symbol: pos.token_symbol,
-                                sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
-                                consolidation_start_time: new Date().toISOString()
-                            }]);
-                            console.log(`📋 已將 ${pos.token_symbol} 加入橫盤觀察名單 (30分鐘後評估接回)`);
+                        // 🚀 耀眼的賣出 Log
+                        if (sellResult) {
+                            console.log(`\n======================================================`);
+                            console.log(`💳 🔴 【全倉賣出成功 - ${pos.token_symbol}】 🔴 💳`);
+                            console.log(`📊 動作: ${pnlIcon} (${pnlPct.toFixed(2)}%)`);
+                            console.log(`🤖 理由: ${reason}`);
+                            console.log(`======================================================\n`);
+
+                            if (!isBluechip && pnlPct >= 20) {
+                                await supabase.from('reentry_watchlist').insert([{
+                                    mint_address: pos.mint_address, token_symbol: pos.token_symbol,
+                                    sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
+                                    consolidation_start_time: new Date().toISOString()
+                                }]);
+                                console.log(`📋 已將 ${pos.token_symbol} 加入橫盤觀察名單 (30分鐘後評估接回)`);
+                            }
                         }
                     }
                 }

@@ -2,7 +2,7 @@
 const { getPortfolio, updateCache } = require('./portfolioService');
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
-const { PublicKey, Keypair } = require('@solana/web3.js'); // 🚀 FIX: 加入 Keypair 防止 Crash
+const { PublicKey, Keypair } = require('@solana/web3.js'); 
 const { connection } = require('../config/solana'); 
 const path = require('path');
 const BigNumber = require('bignumber.js'); 
@@ -206,6 +206,15 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             txid: finalTxid, ai_factcheck_result: aiReason, review_history: aiReason 
         }]);
 
+        // 🚀 耀眼的買入 Terminal Log
+        console.log(`\n======================================================`);
+        console.log(`✅ 🟢 【買入成功 - ${tokenSymbol}】 🟢 ✅`);
+        console.log(`📍 策略: ${strategyType}`);
+        console.log(`💰 價格: $${buyPriceSol.toFixed(8)} SOL`);
+        console.log(`投入金額: ${configTradeAmountSol} SOL`);
+        console.log(`🤖 AI 理由: ${aiReason}`);
+        console.log(`======================================================\n`);
+
         if(typeof sendTelegramAlert === 'function') {
             const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
             sendTelegramAlert(`${modeTag} <b>✅ 買入成功</b>\n🪙 代幣: $${tokenSymbol}\n💰 投入: ${configTradeAmountSol.toFixed(4)} SOL\n🔗 TX: ${isLive ? `<a href="https://solscan.io/tx/${finalTxid}">Solscan</a>` : finalTxid}\n🧠 理由: ${aiReason}`);
@@ -275,7 +284,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     // 🚀 計算真實入袋 SOL (對撞終點)
     let actualSolReceived = 0;
-    if (isLive && tradeSuccess && !finalTxid.startsWith('SELL_') && globalWalletPublicKey) {// Jito TXID 通常長過一般 string，以此判斷真 TX
+    if (isLive && tradeSuccess && !finalTxid.startsWith('SELL_') && globalWalletPublicKey) {
         console.log(`🔍 [Live Check] 正在驗證鏈上真實 SOL 收益 (等待 5 秒確認區塊)...`);
         await new Promise(r => setTimeout(r, 5000));
         try {
@@ -297,7 +306,17 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         const pnlSol = new BigNumber(sellValueSol).minus(entryTotalValue).toNumber();
         const pnlPct = new BigNumber(pnlSol).div(entryTotalValue).times(100).toNumber();
 
-        await commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, `Jupiter: ${reason}`, sellQuantity, sellFraction, pos.strategy_type, finalTxid);
+        // 🚀 耀眼的賣出 Terminal Log
+        const pnlIcon = pnlPct > 0 ? '🚀 止盈' : '🩸 止損';
+        console.log(`\n======================================================`);
+        console.log(`💳 🔴 【賣出成功 - ${tokenSymbol}】 🔴 💳`);
+        console.log(`📊 動作: ${pnlIcon} (${pnlPct.toFixed(2)}%)`);
+        console.log(`💰 淨賺/虧損: ${pnlSol.toFixed(4)} SOL`);
+        console.log(`🤖 AI 理由: ${reason}`);
+        console.log(`======================================================\n`);
+
+        // 🔇 移除了 `Jupiter: ` 字眼
+        await commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, reason, sellQuantity, sellFraction, pos.strategy_type, finalTxid);
         return true;
     }
     return false;
@@ -324,7 +343,8 @@ async function forceWriteOff(mintAddress, reason) {
         } catch (err) {}
     }
 
-    await commitTradeToDb(posIndex, 0, 0, -pos.entry_price_sol * pos.quantity, -100, `FORCE: ${reason}`, pos.quantity, 1.0, pos.strategy_type, "FORCE_WRITE_OFF");
+    // 🔇 移除了 `FORCE: ` 以防你想 DB 乾淨啲 (可選)
+    await commitTradeToDb(posIndex, 0, 0, -pos.entry_price_sol * pos.quantity, -100, reason, pos.quantity, 1.0, pos.strategy_type, "FORCE_WRITE_OFF");
 }
 
 async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, finalReason, sellQuantity, sellFraction, originalStrategyType, txid) {
@@ -353,7 +373,6 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     let currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
     let newBalance = currentBalance + Number(sellValueSol);
 
-    // 🚀 實盤精準對撞：更新 DB 的錢包餘額為鏈上真實數字
     if (isLive && globalWalletPublicKey) {
         try {
             const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
