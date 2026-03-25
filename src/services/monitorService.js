@@ -53,7 +53,7 @@ async function toggleHeliusWebhook(enable = true) {
             const url1 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
             const payload1 = {
                 webhookURL: targetUrl,
-                transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
+                transactionTypes: ["CREATE_POOL"], 
                 accountAddresses: [RAYDIUM_V4_PROGRAM_ID],
                 webhookType: "enhanced",
                 txnStatus: "success" 
@@ -72,7 +72,7 @@ async function toggleHeliusWebhook(enable = true) {
             const url2 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID_2}?api-key=${HELIUS_API_KEY_2}`;
             const payload2 = {
                 webhookURL: targetUrl,
-                transactionTypes: ["CREATE_POOL", "UNKNOWN", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
+                transactionTypes: ["CREATE_POOL", "TOKEN_MINT"], 
                 accountAddresses: [PUMP_FUN_PROGRAM_ID],
                 webhookType: "enhanced",
                 txnStatus: "success" 
