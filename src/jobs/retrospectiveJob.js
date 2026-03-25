@@ -122,7 +122,7 @@ const retrospectiveJob = {
                     const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${activeKey}`, {
                         contents: [{ role: "user", parts: [{ text: promptText }] }],
                         generationConfig: { responseMimeType: "application/json", temperature: 0.1 } 
-                    }, { timeout: 25000 });
+                    }, { timeout: 120000 });
 
                     rawText = res.data.candidates[0].content.parts[0].text;
                     report = JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
@@ -169,7 +169,7 @@ const retrospectiveJob = {
                         messages: [{ role: "user", content: auditorPrompt }],
                         response_format: { type: "json_object" },
                         temperature: 0.1
-                    }, { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 10000 });
+                    }, { headers: { 'Authorization': `Bearer ${GROQ_API_KEY}`, 'Content-Type': 'application/json' }, timeout: 120000 });
 
                     const boardDecision = JSON.parse(groqRes.data.choices[0].message.content);
                     if (boardDecision.decision === 'VETO') {

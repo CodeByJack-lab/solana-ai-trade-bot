@@ -175,7 +175,9 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         updateCache('BUY', configTradeAmountSol, {
             mint_address: mintAddress, token_symbol: tokenSymbol,
             quantity: tokenQuantity, entry_price_sol: buyPriceSol,
-            highest_price_sol: buyPriceSol, strategy_type: strategyType 
+            highest_price_sol: buyPriceSol, strategy_type: strategyType,
+            // 🚀 必須加呢行！畀張出世紙佢！
+            created_at: new Date().toISOString() 
         });
 
         const { data: dbConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();

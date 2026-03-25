@@ -36,7 +36,8 @@ async function reviewActivePosition(mintAddress, positionData) {
     const promptId = isBluechip ? 'reviewer_bluechip' : 'reviewer_overseer';
     
     // 🚀 核心升級：計算持倉時間 (分鐘)
-    let holdingMinutes = 999; // 預設很久，防止出錯時鎖死
+    // 💡 防呆機制：預設改為 0 (當作新買)，防止因為 RAM 甩漏而無辜被斬倉
+    let holdingMinutes = 0; 
     if (positionData.created_at) {
         holdingMinutes = (Date.now() - new Date(positionData.created_at).getTime()) / 60000;
     }
