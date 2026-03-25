@@ -259,7 +259,7 @@ function startDatabaseNurseryMonitor() {
                 if (ageMins > config.max_age_mins) {
                     await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
                 } else if (ageMins >= config.min_age_mins) {
-                    console.log(`\n🎣 [Nursery] DB 撈出成熟代幣 ${mintAddress.substring(0,6)} (坐監已滿 ${config.min_age_mins} 分)`);
+                    console.log(`\n🎣 [Nursery] DB 撈出成熟代幣 ${mintAddress.substring(0,6)} (坐監已滿 ${config.min_age_mins} 分鐘)`);
                     const { securityGuard } = require('./securityGuard');
                     const secResult = await securityGuard.checkAll(mintAddress);
 

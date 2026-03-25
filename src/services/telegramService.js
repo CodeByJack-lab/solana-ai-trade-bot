@@ -6,7 +6,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 
 // 📈 交易戰報 Bot (Main) - 舊有不變
 const TRADE_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TRADE_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+const TRADE_CHAT_ID = process.env.TELEGRAM_CHANNEL_ID;
 
 // ⚙️ 系統管理員 Bot (Admin) - 使用新命名，如果未設定，自動 Fallback 用 Main Bot
 const ADMIN_BOT_TOKEN = process.env.TELEGRAM_ADMIN_BOT_TOKEN || process.env.TELEGRAM_BOT_TOKEN;
@@ -36,7 +36,7 @@ async function _send(message, token, chatId) {
 }
 
 /**
- * 📈 供 tradeService 等發送日常交易戰報 (維持舊有函數名，無痛兼容)
+ * 📈 供 tradeService 等發送日常交易戰報
  */
 async function sendTelegramAlert(message) {
     return _send(message, TRADE_BOT_TOKEN, TRADE_CHAT_ID);
@@ -52,7 +52,7 @@ async function sendAdminAlert(message) {
 // ==========================================
 // ⏰ 1. API Key 到期提醒排程 (每 55 日)
 // ==========================================
-const START_DATE = new Date('2026-03-20T00:00:00+08:00'); // 起點：2026年3月20日
+const START_DATE = new Date('2026-03-20T00:00:00+08:00'); 
 let lastReminderDay = -1;
 
 function checkApiKeyExpiration() {
@@ -83,25 +83,51 @@ function checkSystemHealth() {
     const report = healthMonitor.getHealthReport();
     
     if (report.includes('🔴')) {
-        // 抽取出具體死咗邊條 Line，用作防重複比對
         const currentErrors = report.split('\n').filter(line => line.includes('🔴')).join('\n');
-
-        // 如果出現咗「新」嘅錯誤組合，先會觸發 TG Alert (防每分鐘轟炸)
         if (currentErrors !== lastErrorState) {
             const alertMsg = `🚨 <b>【系統故障警告】偵測到模組異常！</b>\n\n🩺 <b>當前看板狀態：</b>\n${report}`;
             sendAdminAlert(alertMsg);
             lastErrorState = currentErrors; 
         }
     } else {
-        // 如果全部恢復正常 (無 🔴)，且之前有報過錯
         if (lastErrorState !== "") {
             const recoveryMsg = `✅ <b>【系統恢復正常】所有模組已解除警報！</b>\n\n🩺 <b>當前看板狀態：</b>\n${report}`;
             sendAdminAlert(recoveryMsg);
-            lastErrorState = ""; // 清空錯誤紀錄
+            lastErrorState = ""; 
         }
     }
 }
-// 系統啟動後，每 60 秒巡邏一次健康看板
-setInterval(checkSystemHealth, 60 * 1000);
 
-module.exports = { sendTelegramAlert, sendAdminAlert };
+// 🚀 [核心修正] 系統啟動後，每 10 分鐘巡邏一次健康看板
+setInterval(checkSystemHealth, 10 * 60 * 1000);
+
+/**
+ * 📋 傳送簡潔版 ID 1 及 ID 2 參數快照
+ */
+async function sendParamSnapshot() {
+    const { supabase } = require('../config/supabase');
+    try {
+        const { data: p1 } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
+        const { data: p2 } = await supabase.from('ai_strategy_params').select('*').eq('id', 2).single();
+        const { data: cfg } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
+
+        const msg = `
+📋 <b>當前系統參數快照</b>
+━━━━━━━━━━━━━━━━━━
+🏛️ <b>老幣 (ID 1)</b>
+- 門檻: $${p1.min_liquidity} | RSI: ${p1.bluechip_max_rsi}
+
+🐶 <b>Meme (ID 2)</b>
+- 門檻: $${p2.min_liquidity} | 量: $${p2.min_vol_5m}
+
+📰 <b>大盤溫度</b>
+- 災難指數: ${cfg.latest_news_score}/100
+━━━━━━━━━━━━━━━━━━
+        `;
+        return sendAdminAlert(msg.trim());
+    } catch (err) {
+        console.error("快照傳送失敗:", err.message);
+    }
+}
+
+module.exports = { sendTelegramAlert, sendAdminAlert, sendParamSnapshot };
