@@ -15,7 +15,6 @@ const securityGuard = {
         const target = `${name} ${symbol}`.toLowerCase();
         
         const badPatterns = [
-            // 🚀 FIX: 移除了 /^unknown/i，防止剛開盤 DexScreener 未抓取名稱時導致友軍誤殺！
             /\.com/i,           
             /\.io/i,
             /\.org/i,
@@ -51,15 +50,28 @@ const securityGuard = {
 
             await new Promise(r => setTimeout(r, 500));
 
+            // 🚀 從資料庫讀取 AI_Evolution 調整出的最新動態參數
             const { data: params, error: dbErr } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
             const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
             if (dbErr) throw new Error("無法讀取動態參數");
 
-            let requiredLiq = params.min_liquidity || 10000;
+            // 基準流動性完全交由 AI 決定 (Params)
+            let requiredLiq = params.min_liquidity || 5000;
             const newsScore = config?.latest_news_score || 0;
-            if (newsScore >= 40) {
-                requiredLiq = requiredLiq * 1.5;
-                console.log(`📰 [Security] 大盤災難指數 ${newsScore}，防 Rug 流動性門檻自動提升至 $${requiredLiq}`);
+            
+            // 🚀 精準區分 Meme 幣與主流老幣
+            const isMeme = cleanMint.toLowerCase().endsWith('pump'); 
+
+            if (isMeme) {
+                // 🐶 Meme 專屬通道：原汁原味使用 AI 的 `min_liquidity`
+                // 絕對不 Hardcode，且【無視】大盤新聞災難指數 (不乘倍數)
+                // console.log(`🐶 [Security] 偵測到 Meme 幣，跟隨 AI 動態流動性門檻 $${requiredLiq}`);
+            } else {
+                // 🏛️ 老幣通道：嚴格要求，並受大盤災難指數影響
+                if (newsScore >= 40) {
+                    requiredLiq = requiredLiq * 1.5; // 大盤差時，老幣防線拉高 1.5 倍
+                    console.log(`📰 [Security] 大盤災難指數 ${newsScore}，老幣防 Rug 門檻自動提升至 $${requiredLiq}`);
+                }
             }
 
             const limits = {
@@ -97,7 +109,10 @@ const securityGuard = {
                 }
 
                 if (marketData.liquidity < limits.minLiq) {
-                    if (marketData.liquidity >= 5000) {
+                    // 🚀 動態緩刑機制：不再寫死 5000！只要達到 AI 目標流動性的 80%，就可以入緩刑區！
+                    const purgatoryThreshold = limits.minLiq * 0.8;
+                    
+                    if (marketData.liquidity >= purgatoryThreshold) {
                         return { 
                             isSafe: false, 
                             isPurgatory: true, 

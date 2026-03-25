@@ -1,7 +1,7 @@
 // src/services/macroMonitorService.js
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
-const { sendTelegramAlert } = require('./telegramService');
+const { sendTelegramAlert, sendAdminAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
 const { newsSentimentService } = require('./newsSentimentService'); 
 
@@ -10,13 +10,10 @@ let useCoinGeckoNext = true;
 
 const macroMonitorService = {
     
-    // ==========================================
-    // 🌐 數據源 A：CoinGecko
-    // ==========================================
     async fetchHighAndDropCoinGecko(coinId) {
         const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=1`;
         const res = await axios.get(url, { 
-            headers: { 'User-Agent': 'Mozilla/5.0' }, // 🚀 加個 Agent 減少被當成純 Bot
+            headers: { 'User-Agent': 'Mozilla/5.0' }, 
             timeout: 10000 
         });
         const prices = res.data?.prices;
@@ -32,9 +29,6 @@ const macroMonitorService = {
         return { currentPrice, highestPrice, dropPct };
     },
 
-    // ==========================================
-    // 🚀 數據源 B：KuCoin (通常比 CG 穩定)
-    // ==========================================
     async fetchHighAndDropKuCoin(symbol) {
         const formattedSymbol = symbol.replace('USDT', '-USDT');
         const url = `https://api.kucoin.com/api/v1/market/candles?type=15min&symbol=${formattedSymbol}`;
@@ -54,28 +48,25 @@ const macroMonitorService = {
     },
 
     async getMarketData() {
-        // 🚀 核心升級：唔再用 Promise.all，改用逐個叫，中間停 2 秒避開併發封鎖
         let btcData, solData, sourceName;
 
         try {
             if (useCoinGeckoNext) {
                 sourceName = 'CoinGecko';
                 btcData = await this.fetchHighAndDropCoinGecko('bitcoin');
-                await new Promise(r => setTimeout(r, 2000)); // ⏳ 停 2 秒
+                await new Promise(r => setTimeout(r, 2000)); 
                 solData = await this.fetchHighAndDropCoinGecko('solana');
             } else {
                 sourceName = 'KuCoin';
                 btcData = await this.fetchHighAndDropKuCoin('BTCUSDT');
-                await new Promise(r => setTimeout(r, 2000)); // ⏳ 停 2 秒
+                await new Promise(r => setTimeout(r, 2000)); 
                 solData = await this.fetchHighAndDropKuCoin('SOLUSDT');
             }
             return { btcData, solData, sourceName };
         } catch (err) {
-            // 🚨 如果目前的數據源爆 429，即刻嘗試用另一個 Source 救火
             if (err.response?.status === 429) {
                 console.warn(`⚠️ [Macro] ${sourceName} 觸發限流，即刻切換數據源備援...`);
                 useCoinGeckoNext = !useCoinGeckoNext; 
-                // 嘗試另一個 Source
                 if (sourceName === 'CoinGecko') {
                     return {
                         btcData: await this.fetchHighAndDropKuCoin('BTCUSDT'),
@@ -85,6 +76,40 @@ const macroMonitorService = {
                 }
             }
             throw err;
+        }
+    },
+
+    // 🚀 新增：由 AI 定時重審新聞的「智能解封」機制
+    async checkRecovery() {
+        console.log(`⏳ [Macro] 30 分鐘避險期滿，交由 AI 重新審查大盤新聞...`);
+        try {
+            const newScore = await newsSentimentService.getDisasterScore();
+            
+            if (newScore >= 50) {
+                // 如果仲係恐慌，就繼續鎖住，再等 30 分鐘！
+                console.log(`🚨 [Macro] 危機未除 (AI 指數: ${newScore})，延長避險 30 分鐘！`);
+                await supabase.from('system_config').update({ 
+                    latest_news_score: newScore, 
+                    status_msg: `繼續避險 (指數:${newScore})` 
+                }).eq('id', 1);
+                
+                pauseCooldownUntil = Date.now() + (30 * 60 * 1000); 
+                setTimeout(() => this.checkRecovery(), 30 * 60 * 1000); // 30 分鐘後再審
+
+            } else {
+                // 分數跌落 50 以下，安全解封！
+                console.log(`✅ [Macro] 危機解除 (AI 指數: ${newScore})，系統恢復運作！`);
+                await supabase.from('system_config').update({ 
+                    is_running: true, 
+                    status_msg: '正常運作中', 
+                    latest_news_score: newScore  // AI 真實低分數寫入，自然放鬆防線
+                }).eq('id', 1);
+                
+                sendAdminAlert(`✅ <b>[自動恢復]</b> AI 確認新聞危機已解除 (指數: ${newScore})，系統已重新著機！`);
+            }
+        } catch (err) {
+            console.error(`❌ [Macro] 恢復審查失敗，5 分鐘後重試: ${err.message}`);
+            setTimeout(() => this.checkRecovery(), 5 * 60 * 1000); // 防呆機制，API死咗就 5 分鐘後再試
         }
     },
 
@@ -99,7 +124,6 @@ const macroMonitorService = {
                 const { data: config } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
                 if (!config?.is_running) return;
 
-                // 🚀 執行防彈版獲取
                 const { btcData, solData, sourceName } = await this.getMarketData();
                 
                 useCoinGeckoNext = !useCoinGeckoNext;
@@ -123,18 +147,17 @@ const macroMonitorService = {
 
                     if (newsScore >= 50) {
                         await supabase.from('system_config').update({ is_running: false, status_msg: `避險中 (指數:${newsScore})` }).eq('id', 1);
-                        sendTelegramAlert(`🚨 <b>大盤崩盤確認</b>\n跌幅: ${priceAlertMsg}\nAI 災難分: ${newsScore}`);
-                        pauseCooldownUntil = now + (30 * 60 * 1000); 
-                        setTimeout(async () => {
-                            await supabase.from('system_config').update({ is_running: true, status_msg: '避險期結束，系統自動恢復' }).eq('id', 1);
-                            sendAdminAlert("✅ <b>[自動恢復]</b> 30分鐘避險期已滿，系統已重新著機。");
-                        }, 30 * 60 * 1000);
+                        sendTelegramAlert(`🚨 <b>大盤崩盤確認</b>\n跌幅: ${priceAlertMsg}\nAI 災難分: ${newsScore}\n\n系統將暫停 30 分鐘，之後由 AI 重新審查。`);
+                        
+                        pauseCooldownUntil = Date.now() + (30 * 60 * 1000); 
+                        
+                        // 🚀 核心修正：30 分鐘後不再「無腦歸零」，而係 Call checkRecovery() 叫 AI 做嘢
+                        setTimeout(() => this.checkRecovery(), 30 * 60 * 1000);
                     }
                 }
             } catch (err) {
                 console.error(`❌ [Macro_Radar] 發生錯誤: ${err.message}`);
                 healthMonitor.setStatus('Macro_Radar', `🔴 數據中斷: ${err.message}`);
-                // 萬一真係全線爆 429，就休息長一點時間
                 if (err.response?.status === 429) pauseCooldownUntil = Date.now() + (5 * 60 * 1000);
             }
         }, 180000); 

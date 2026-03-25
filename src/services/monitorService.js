@@ -16,13 +16,16 @@ const { analyzeReentry, reviewActivePosition } = require('./aiService');
 const app = express();
 app.use(express.json());
 
-const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
+// 🚀 雙 Webhook 環境變數 (已對位)
+const HELIUS_API_KEY = process.env.HELIUS_API_KEY;           // Webhook 1 (Raydium)
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
+const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;       // Webhook 2 (Pump.fun)
+const WEBHOOK_ID_2 = process.env.HELIUS_WEBHOOK_ID_2;
 
 // 🚀 確保這裡是你真正的 Railway 網址
 const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
 
-// 🎯 終極修正：真正的 Pump.fun 官方 Program ID！
+// 🎯 Program IDs
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
@@ -33,44 +36,60 @@ let stats_pumpFunCreates = 0;
 let stats_addedToNursery = 0;
 
 async function toggleHeliusWebhook(enable = true) {
-    if (!HELIUS_API_KEY || !WEBHOOK_ID || !NGROK_URL) {
-        console.warn('⚠️ [Helius] 缺少 API Key, Webhook ID 或 NGROK URL，跳過連線。');
-        return;
-    }
-
-    // 🚀 核心修正：如果係「關閉」訊號，我哋直接返出去，唔好再 call axios.put 去改你個 Dashboard
     if (!enable) {
         console.log('🛑 [Helius] 系統關閉，保留 Helius Dashboard 現有設定，不作修改。');
         return; 
     }
 
-    try {
-        const currentUrl = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
-        
-        // 只有在 enable 為 true（啟動）時，先至去對齊設定
-        const cleanUrl = NGROK_URL.replace(/\/$/, '');
-        const targetUrl = `${cleanUrl}/webhook/helius`;
-        console.log(`📡 [Helius] 正在確保 Webhook 連線至: ${targetUrl}`);
+    const cleanUrl = NGROK_URL.replace(/\/$/, '');
+    const targetUrl = `${cleanUrl}/webhook/helius`;
+    console.log(`📡 [Helius] 正在確保雙 Webhook 連線至: ${targetUrl}`);
 
-        const payload = {
-            webhookURL: targetUrl,
-            transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT", "UNKNOWN"], 
-            accountAddresses: [
-                "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P", 
-                "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8"
-            ],
-            webhookType: "enhanced",
-            txnStatus: "success" 
-        };
-
-        await axios.put(currentUrl, payload);
-        console.log('✅ [Webhook Manager] Helius Webhook 設定同步成功！');
-        healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
-
-    } catch (err) {
-        console.error('❌ [Webhook Error] 更新失敗:', err.response?.data || err.message);
-        healthMonitor.setStatus('Meme_Radar', `🔴 Webhook 錯誤: ${err.response?.status || err.message}`);
+    // ==========================================
+    // 🎯 Webhook 1: 專注 Raydium V4 (使用 API_KEY)
+    // ==========================================
+    if (HELIUS_API_KEY && WEBHOOK_ID) {
+        try {
+            const url1 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
+            const payload1 = {
+                webhookURL: targetUrl,
+                transactionTypes: ["CREATE_POOL", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
+                accountAddresses: [RAYDIUM_V4_PROGRAM_ID],
+                webhookType: "enhanced",
+                txnStatus: "success" 
+            };
+            await axios.put(url1, payload1);
+            console.log('✅ [Webhook 1] Raydium 專線設定同步成功！');
+        } catch (err) {
+            console.error('❌ [Webhook 1 Error] Raydium 更新失敗:', err.response?.data || err.message);
+        }
+    } else {
+        console.warn('⚠️ [Webhook 1] 缺少 HELIUS_API_KEY 或 HELIUS_WEBHOOK_ID，跳過設定。');
     }
+
+    // ==========================================
+    // 🎯 Webhook 2: 專注 Pump.fun (使用 API_KEY_2)
+    // ==========================================
+    if (HELIUS_API_KEY_2 && WEBHOOK_ID_2) {
+        try {
+            const url2 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID_2}?api-key=${HELIUS_API_KEY_2}`;
+            const payload2 = {
+                webhookURL: targetUrl,
+                transactionTypes: ["CREATE_POOL", "UNKNOWN", "INITIALIZE_ACCOUNT", "TOKEN_MINT"], 
+                accountAddresses: [PUMP_FUN_PROGRAM_ID],
+                webhookType: "enhanced",
+                txnStatus: "success" 
+            };
+            await axios.put(url2, payload2);
+            console.log('✅ [Webhook 2] Pump.fun 專線設定同步成功！');
+        } catch (err) {
+            console.error('❌ [Webhook 2 Error] Pump.fun 更新失敗:', err.response?.data || err.message);
+        }
+    } else {
+        console.warn('⚠️ [Webhook 2] 缺少 HELIUS_API_KEY_2 或 HELIUS_WEBHOOK_ID_2，跳過設定。');
+    }
+
+    healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
 }
 
 app.post('/webhook/helius', async (req, res) => {
@@ -108,18 +127,18 @@ app.post('/webhook/helius', async (req, res) => {
                                 if (mintAddress) {
                                     stats_pumpFunCreates++; 
 
-                                    // 🚀 核心改動：呼叫剛才建立的 SQL RPC 函數
-                                    // 佢會自動幫你 Check 係咪夠 50 隻
+                                    // 🚀 核心改動：呼叫 SQL RPC 函數自動管理 50 隻上限
                                     const { data: isInserted, error } = await supabase.rpc('insert_fish_with_limit', {
                                         new_mint_address: mintAddress
                                     });
 
                                     if (isInserted) {
                                         stats_addedToNursery++; 
-                                        console.log(`🌟 [Webhook] 魚池未滿，成功加入新魚: ${mintAddress}`);
+                                        // 隱藏成功 Log，版面清爽
+                                        // console.log(`🌟 [Webhook] 魚池未滿，成功加入新魚: ${mintAddress}`);
                                     } else {
-                                        // 呢度就是 50 隻爆咗嘅情況
-                                        console.log(`🛑 [Nursery] 魚池已達 50 隻上限，拒收新魚: ${mintAddress}`);
+                                        // 隱藏失敗 Log，版面清爽
+                                        // console.log(`🛑 [Nursery] 魚池已達 50 隻上限，拒收新魚: ${mintAddress}`);
                                     }
                                 }
                             }
@@ -137,7 +156,7 @@ function startWebhookStatsMonitor() {
     setInterval(() => {
         const discarded = stats_totalWebhookSignals - stats_addedToNursery;
         console.log(`\n========================================`);
-        console.log(`📡 [Webhook 戰況] 過去 2 分鐘雷達報告:`);
+        console.log(`📡 [Webhook 戰況] 過去 5 分鐘雷達報告:`);
         console.log(`   📥 總接收雜訊 : ${stats_totalWebhookSignals} 條`);
         console.log(`   💊 包含發射幣 : ${stats_pumpFunCreates} 隻`);
         console.log(`   🐟 成功入魚池 : ${stats_addedToNursery} 隻`);
@@ -147,7 +166,7 @@ function startWebhookStatsMonitor() {
         stats_totalWebhookSignals = 0;
         stats_pumpFunCreates = 0;
         stats_addedToNursery = 0;
-    }, 2 * 60 * 1000); 
+    }, 5 * 60 * 1000); 
 }
 
 const ramSecondaryPool = new Map(); 
@@ -499,7 +518,8 @@ function startCommandListener() {
 
 function startMarketMonitor() {
     app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
-        console.log('🔄 [System] 系統啟動，正在強制作業 Helius Webhook 重新連線...');
+        console.log('🔄 [System] 系統啟動，準備載入雙 Webhook 模組...');
+        // 🚀 開機自動執行一次對齊，確保兩個 Webhook 都正確開啟
         await toggleHeliusWebhook(true);
         healthMonitor.setStatus('Trade_Engine', '🟢 正常待命');
 
@@ -512,12 +532,12 @@ function startMarketMonitor() {
 }
 
 process.on('SIGINT', async () => {
-    console.log('\n🛑 [System] 接收到關閉訊號，正在切斷 Webhook...');
+    console.log('\n🛑 [System] 接收到關閉訊號...');
     await toggleHeliusWebhook(false);
     process.exit(0);
 });
 process.on('SIGTERM', async () => {
-    console.log('\n🛑 [System] 接收到重啟訊號，正在切斷 Webhook...');
+    console.log('\n🛑 [System] 接收到重啟訊號...');
     await toggleHeliusWebhook(false);
     process.exit(0);
 });

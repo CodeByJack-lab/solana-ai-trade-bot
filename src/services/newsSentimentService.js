@@ -34,16 +34,17 @@ const newsSentimentService = {
             const groqApiKey = process.env.GROQ_API_KEY; 
             if (!groqApiKey) throw new Error("環境變數缺少 GROQ_API_KEY");
 
-            const prompt = `你是量化基金首席風控官。大盤剛剛暴跌 2% 以上。請閱讀以下過去一小時的最新新聞標題，判斷暴跌原因是：
-1. 日常宏觀數據/常規FUD/技術性獲利回吐 (給予 0-40 分)
-2. 幣圈局部利空/中型監管消息 (50-70 分)
-3. 結構性黑天鵝如知名交易所倒閉、USDT脫鉤、大型戰爭爆發、重大駭客事件 (80-100 分)。
-你只能回覆一個 0 到 100 的純數字，不要任何其他文字或解釋。
-
-最新新聞標題：
-${recentTitles}`;
-
-            const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+            const prompt = `你是量化基金首席風控官。請閱讀以下過去一小時的最新幣圈新聞標題，評估目前的『市場恐慌指數』。
+            評分標準：
+            0-30 分: 市場平靜、情緒恢復、有明顯利好消息（解除防禦）。
+            31-60 分: 日常宏觀數據發佈、常規FUD、市場觀望、輕微回調（常規防禦）。
+            61-100 分: 結構性黑天鵝如知名交易所倒閉、穩定幣脫鉤、大型戰爭爆發、重大駭客事件（最高防禦）。
+            你只能回覆一個 0 到 100 的純數字，不要任何其他文字或解釋。
+            
+            最新新聞標題：
+            ${recentTitles}`;
+            
+                        const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
                 model: "llama3-70b-8192",
                 messages: [{ role: "user", content: prompt }],
                 temperature: 0.1
