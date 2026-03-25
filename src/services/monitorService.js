@@ -290,7 +290,7 @@ function startDatabaseNurseryMonitor() {
         } finally {
             isNurseryRunning = false;
         }
-    }, 10000); 
+    }, 5000); 
 }
 
 function startWatchlistMonitor() {
