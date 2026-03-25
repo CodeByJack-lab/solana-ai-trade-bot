@@ -135,10 +135,10 @@ app.post('/webhook/helius', async (req, res) => {
                                     if (isInserted) {
                                         stats_addedToNursery++; 
                                         // 🚀 已開啟加入魚池 Log
-                                        console.log(`🌟 [Webhook] 魚池未滿，成功加入新魚: ${mintAddress}`);
+                                        //console.log(`🌟 [Webhook] 魚池未滿，成功加入新魚: ${mintAddress}`);
                                     } else {
                                         // 🚀 修正文字 Bug：顯示 200 隻上限
-                                        console.log(`🛑 [Nursery] 魚池已達 200 隻上限，拒收新魚: ${mintAddress}`);
+                                        //console.log(`🛑 [Nursery] 魚池已達 200 隻上限，拒收新魚: ${mintAddress}`);
                                     }
                                 }
                             }
