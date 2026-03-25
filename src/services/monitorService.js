@@ -13,6 +13,7 @@ const { sendTelegramAlert, sendAdminAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
 const { consensusService, getPendingMemeCount } = require('./consensusService');
 const { analyzeReentry, reviewActivePosition } = require('./aiService');
+const { retrospectiveJob } = require('../jobs/retrospectiveJob');
 
 const app = express();
 app.use(express.json());
@@ -94,7 +95,7 @@ async function toggleHeliusWebhook(enable = true) {
            const payload3 = {
                 webhookURL: targetUrl,
                 // 🚀 修正 Webhook 3: 使用明確的交易類型避免 -32603 錯誤
-                transactionTypes: ["ANY"], 
+                transactionTypes: ["TRANSFER", "SWAP"], 
                 accountAddresses: [botWallet], 
                 webhookType: "enhanced",
                 txnStatus: "success"
@@ -116,6 +117,21 @@ async function toggleHeliusWebhook(enable = true) {
         healthMonitor.setStatus('Wallet_Radar', '⚪ 未啟動');
     }
 }
+
+// ==========================================
+// 🚀 秘密開關：手動強制觸發 Master AI 進化
+// ==========================================
+app.get('/force-evolution', (req, res) => {
+    console.log('\n========================================');
+    console.log('👑 [Admin] 管理員已手動強制喚醒 Master AI！');
+    console.log('========================================\n');
+    
+    // 立即回覆瀏覽器，避免 Timeout
+    res.status(200).send('<h1>🚀 Master AI 已被強制喚醒！</h1><p>請返回 Terminal 查看詳細的 Console Log 戰報。</p>');
+    
+    // 呼叫帶有 Retry 機制的新版進化函數
+    retrospectiveJob.runEvolutionWithRetry(1);
+});
 
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK'); // 🚀 優先回覆 Helius 避免 Timeout

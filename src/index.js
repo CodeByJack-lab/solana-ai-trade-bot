@@ -122,7 +122,7 @@ async function startApp() {
             await syncLiveBalanceToDB();
             await forceUpdateStatusAndPrint(null, true);
         }
-        setTimeout(backgroundReportLoop, 60000); 
+        setTimeout(backgroundReportLoop, 30 * 60 * 1000); 
     }
 
     backgroundReportLoop();
