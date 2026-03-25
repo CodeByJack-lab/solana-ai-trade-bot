@@ -108,11 +108,12 @@ const blueChipJob = {
                     await new Promise(r => setTimeout(r, 500)); 
                 }
 
+                // 🚀 修復：強行 parseFloat 轉換字串為數字，消滅幽靈 Bug
                 const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
                 const bluechipLimits = {
-                    maxRSI: params?.bluechip_max_rsi || 40,
-                    minDropPct: params?.bluechip_min_drop_pct || 2, 
-                    minVolUsd: params?.bluechip_min_vol || 500000 
+                    maxRSI: parseFloat(params?.bluechip_max_rsi) || 40,
+                    minDropPct: parseFloat(params?.bluechip_min_drop_pct) || 2, 
+                    minVolUsd: parseFloat(params?.bluechip_min_vol) || 500000 
                 };
 
                 const targetTokens = [];
@@ -163,7 +164,7 @@ const blueChipJob = {
                         marketData.lastTime = new Date(memory.last_observed_at).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
                     }
 
-                    // 🛡️ [防線一]: Birdeye 深度技術分析
+                    // 🛡️ [防線一]: Birdeye 深度技術分析 (🚀 方案 B：全權交畀 AI)
                     let layer1Success = false;
                     try {
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&time_from=${time_from}&time_to=${time_to}`, {
@@ -184,22 +185,33 @@ const blueChipJob = {
                             const macdData = calculateMACD(closes);
 
                             marketData.rsiHistory = `[${rsiHist.map(r => r.toFixed(1)).join(', ')}]`;
-                            marketData.techIndicators = `MACD Hist: ${macdData?.hist?.toFixed(6)}, 觸及布林下軌`;
-
-                            const isRsiHook = prevRsi <= bluechipLimits.maxRSI && currentRsi > prevRsi; 
-                            isDipConfirmed = isRsiHook && bb && marketData.currentPrice <= (bb.lower * 1.05);
+                            
+                            // 🚀 核心優化：只要求超賣 + 勾頭，放寬布林帶硬限制
+                            const isOversold = prevRsi <= bluechipLimits.maxRSI;
+                            const isRsiHook = currentRsi > prevRsi;
+                            
+                            isDipConfirmed = isOversold && isRsiHook;
 
                             if (isDipConfirmed) {
-                                console.log(`🎯 [Level 1 Birdeye] ${token.token_symbol} 觸發【右側抄底(RSI勾頭)】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})`);
+                                // 將布林帶狀態化為文字，交畀 AI 判斷，而唔係寫死 IF-ELSE
+                                const bbStatus = (bb && marketData.currentPrice <= bb.lower) 
+                                    ? '已跌穿布林下軌 (極度恐慌)' 
+                                    : (bb ? `高於布林下軌 ${((marketData.currentPrice - bb.lower)/bb.lower*100).toFixed(1)}%` : '無布林帶數據');
+                                
+                                marketData.techIndicators = `MACD Hist: ${macdData?.hist?.toFixed(6)}, 狀態: ${bbStatus}`;
+                                
+                                console.log(`🎯 [Level 1 Birdeye] ${token.token_symbol} 觸發【右側抄底】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})，呼叫 AI 大腦！`);
                             } else {
-                                console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達完美抄底條件 (目前 RSI: ${currentRsi.toFixed(1)})，放棄呼叫 AI。`);
+                                // 清晰列出被雷達攔截嘅真正原因
+                                if (!isOversold) {
+                                     console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達 RSI 超賣門檻 (前RSI: ${prevRsi.toFixed(1)} > 門檻 ${bluechipLimits.maxRSI})`);
+                                } else if (!isRsiHook) {
+                                     console.log(`⏸️ [Bluechip] ${token.token_symbol} RSI 達標但未見勾頭反彈，防接飛刀 (RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})`);
+                                }
                             }
                         }
                     } catch (err) {
                         console.warn(`⚠️ [Level 1] Birdeye 分析 ${token.token_symbol} 失敗:`, err.message);
-                        if (err.response && err.response.data) {
-                            console.error(`🚨 [API 拒絕原因]:`, JSON.stringify(err.response.data, null, 2));
-                        }
                     }
 
                     // 🛡️ [防線二]: CoinGecko / DexScreener 降級備援分析
@@ -207,7 +219,6 @@ const blueChipJob = {
                         console.log(`📡 [Level 2] 啟動 CoinGecko / DexScreener 備援分析 ${token.token_symbol}...`);
                         const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === token.mint_address);
                         
-                        // 嘗試向 CoinGecko 請求實時數據 (使用 API KEY 防限流)
                         let cgPrice = null;
                         try {
                             if (process.env.COINGECKO_API_KEY) {
@@ -218,7 +229,6 @@ const blueChipJob = {
                                 const tokenData = cgRes.data[token.mint_address];
                                 if (tokenData && tokenData.usd) {
                                     cgPrice = tokenData.usd;
-                                    console.log(`✅ [CoinGecko] 成功獲取 ${token.token_symbol} 備援價格: $${cgPrice}`);
                                 }
                             }
                         } catch (cgErr) {
@@ -291,7 +301,7 @@ const blueChipJob = {
 
     start() {
         cron.schedule('*/5 * * * *', () => { this.runRoutine(); });
-        console.log(`📡 [Bluechip] 老幣抄底雷達已啟動 (三層防禦無敵版)`);
+        console.log(`📡 [Bluechip] 老幣抄底雷達已啟動 (右側動能解鎖版)`);
     }
 };
 
