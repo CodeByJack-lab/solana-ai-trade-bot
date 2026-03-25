@@ -10,6 +10,9 @@ const { executeLiveSwapUAT } = require('./liveTradeService');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService'); 
 const { healthMonitor } = require('./healthMonitor');
 
+// 🚀 新增引入：數據庫與入/出金統計服務
+const { getPersonNameByAddress, logNewDeposit, logNewWithdrawal, getContributionStats } = require('./dbService');
+
 let bs58 = require('bs58');
 if (bs58.default) {
     bs58 = bs58.default;
@@ -317,7 +320,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         console.log(`🤖 AI 理由: ${reason}`);
         console.log(`======================================================\n`);
 
-        // 🔇 移除了 `Jupiter: ` 字眼
         await commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, reason, sellQuantity, sellFraction, pos.strategy_type, finalTxid);
         return true;
     }
@@ -345,7 +347,6 @@ async function forceWriteOff(mintAddress, reason) {
         } catch (err) {}
     }
 
-    // 🔇 移除了 `FORCE: ` 以防你想 DB 乾淨啲 (可選)
     await commitTradeToDb(posIndex, 0, 0, -pos.entry_price_sol * pos.quantity, -100, reason, pos.quantity, 1.0, pos.strategy_type, "FORCE_WRITE_OFF");
 }
 
@@ -412,4 +413,89 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
     }
 }
 
-module.exports = { executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline };
+// =========================================================================
+// 🚀 巨鯨入帳偵測 (入金)
+// =========================================================================
+async function handleIncomingFund(address, amount, txid) {
+    console.log(`🚀 [Process] 處理新入帳: ${amount} SOL from ${address}`);
+
+    const personName = await getPersonNameByAddress(address);
+    if (!personName) {
+        console.warn(`⚠️ [Process] 查無金主記錄 (${address})，放棄處理。`);
+        return;
+    }
+
+    const isInserted = await logNewDeposit(address, personName, amount, txid);
+    if (!isInserted) return;
+
+    const stats = await getContributionStats(personName);
+
+    if (stats) {
+        let rankIcon = "🐟";
+        const percentage = parseFloat(stats.percentage) || 0;
+        if (percentage > 10) rankIcon = "🐬";
+        if (percentage > 30) rankIcon = "🦈";
+        if (percentage > 50) rankIcon = "🐋";
+
+        const currentBalance = parseFloat(stats.current_balance) || 0;
+
+        const message = `💰 <b>實時報捷 - 資金到帳</b>
+----------------------------
+👤 <b>來源錢包</b>: ${stats.person_name} ${rankIcon}
+💵 <b>本次入帳</b>: <code>${amount}</code> SOL
+📊 <b>系統佔比</b>: <code>${percentage.toFixed(2)}%</code>
+🏛️ <b>淨資產值</b>: <code>${currentBalance.toFixed(4)}</code> SOL
+
+🔗 <a href="https://solscan.io/address/${stats.wallet_address}">在 Solscan 查看帳戶</a>
+🔍 <a href="https://solscan.io/tx/${txid}">查看此筆交易</a>
+----------------------------
+📅 <i>更新時間: ${new Date().toLocaleString('zh-HK')}</i>`;
+
+        if (typeof sendTelegramAlert === 'function') sendTelegramAlert(message);
+    }
+}
+
+// =========================================================================
+// 🚀 巨鯨提款偵測 (出金)
+// =========================================================================
+async function handleOutgoingFund(address, amount, txid) {
+    console.log(`💸 [Process] 處理新出金: ${amount} SOL to ${address}`);
+
+    let personName = await getPersonNameByAddress(address);
+    if (!personName) {
+        personName = "未知金主"; // 如果搵唔到，照扣系統資金
+    }
+
+    const isInserted = await logNewWithdrawal(address, personName, amount, txid);
+    if (!isInserted) return;
+
+    const stats = await getContributionStats(personName);
+
+    if (stats) {
+        const percentage = parseFloat(stats.percentage) || 0;
+        const currentBalance = parseFloat(stats.current_balance) || 0;
+
+        const message = `💸 <b>實時戰報 - 資金提款</b>
+----------------------------
+👤 <b>提款對象</b>: ${personName} 
+💵 <b>提走金額</b>: <code>${amount}</code> SOL
+📊 <b>剩餘佔比</b>: <code>${percentage.toFixed(2)}%</code>
+🏛️ <b>剩餘資產</b>: <code>${currentBalance.toFixed(4)}</code> SOL
+
+🔍 <a href="https://solscan.io/tx/${txid}">查看此筆交易</a>
+----------------------------
+📅 <i>更新時間: ${new Date().toLocaleString('zh-HK')}</i>`;
+
+        if (typeof sendTelegramAlert === 'function') sendTelegramAlert(message);
+    }
+}
+
+module.exports = { 
+    executeBuy, 
+    executeSell, 
+    executeSellRaydium, 
+    forceWriteOff, 
+    runSellPipeline, 
+    handleIncomingFund,
+    handleOutgoingFund
+};

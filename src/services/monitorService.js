@@ -7,7 +7,8 @@ let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;
 const { PublicKey } = require('@solana/web3.js');
 
-const { runSellPipeline, executeBuy } = require('./tradeService');
+// 🚀 加入 handleIncomingFund, handleOutgoingFund
+const { runSellPipeline, executeBuy, handleIncomingFund, handleOutgoingFund } = require('./tradeService');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
 const { consensusService, getPendingMemeCount } = require('./consensusService');
@@ -21,6 +22,7 @@ const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
 const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;       
 const WEBHOOK_ID_2 = process.env.HELIUS_WEBHOOK_ID_2;
+const WALLET_WEBHOOK_ID = process.env.HELIUS_WALLET_WEBHOOK_ID;
 
 const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
 
@@ -28,6 +30,9 @@ const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
+
+// 🚀 致命錯誤修復：將 botWallet 變量提升到全域，確保 toggleHeliusWebhook 讀得到
+const botWallet = process.env.SOLANA_PUBLIC_KEY;
 
 let stats_totalWebhookSignals = 0;
 let stats_pumpFunCreates = 0;
@@ -81,13 +86,40 @@ async function toggleHeliusWebhook(enable = true) {
         console.warn('⚠️ [Webhook 2] 缺少 HELIUS_API_KEY_2 或 HELIUS_WEBHOOK_ID_2，跳過設定。');
     }
 
+    // --- 💰 Webhook 3: Wallet 會計專線 ---
+    if (HELIUS_API_KEY && WALLET_WEBHOOK_ID && botWallet) {
+        try {
+         const url3 = `https://api.helius.xyz/v0/webhooks/${WALLET_WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
+           const payload3 = {
+                webhookURL: targetUrl,
+                transactionTypes: ["ANY"], // 🚀 捕捉所有類型以偵測 SOL 轉帳
+                accountAddresses: [botWallet], // 🚀 此處變數已修正
+                webhookType: "enhanced",
+                txnStatus: "success"
+          };
+          await axios.put(url3, payload3);
+          console.log('✅ [Webhook 3] Wallet 會計專線同步成功！');
+      } catch (err) {
+          console.error('❌ [Webhook 3 Error] Wallet 監控更新失敗:', err.response?.data || err.message);
+      }
+    } else {
+        console.warn('⚠️ [Webhook 3] 缺少 WALLET_WEBHOOK_ID，跳過會計監控設定。');
+    }
+
     healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
+    
+    if (WALLET_WEBHOOK_ID) {
+        healthMonitor.setStatus('Wallet_Radar', '🟢 資金監控中 (入金/出金)...');
+    } else {
+        healthMonitor.setStatus('Wallet_Radar', '⚪ 未啟動');
+    }
 }
 
 app.post('/webhook/helius', async (req, res) => {
-    res.status(200).send('OK');
+    res.status(200).send('OK'); // 🚀 優先回覆 Helius 避免 Timeout
 
     try {
+        // 1. 基礎檢查：系統有無行緊？
         const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
         if (!config || !config.is_running) return;
 
@@ -97,6 +129,39 @@ app.post('/webhook/helius', async (req, res) => {
         stats_totalWebhookSignals += events.length; 
 
         for (const event of events) {
+            // ==========================================
+            // 💰 分流 A：會計部邏輯 (處理入金/出金)
+            // ==========================================
+            const nativeTransfers = event.nativeTransfers || [];
+            const isWalletAction = nativeTransfers.some(t => t.fromUserAccount === botWallet || t.toUserAccount === botWallet);
+
+            if (isWalletAction) {
+                for (const t of nativeTransfers) {
+                    const amount = t.amount / 1e9;
+                    const txid = event.signature;
+
+                    // 📥 入金：射錢落 Bot 錢包
+                    if (t.toUserAccount === botWallet && amount > 0) {
+                        console.log(`💰 [Accounting] 偵測到入金: ${amount} SOL`);
+                        // 🚀 修正對接 TradeService
+                        await handleIncomingFund(t.fromUserAccount, amount, txid);
+                    } 
+                    // 📤 出金：Bot 錢包射錢走 (過濾掉交易買幣)
+                    else if (t.fromUserAccount === botWallet && amount > 0) {
+                        if (t.toUserAccount.length > 32) { // 簡單判定為普通錢包地址而非 Program
+                            console.log(`💸 [Accounting] 偵測到出金: ${amount} SOL`);
+                            // 🚀 修正對接 TradeService
+                            await handleOutgoingFund(t.toUserAccount, amount, txid);
+                        }
+                    }
+                }
+                // 會計訊號處理完，跳過下面嘅買幣偵測
+                continue; 
+            }
+
+            // ==========================================
+            // 🔫 分流 B：原本的交易雷達 (Pump.fun 偵測)
+            // ==========================================
             const instructions = event.instructions || [];
             for (const ix of instructions) {
                 if (ix.programId === PUMP_FUN_PROGRAM_ID) {
@@ -106,6 +171,7 @@ app.post('/webhook/helius', async (req, res) => {
                             const decodedBytes = bs58.decode(dataObj);
                             const hexString = Buffer.from(decodedBytes).toString('hex');
                             
+                            // 判斷是否為新幣創建
                             const isNewMeme = 
                                 hexString.startsWith('181ec828051c0777') || 
                                 hexString.startsWith('d6904cec5f8b31b4') || 
@@ -117,7 +183,7 @@ app.post('/webhook/helius', async (req, res) => {
                                 const mintAddress = ix.accounts[0];
                                 if (mintAddress) {
                                     stats_pumpFunCreates++; 
-                                    const { data: isInserted, error } = await supabase.rpc('insert_fish_with_limit', {
+                                    const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
                                         new_mint_address: mintAddress
                                     });
                                     if (isInserted) stats_addedToNursery++; 
@@ -453,25 +519,22 @@ function startPositionMonitor() {
                     reason = `🚀 觸發無腦暴利平倉 (+300%)`;
                 } else {
                     // 🚀 【新增：5 分鐘 Retry 防禦機制】
-                    // 檢查上次 AI 審查是否失敗
                     const lastComment = pos.last_review_comment || "";
                     if (lastComment.includes('AI 離線') || lastComment.includes('RETRY_LATER')) {
-                        // 檢查距離上次更新過咗幾耐
                         const lastUpdate = new Date(pos.updated_at || pos.created_at).getTime();
                         const minsSinceFail = (Date.now() - lastUpdate) / 60000;
                         
                         if (minsSinceFail < 5) {
                             console.log(`⏳ [Retry Delay] ${pos.token_symbol} 上次審查失敗，${(5 - minsSinceFail).toFixed(1)} 分鐘後再試。`);
-                            continue; // 唔好 Call AI，跳過今次巡邏
+                            continue; 
                         }
                     }
 
                     console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
                     const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
                     
-                    // 處理 Retry 狀態
                     if (reviewResult.decision === 'RETRY_LATER') {
-                        continue; // 等下一個循環 (且過咗 5 分鐘) 再試
+                        continue; 
                     }
 
                     action = reviewResult.decision;
@@ -501,7 +564,6 @@ function startPositionMonitor() {
                             console.log(`🤖 理由: ${reason}`);
                             console.log(`======================================================\n`);
 
-                            // 🚀 【防接飛刀機制】: Meme 幣第一次賣出，但如果虧損 >= -20%，直接判死刑！
                             const isFirstTimeMeme = !isBluechip && (!pos.strategy_type || !pos.strategy_type.includes('REENTRY'));
                             if (isFirstTimeMeme) {
                                 if (pnlPct >= -20) {
