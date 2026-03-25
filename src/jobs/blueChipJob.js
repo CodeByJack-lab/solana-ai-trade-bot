@@ -140,7 +140,6 @@ const blueChipJob = {
 
                 console.log(`\n🚨 [Bluechip Radar] 警報！發現 ${targetTokens.length} 隻老幣觸發跌幅門檻，啟動 Birdeye 深度技術分析...`);
 
-                // 🚀 FIX: 加入精確時間戳，解決 Birdeye 0/30 K線數據問題
                 const time_to = Math.floor(Date.now() / 1000);
                 const time_from = time_to - (30 * 15 * 60); 
 
@@ -211,6 +210,10 @@ const blueChipJob = {
                         }
                     } catch (err) {
                         console.warn(`⚠️ [Bluechip] 分析 ${token.token_symbol} 時發生錯誤:`, err.message);
+                        // 🚀 新增呢段：捉住 HTTP 400 真正死因！
+                        if (err.response && err.response.data) {
+                            console.error(`🚨 [API 拒絕原因]:`, JSON.stringify(err.response.data, null, 2));
+                        }
                     }
                     await new Promise(r => setTimeout(r, 1000)); 
                 }
