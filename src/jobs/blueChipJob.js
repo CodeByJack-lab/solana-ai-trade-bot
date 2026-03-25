@@ -87,6 +87,7 @@ const blueChipJob = {
             }
 
             try {
+                // 1. DexScreener 初步篩選
                 let dexPairs = [];
                 const chunkSize = 30; 
                 for (let i = 0; i < pool.length; i += chunkSize) {
@@ -138,12 +139,32 @@ const blueChipJob = {
                     isRunning = false; return;
                 }
 
-                console.log(`\n🚨 [Bluechip Radar] 警報！發現 ${targetTokens.length} 隻老幣觸發跌幅門檻，啟動 Birdeye 深度技術分析...`);
+                console.log(`\n🚨 [Bluechip Radar] 警報！發現 ${targetTokens.length} 隻老幣觸發跌幅門檻，啟動多層深度分析...`);
 
                 const time_to = Math.floor(Date.now() / 1000);
                 const time_from = time_to - (30 * 15 * 60); 
 
                 for (const token of targetTokens) {
+                    let strategy = 'BLUECHIP_SWING';
+                    let isDipConfirmed = false;
+                    let marketData = {
+                        symbol: token.token_symbol,
+                        currentPrice: 0,
+                        rsiHistory: "N/A",
+                        techIndicators: "",
+                        lastComment: "無歷史紀錄 (首次觀測)",
+                        lastTime: "N/A"
+                    };
+
+                    // 讀取過往 AI 記憶
+                    let { data: memory } = await supabase.from('bluechip_pool').select('last_ai_comment, last_observed_at').eq('mint_address', token.mint_address).single();
+                    if (memory && memory.last_ai_comment) {
+                        marketData.lastComment = memory.last_ai_comment;
+                        marketData.lastTime = new Date(memory.last_observed_at).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
+                    }
+
+                    // 🛡️ [防線一]: Birdeye 深度技術分析
+                    let layer1Success = false;
                     try {
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&time_from=${time_from}&time_to=${time_to}`, {
                             headers: { 'X-API-KEY': process.env.BIRDEYE_API_KEY, 'x-chain': 'solana' },
@@ -152,8 +173,9 @@ const blueChipJob = {
 
                         const items = birdeyeRes.data?.data?.items || [];
                         if (items.length >= 30) {
+                            layer1Success = true;
                             const closes = items.map(k => parseFloat(k.o));
-                            const currentPrice = closes[closes.length - 1];
+                            marketData.currentPrice = closes[closes.length - 1];
 
                             const rsiHist = getRSIHistory(closes);
                             const prevRsi = rsiHist[1];
@@ -161,60 +183,95 @@ const blueChipJob = {
                             const bb = calculateBollingerBands(closes);
                             const macdData = calculateMACD(closes);
 
+                            marketData.rsiHistory = `[${rsiHist.map(r => r.toFixed(1)).join(', ')}]`;
+                            marketData.techIndicators = `MACD Hist: ${macdData?.hist?.toFixed(6)}, 觸及布林下軌`;
+
                             const isRsiHook = prevRsi <= bluechipLimits.maxRSI && currentRsi > prevRsi; 
-                            const isDip = isRsiHook && bb && currentPrice <= (bb.lower * 1.05);
+                            isDipConfirmed = isRsiHook && bb && marketData.currentPrice <= (bb.lower * 1.05);
 
-                            if (isDip) {
-                                const signalType = '右側抄底(RSI勾頭)';
-                                console.log(`🎯 [Bluechip] ${token.token_symbol} 觸發【${signalType}】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})，讀取 AI 記憶庫...`);
-                                
-                                let { data: memory } = await supabase.from('bluechip_pool').select('last_ai_comment, last_observed_at').eq('mint_address', token.mint_address).single();
-                                
-                                let pastComment = "無歷史紀錄 (首次觀測)";
-                                let pastTime = "N/A";
-                                
-                                if (memory && memory.last_ai_comment) {
-                                    pastComment = memory.last_ai_comment;
-                                    pastTime = new Date(memory.last_observed_at).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
-                                }
-
-                                const marketData = {
-                                    symbol: token.token_symbol,
-                                    currentPrice: currentPrice,
-                                    rsiHistory: `[${rsiHist.map(r => r.toFixed(1)).join(', ')}]`,
-                                    techIndicators: `MACD Hist: ${macdData?.hist.toFixed(6)}, 觸及布林下軌`,
-                                    lastComment: pastComment,
-                                    lastTime: pastTime
-                                };
-
-                                const decisionObj = await consensusService.runBluechipConsensus(token.mint_address, marketData);
-
-                                if (decisionObj.buy) {
-                                    await executeBuy(token.mint_address, token.token_symbol, 'BLUECHIP_SWING', 100, decisionObj.reason, config.trade_amount_sol);
-                                    await supabase.from('bluechip_pool').update({ last_ai_comment: null, last_observed_at: null }).eq('mint_address', token.mint_address);
-                                } else {
-                                    console.log(`🧠 [Bluechip AI] ${token.token_symbol} 抄底被否決: ${decisionObj.reason}`);
-                                    if (decisionObj.reason.includes('ONHOLD')) {
-                                        await supabase.from('bluechip_pool').update({ 
-                                            last_ai_comment: decisionObj.reason, 
-                                            last_observed_at: new Date() 
-                                        }).eq('mint_address', token.mint_address);
-                                    } else if (decisionObj.reason.includes('ABORT')) {
-                                        await supabase.from('bluechip_pool').update({ last_ai_comment: null, last_observed_at: null }).eq('mint_address', token.mint_address);
-                                    }
-                                }
+                            if (isDipConfirmed) {
+                                console.log(`🎯 [Level 1 Birdeye] ${token.token_symbol} 觸發【右側抄底(RSI勾頭)】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})`);
                             } else {
-                                console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達完美抄底條件 (目前 RSI: ${currentRsi.toFixed(1)}, 現價: $${currentPrice.toFixed(4)}, 布林底門檻: $${(bb.lower * 1.05).toFixed(4)})，放棄呼叫 AI。`);                            }
-                        } else {
-                            console.log(`⚠️ [Bluechip] ${token.token_symbol} K線數據不足 (僅 ${items.length}/30 支)，放棄技術分析。`);
+                                console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達完美抄底條件 (目前 RSI: ${currentRsi.toFixed(1)})，放棄呼叫 AI。`);
+                            }
                         }
                     } catch (err) {
-                        console.warn(`⚠️ [Bluechip] 分析 ${token.token_symbol} 時發生錯誤:`, err.message);
-                        // 🚀 新增呢段：捉住 HTTP 400 真正死因！
+                        console.warn(`⚠️ [Level 1] Birdeye 分析 ${token.token_symbol} 失敗:`, err.message);
                         if (err.response && err.response.data) {
                             console.error(`🚨 [API 拒絕原因]:`, JSON.stringify(err.response.data, null, 2));
                         }
                     }
+
+                    // 🛡️ [防線二]: CoinGecko / DexScreener 降級備援分析
+                    if (!layer1Success) {
+                        console.log(`📡 [Level 2] 啟動 CoinGecko / DexScreener 備援分析 ${token.token_symbol}...`);
+                        const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === token.mint_address);
+                        
+                        // 嘗試向 CoinGecko 請求實時數據 (使用 API KEY 防限流)
+                        let cgPrice = null;
+                        try {
+                            if (process.env.COINGECKO_API_KEY) {
+                                const cgRes = await axios.get(`https://api.coingecko.com/api/v3/simple/token_price/solana?contract_addresses=${token.mint_address}&vs_currencies=usd&include_24hr_vol=true&include_24hr_change=true`, {
+                                    headers: { 'x-cg-demo-api-key': process.env.COINGECKO_API_KEY },
+                                    timeout: 4000
+                                });
+                                const tokenData = cgRes.data[token.mint_address];
+                                if (tokenData && tokenData.usd) {
+                                    cgPrice = tokenData.usd;
+                                    console.log(`✅ [CoinGecko] 成功獲取 ${token.token_symbol} 備援價格: $${cgPrice}`);
+                                }
+                            }
+                        } catch (cgErr) {
+                            console.warn(`⚠️ [CoinGecko] 備援請求失敗:`, cgErr.message);
+                        }
+
+                        if (cgPrice || pair) {
+                            marketData.currentPrice = cgPrice || parseFloat(pair.priceNative);
+                            const drop1h = pair ? pair.priceChange?.h1 : "N/A";
+                            marketData.techIndicators = `技術指標失效(API 400)。當前大跌: 1h跌幅 ${drop1h}%, 24h量 $${pair?.volume?.h24 || 'N/A'}`;
+                            strategy = 'BLUECHIP_DEX_FALLBACK';
+                            isDipConfirmed = true; 
+                            console.log(`🎯 [Level 2 Fallback] ${token.token_symbol} 觸發大跌備援機制，強制呼叫 AI 審查！`);
+                        }
+                    }
+
+                    // 🛡️ [防線三]: Jupiter 緊急報價 (最後防線)
+                    if (!layer1Success && marketData.currentPrice === 0) {
+                        console.log(`📡 [Level 3] 啟動 Jupiter 緊急報價防線...`);
+                        try {
+                            const jupRes = await axios.get(`https://api.jup.ag/price/v2?ids=${token.mint_address}`);
+                            const jupPrice = jupRes.data?.data?.[token.mint_address]?.price;
+                            if (jupPrice) {
+                                marketData.currentPrice = parseFloat(jupPrice);
+                                marketData.techIndicators = `Jupiter 緊急報價 (所有歷史數據源均失效)`;
+                                strategy = 'BLUECHIP_JUP_EMERGENCY';
+                                isDipConfirmed = true;
+                            }
+                        } catch (e) {
+                            console.error(`💀 [Level 3] 所有報價源全滅，放棄 ${token.token_symbol}`);
+                        }
+                    }
+
+                    // 🧠 執行 AI 決策
+                    if (isDipConfirmed && marketData.currentPrice > 0) {
+                        const decisionObj = await consensusService.runBluechipConsensus(token.mint_address, marketData);
+
+                        if (decisionObj.buy) {
+                            await executeBuy(token.mint_address, token.token_symbol, strategy, 100, decisionObj.reason, config.trade_amount_sol);
+                            await supabase.from('bluechip_pool').update({ last_ai_comment: null, last_observed_at: null }).eq('mint_address', token.mint_address);
+                        } else {
+                            console.log(`🧠 [Bluechip AI] ${token.token_symbol} 抄底被否決: ${decisionObj.reason}`);
+                            if (decisionObj.reason.includes('ONHOLD')) {
+                                await supabase.from('bluechip_pool').update({ 
+                                    last_ai_comment: decisionObj.reason, 
+                                    last_observed_at: new Date() 
+                                }).eq('mint_address', token.mint_address);
+                            } else if (decisionObj.reason.includes('ABORT')) {
+                                await supabase.from('bluechip_pool').update({ last_ai_comment: null, last_observed_at: null }).eq('mint_address', token.mint_address);
+                            }
+                        }
+                    }
+
                     await new Promise(r => setTimeout(r, 1000)); 
                 }
 
@@ -234,7 +291,7 @@ const blueChipJob = {
 
     start() {
         cron.schedule('*/5 * * * *', () => { this.runRoutine(); });
-        console.log(`📡 [Bluechip] 老幣抄底雷達已啟動 (背景靜默掃描，每 10 分鐘印出戰報)`);
+        console.log(`📡 [Bluechip] 老幣抄底雷達已啟動 (三層防禦無敵版)`);
     }
 };
 

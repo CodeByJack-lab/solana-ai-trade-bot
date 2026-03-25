@@ -12,10 +12,17 @@ const macroMonitorService = {
     
     async fetchHighAndDropCoinGecko(coinId) {
         const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=1`;
-        const res = await axios.get(url, { 
-            headers: { 'User-Agent': 'Mozilla/5.0' }, 
-            timeout: 10000 
-        });
+        const config = {
+            headers: { 'User-Agent': 'Mozilla/5.0' },
+            timeout: 10000
+        };
+
+        // 🚀 注入 CoinGecko API Key (Demo Plan 防限流)
+        if (process.env.COINGECKO_API_KEY) {
+            config.headers['x-cg-demo-api-key'] = process.env.COINGECKO_API_KEY;
+        }
+
+        const res = await axios.get(url, config);
         const prices = res.data?.prices;
         if (!prices || prices.length < 15) throw new Error(`CoinGecko 數據不足`);
         
