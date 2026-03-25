@@ -486,7 +486,10 @@ function startPositionMonitor() {
                             console.log(`🤖 理由: ${reason}`);
                             console.log(`======================================================\n`);
 
-                            if (!isBluechip && pnlPct >= 20) {
+                            // 🚀 【核心修正】: 移除 20% 利潤限制！
+                            // 只要是 Meme 幣，且是「第一次賣出」(策略非 REENTRY)，一律放入接回觀察名單給予第二次機會！
+                            const isFirstTimeMeme = !isBluechip && (!pos.strategy_type || !pos.strategy_type.includes('REENTRY'));
+                            if (isFirstTimeMeme) {
                                 await supabase.from('reentry_watchlist').insert([{
                                     mint_address: pos.mint_address, token_symbol: pos.token_symbol,
                                     sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
