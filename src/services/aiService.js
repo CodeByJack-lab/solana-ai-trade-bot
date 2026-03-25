@@ -105,7 +105,18 @@ async function reviewActivePosition(mintAddress, positionData) {
 
         } catch (geminiErr) {
             healthMonitor.setStatus('AI_Overseer', `🔴 雙引擎全線失效: ${geminiErr.message}`);
-            return { decision: "HOLD", reason: "AI 陣列暫時離線" };
+            
+            // 🚀 新增：紀錄失敗時間，供外部 monitorService 判斷 5 分鐘後 Retry
+            const tableName = positionData.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
+            await supabase
+                .from(tableName)
+                .update({ 
+                    last_review_comment: `⚠️ AI 離線，等待 5 分鐘後重試 (${new Date().toLocaleTimeString()})`,
+                    // 假設你 DB 有呢個欄位，或者我哋借用 last_review_comment 來標記
+                })
+                .eq('mint_address', mintAddress);
+
+            return { decision: "RETRY_LATER", reason: "AI 陣列暫時離線" }; // 🚀 傳回特定狀態
         }
     }
 

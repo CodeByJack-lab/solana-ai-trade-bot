@@ -452,8 +452,28 @@ function startPositionMonitor() {
                     action = 'SELL';
                     reason = `🚀 觸發無腦暴利平倉 (+300%)`;
                 } else {
+                    // 🚀 【新增：5 分鐘 Retry 防禦機制】
+                    // 檢查上次 AI 審查是否失敗
+                    const lastComment = pos.last_review_comment || "";
+                    if (lastComment.includes('AI 離線') || lastComment.includes('RETRY_LATER')) {
+                        // 檢查距離上次更新過咗幾耐
+                        const lastUpdate = new Date(pos.updated_at || pos.created_at).getTime();
+                        const minsSinceFail = (Date.now() - lastUpdate) / 60000;
+                        
+                        if (minsSinceFail < 5) {
+                            console.log(`⏳ [Retry Delay] ${pos.token_symbol} 上次審查失敗，${(5 - minsSinceFail).toFixed(1)} 分鐘後再試。`);
+                            continue; // 唔好 Call AI，跳過今次巡邏
+                        }
+                    }
+
                     console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
                     const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
+                    
+                    // 處理 Retry 狀態
+                    if (reviewResult.decision === 'RETRY_LATER') {
+                        continue; // 等下一個循環 (且過咗 5 分鐘) 再試
+                    }
+
                     action = reviewResult.decision;
                     reason = `AI 指示: ${reviewResult.reason}`;
                     
