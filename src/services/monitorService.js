@@ -127,18 +127,18 @@ app.post('/webhook/helius', async (req, res) => {
                                 if (mintAddress) {
                                     stats_pumpFunCreates++; 
 
-                                    // 🚀 核心改動：呼叫 SQL RPC 函數自動管理 50 隻上限
+                                    // 🚀 呼叫 SQL RPC 函數自動管理 200 隻上限
                                     const { data: isInserted, error } = await supabase.rpc('insert_fish_with_limit', {
                                         new_mint_address: mintAddress
                                     });
 
                                     if (isInserted) {
                                         stats_addedToNursery++; 
-                                        // 隱藏成功 Log，版面清爽
-                                        // console.log(`🌟 [Webhook] 魚池未滿，成功加入新魚: ${mintAddress}`);
+                                        // 🚀 已開啟加入魚池 Log
+                                        console.log(`🌟 [Webhook] 魚池未滿，成功加入新魚: ${mintAddress}`);
                                     } else {
-                                        // 隱藏失敗 Log，版面清爽
-                                        // console.log(`🛑 [Nursery] 魚池已達 50 隻上限，拒收新魚: ${mintAddress}`);
+                                        // 🚀 修正文字 Bug：顯示 200 隻上限
+                                        console.log(`🛑 [Nursery] 魚池已達 200 隻上限，拒收新魚: ${mintAddress}`);
                                     }
                                 }
                             }
@@ -202,6 +202,7 @@ let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
     console.log('🐟 [Nursery Radar] 雙層過濾系統已啟動 (DB -> RAM -> Out)');
     
+    // 🚀 5 秒一審，配合 200 魚池容量
     setInterval(async () => {
         if (isNurseryRunning) return;
         
@@ -519,7 +520,6 @@ function startCommandListener() {
 function startMarketMonitor() {
     app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
         console.log('🔄 [System] 系統啟動，準備載入雙 Webhook 模組...');
-        // 🚀 開機自動執行一次對齊，確保兩個 Webhook 都正確開啟
         await toggleHeliusWebhook(true);
         healthMonitor.setStatus('Trade_Engine', '🟢 正常待命');
 

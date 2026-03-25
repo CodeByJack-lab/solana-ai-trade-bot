@@ -10,11 +10,11 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 // 🚀 核心升級：將所有 Gemini Keys 放入 Array (自動過濾空值)
 const GEMINI_KEYS = [
     process.env.GEMINI_API_KEY,
-    process.env.REENTRY_GEMINI_API_KEY, // 🚀 換咗做你指定嘅變數名！
-    process.env.GEMINI_API_KEY_3 // 預留位置，有需要隨時加
+    process.env.REENTRY_GEMINI_API_KEY, 
+    process.env.GEMINI_API_KEY_3 
 ].filter(Boolean);
 
-let currentKeyIndex = 0; // 記住上次用到邊條 Key
+let currentKeyIndex = 0; 
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY; // 董事會專用
 
@@ -76,18 +76,24 @@ const retrospectiveJob = {
             const hasBluechipLoss = badTrades.some(t => (t.strategy_type || '').includes('BLUECHIP'));
             const hasMemeLoss = badTrades.some(t => !(t.strategy_type || '').includes('BLUECHIP'));
 
-            const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
+            // 🚀 核心升級：同時讀取 ID 1 (老幣) 同 ID 2 (Meme) 嘅參數畀 AI 參考
+            const { data: param1 } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
+            const { data: param2 } = await supabase.from('ai_strategy_params').select('*').eq('id', 2).single();
             const { data: masterPrompt } = await supabase.from('master_auditor_prompts').select('content').eq('id', 1).single();
 
+            // 🚀 教識 Master AI 系統依家有兩套參數
             let promptText = masterPrompt.content
                 .replace('{{last_audit_record}}', lastAuditText) 
                 .replace('{{loss_trades_data}}', JSON.stringify(badTrades.map(t => ({
                     symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type
-                }))))
-                .replace('{{current_min_liq}}', params.min_liquidity || 10000)
-                .replace('{{current_min_vol}}', params.min_vol_5m || 1000)
-                .replace('{{current_bluechip_rsi}}', params.bluechip_max_rsi || 40)
-                .replace('{{current_bluechip_drop}}', params.bluechip_min_drop_pct || 2);
+                }))));
+                
+            // 由於原本的 prompt 模板可能未支援雙參數，我們直接在結尾強制加上說明
+            promptText += `\n\n【重要系統設定說明】\n系統目前有兩套獨立參數：\n`;
+            promptText += `ID 1 (老幣專用): min_liquidity=${param1?.min_liquidity}, min_vol_5m=${param1?.min_vol_5m}, bluechip_max_rsi=${param1?.bluechip_max_rsi}, bluechip_min_drop_pct=${param1?.bluechip_min_drop_pct}\n`;
+            promptText += `ID 2 (Meme專用): min_liquidity=${param2?.min_liquidity}, min_vol_5m=${param2?.min_vol_5m}\n`;
+            promptText += `\n【輸出要求升級】\n你的 \`recommended_params\` 必須包含 \`bluechip\` 和 \`meme\` 兩個子物件，例如：\n`;
+            promptText += `"recommended_params": { "bluechip": { "min_liquidity": 20000, "bluechip_max_rsi": 40 }, "meme": { "min_liquidity": 6000 } }`;
 
             const { data: currentPrompts } = await supabase.from('bot_prompts').select('*');
             if (currentPrompts) {
@@ -103,16 +109,13 @@ const retrospectiveJob = {
                 promptText += contextStr;
             }
 
-            // ==========================================
-            // 🚀 核心升級：多 Key 輪替與 429 容災重試機制
-            // ==========================================
             let report = null;
             let rawText = "";
 
             for (let attempt = 0; attempt < GEMINI_KEYS.length; attempt++) {
                 const activeKey = GEMINI_KEYS[currentKeyIndex % GEMINI_KEYS.length];
                 const keyNumber = (currentKeyIndex % GEMINI_KEYS.length) + 1;
-                currentKeyIndex++; // 推進指標，下次用下一條
+                currentKeyIndex++; 
 
                 try {
                     console.log(`🧠 [Evolution] 正在呼叫 Master AI (Gemini Pro) 撰寫進化提案 (使用 Key #${keyNumber})...`);
@@ -125,21 +128,18 @@ const retrospectiveJob = {
                     report = JSON.parse(rawText.match(/\{[\s\S]*\}/)[0]);
                     
                     console.log(`✅ [Evolution] Key #${keyNumber} 成功產出報告！`);
-                    break; // 成功就立刻跳出迴圈
+                    break; 
 
                 } catch (apiErr) {
                     const status = apiErr.response?.status;
                     if (status === 429) {
                         console.warn(`⚠️ [Evolution] Key #${keyNumber} 額度已耗盡 (HTTP 429)！系統將自動切換下一條 Key 補上...`);
-                        // 迴圈會繼續，嘗試下一條 Key
                     } else {
-                        // 其他非額度錯誤 (例如 Timeout) 直接拋出
                         throw apiErr; 
                     }
                 }
             }
 
-            // 如果全部 Key 都試過晒都失敗
             if (!report) {
                 throw new Error("🚨 所有 Gemini API Keys 的額度均已耗盡 (429)，無法產出進化報告！請添加更多 Keys。");
             }
@@ -193,20 +193,39 @@ const retrospectiveJob = {
             }
 
             // ==========================================
-            // 執行更新邏輯 (受董事會制衡)
+            // 🚀 核心升級：將參數寫入對應的 ID 1 (老幣) 或 ID 2 (Meme)
             // ==========================================
             let paramUpdateLog = "無變動";
             if (!isVetoed && report.recommended_params) {
-                const updates = {};
-                if (report.recommended_params.min_liquidity !== undefined) updates.min_liquidity = Math.max(5000, Math.min(Number(report.recommended_params.min_liquidity), 50000));
-                if (report.recommended_params.min_vol_5m !== undefined) updates.min_vol_5m = Math.max(500, Math.min(Number(report.recommended_params.min_vol_5m), 10000));
-                if (report.recommended_params.bluechip_max_rsi !== undefined) updates.bluechip_max_rsi = Math.max(20, Math.min(Number(report.recommended_params.bluechip_max_rsi), 50));
-                if (report.recommended_params.bluechip_min_drop_pct !== undefined) updates.bluechip_min_drop_pct = Math.max(1, Math.min(Number(report.recommended_params.bluechip_min_drop_pct), 10));
+                let logMsg = "";
                 
-                if (Object.keys(updates).length > 0) {
-                    await supabase.from('ai_strategy_params').update(updates).eq('id', 1);
-                    paramUpdateLog = JSON.stringify(updates);
+                // 🏛️ 處理老幣 (ID 1)
+                const bluechipParams = report.recommended_params.bluechip || report.recommended_params; // 兼容 AI 格式
+                const bcUpdates = {};
+                if (bluechipParams.min_liquidity !== undefined) bcUpdates.min_liquidity = Math.max(10000, Math.min(Number(bluechipParams.min_liquidity), 100000));
+                if (bluechipParams.min_vol_5m !== undefined) bcUpdates.min_vol_5m = Math.max(1000, Math.min(Number(bluechipParams.min_vol_5m), 20000));
+                if (bluechipParams.bluechip_max_rsi !== undefined) bcUpdates.bluechip_max_rsi = Math.max(20, Math.min(Number(bluechipParams.bluechip_max_rsi), 50));
+                if (bluechipParams.bluechip_min_drop_pct !== undefined) bcUpdates.bluechip_min_drop_pct = Math.max(1, Math.min(Number(bluechipParams.bluechip_min_drop_pct), 10));
+                
+                if (Object.keys(bcUpdates).length > 0) {
+                    await supabase.from('ai_strategy_params').update(bcUpdates).eq('id', 1);
+                    logMsg += `🏛️ 老幣: ${JSON.stringify(bcUpdates)} `;
                 }
+
+                // 🐶 處理 Meme (ID 2)
+                if (report.recommended_params.meme) {
+                    const memeParams = report.recommended_params.meme;
+                    const memeUpdates = {};
+                    if (memeParams.min_liquidity !== undefined) memeUpdates.min_liquidity = Math.max(3000, Math.min(Number(memeParams.min_liquidity), 20000));
+                    if (memeParams.min_vol_5m !== undefined) memeUpdates.min_vol_5m = Math.max(500, Math.min(Number(memeParams.min_vol_5m), 10000));
+                    
+                    if (Object.keys(memeUpdates).length > 0) {
+                        await supabase.from('ai_strategy_params').update(memeUpdates).eq('id', 2);
+                        logMsg += `| 🐶 Meme: ${JSON.stringify(memeUpdates)}`;
+                    }
+                }
+                
+                if (logMsg) paramUpdateLog = logMsg;
             }
 
             let promptUpdateLog = "無修正";
