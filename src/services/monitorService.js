@@ -72,7 +72,8 @@ async function toggleHeliusWebhook(enable = true) {
             const url2 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID_2}?api-key=${HELIUS_API_KEY_2}`;
             const payload2 = {
                 webhookURL: targetUrl,
-                transactionTypes: ["CREATE_POOL", "TOKEN_MINT"], 
+                // 🚀 優化 Webhook 2: 只抓 TOKEN_MINT 過濾雜訊
+                transactionTypes: ["TOKEN_MINT","CREATE_POOL","UNKNOWN"], 
                 accountAddresses: [PUMP_FUN_PROGRAM_ID],
                 webhookType: "enhanced",
                 txnStatus: "success" 
@@ -92,8 +93,9 @@ async function toggleHeliusWebhook(enable = true) {
          const url3 = `https://api.helius.xyz/v0/webhooks/${WALLET_WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
            const payload3 = {
                 webhookURL: targetUrl,
-                transactionTypes: ["TRANSFER", "SWAP", "BUY", "SELL"], // 🚀 捕捉所有類型以偵測 SOL 轉帳
-                accountAddresses: [botWallet], // 🚀 此處變數已修正
+                // 🚀 修正 Webhook 3: 使用明確的交易類型避免 -32603 錯誤
+                transactionTypes: ["TRANSFER", "SWAP", "BUY", "SELL"], 
+                accountAddresses: [botWallet], 
                 webhookType: "enhanced",
                 txnStatus: "success"
           };
@@ -143,14 +145,12 @@ app.post('/webhook/helius', async (req, res) => {
                     // 📥 入金：射錢落 Bot 錢包
                     if (t.toUserAccount === botWallet && amount > 0) {
                         console.log(`💰 [Accounting] 偵測到入金: ${amount} SOL`);
-                        // 🚀 修正對接 TradeService
                         await handleIncomingFund(t.fromUserAccount, amount, txid);
                     } 
                     // 📤 出金：Bot 錢包射錢走 (過濾掉交易買幣)
                     else if (t.fromUserAccount === botWallet && amount > 0) {
                         if (t.toUserAccount.length > 32) { // 簡單判定為普通錢包地址而非 Program
                             console.log(`💸 [Accounting] 偵測到出金: ${amount} SOL`);
-                            // 🚀 修正對接 TradeService
                             await handleOutgoingFund(t.toUserAccount, amount, txid);
                         }
                     }
@@ -162,34 +162,18 @@ app.post('/webhook/helius', async (req, res) => {
             // ==========================================
             // 🔫 分流 B：原本的交易雷達 (Pump.fun 偵測)
             // ==========================================
-            const instructions = event.instructions || [];
-            for (const ix of instructions) {
-                if (ix.programId === PUMP_FUN_PROGRAM_ID) {
-                    const dataObj = ix.data || "";
-                    if (dataObj.length > 0) {
-                        try {
-                            const decodedBytes = bs58.decode(dataObj);
-                            const hexString = Buffer.from(decodedBytes).toString('hex');
-                            
-                            // 判斷是否為新幣創建
-                            const isNewMeme = 
-                                hexString.startsWith('181ec828051c0777') || 
-                                hexString.startsWith('d6904cec5f8b31b4') || 
-                                hexString.startsWith('253a237ebe35e4c5') || 
-                                hexString.startsWith('a572670079cef751') ||
-                                hexString.startsWith('66063d1201daebea');
-
-                            if (isNewMeme) {
-                                const mintAddress = ix.accounts[0];
-                                if (mintAddress) {
-                                    stats_pumpFunCreates++; 
-                                    const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
-                                        new_mint_address: mintAddress
-                                    });
-                                    if (isInserted) stats_addedToNursery++; 
-                                }
-                            }
-                        } catch (e) { }
+            if (event.type === "TOKEN_MINT" || event.type === "PUMP_FUN_CREATE") {
+                const instructions = event.instructions || [];
+                for (const ix of instructions) {
+                    if (ix.programId === PUMP_FUN_PROGRAM_ID) {
+                        const mintAddress = ix.accounts[0];
+                        if (mintAddress) {
+                            stats_pumpFunCreates++; 
+                            const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
+                                new_mint_address: mintAddress
+                            });
+                            if (isInserted) stats_addedToNursery++; 
+                        }
                     }
                 }
             }
@@ -499,6 +483,7 @@ function startPositionMonitor() {
                 }
 
                 const drawdownFromHigh = ((currentPrice - pos.highest_price_sol) / pos.highest_price_sol) * 100;
+                const highestPnlPct = ((pos.highest_price_sol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
 
                 const posDataForAI = { ...pos, currentPrice, pnlPct, mode: portfolio.mode };
 
@@ -507,18 +492,29 @@ function startPositionMonitor() {
 
                 let action = 'HOLD';
                 let reason = '';
+                let sellFraction = 1.0; 
 
                 if (pnlPct <= STOP_LOSS_PCT) {
                     action = 'SELL';
                     reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
-                } else if (pnlPct >= 50 && drawdownFromHigh <= -10) {
+                } 
+                // 🚀 1. 翻倍回本機制：達 +100% 賣出一半
+                else if (!isHalfSold && highestPnlPct >= 100) {
                     action = 'SELL';
-                    reason = `💰 利潤保護機制 (曾達+50%，回撤>10%)`;
-                } else if (pnlPct >= 300) {
+                    sellFraction = 0.5;
+                    reason = `🚀 翻倍回本機制 (歷史最高達 +${highestPnlPct.toFixed(2)}%，賣出 50% 鎖定成本)`;
+                }
+                // 🚀 2. 尾倉登月止盈：已賣出一半後，給予 30% 的高位回撤空間
+                else if (isHalfSold && drawdownFromHigh <= -30) {
                     action = 'SELL';
-                    reason = `🚀 觸發無腦暴利平倉 (+300%)`;
-                } else {
-                    // 🚀 【新增：5 分鐘 Retry 防禦機制】
+                    reason = `💰 登月尾倉止盈 (翻倍後高位回撤 ${drawdownFromHigh.toFixed(2)}%，全數獲利了結)`;
+                }
+                // 🚀 3. 原本的利潤保護：未達 100% 之前，50% 且回撤 15% 即全數獲利了結
+                else if (!isHalfSold && highestPnlPct >= 50 && drawdownFromHigh <= -15) {
+                    action = 'SELL';
+                    reason = `💰 觸發無腦利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%，高位回撤: ${drawdownFromHigh.toFixed(2)}%)`;
+                } 
+                else {
                     const lastComment = pos.last_review_comment || "";
                     if (lastComment.includes('AI 離線') || lastComment.includes('RETRY_LATER')) {
                         const lastUpdate = new Date(pos.updated_at || pos.created_at).getTime();
@@ -545,19 +541,24 @@ function startPositionMonitor() {
 
                 if (action === 'SELL') {
                     const pnlIcon = pnlPct > 0 ? '🚀 止盈' : '🩸 止損';
-                    if (isBluechip && !isHalfSold && pnlPct > 0) {
-                        const sellResult = await runSellPipeline(pos, currentPrice, `[老幣分批止盈] ${reason}`, 0.5);
-                        if (sellResult) {
+                    
+                    // 🚀 整合原本的老幣邏輯
+                    if (isBluechip && !isHalfSold && pnlPct > 0 && sellFraction === 1.0) {
+                        sellFraction = 0.5;
+                        reason = `[老幣分批止盈] ${reason}`;
+                    }
+
+                    const sellResult = await runSellPipeline(pos, currentPrice, reason, sellFraction);
+                    
+                    if (sellResult) {
+                        if (sellFraction === 0.5) {
                             console.log(`\n======================================================`);
                             console.log(`💳 🔴 【分批賣出成功 - ${pos.token_symbol}】 🔴 💳`);
                             console.log(`📊 動作: 🚀 止盈 (+${pnlPct.toFixed(2)}%)`);
-                            console.log(`🤖 理由: [老幣分批止盈] ${reason}`);
+                            console.log(`🤖 理由: ${reason}`);
                             console.log(`======================================================\n`);
-                            sendTelegramAlert(`🔵 <b>老幣波段止盈</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定利潤，剩餘倉位轉為零成本持有。`);
-                        }
-                    } else {
-                        const sellResult = await runSellPipeline(pos, currentPrice, reason, 1.0);
-                        if (sellResult) {
+                            sendTelegramAlert(`🌟 <b>翻倍鎖定利潤</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定成本，剩餘尾倉讓利潤奔跑！`);
+                        } else {
                             console.log(`\n======================================================`);
                             console.log(`💳 🔴 【全倉賣出成功 - ${pos.token_symbol}】 🔴 💳`);
                             console.log(`📊 動作: ${pnlIcon} (${pnlPct.toFixed(2)}%)`);
