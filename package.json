@@ -29,5 +29,8 @@
     "node-cron": "^4.2.1",
     "rss-parser": "^3.13.0",
     "utf-8-validate": "^5.0.10"
+  },
+  "devDependencies": {
+    "@types/bs58": "^4.0.4"
   }
 }

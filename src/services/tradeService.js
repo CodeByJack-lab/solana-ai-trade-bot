@@ -103,7 +103,7 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount) {
 
 async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol) {
     console.log(`\n========================================`);
-    console.log(`⚡ [Execution] 啟動下單程序: 狙擊目標 ${tokenSymbol}`);
+    console.log(`⚡ [Execution] 啟下單程序: 狙擊目標 ${tokenSymbol}`);
 
     const portfolio = getPortfolio();
     const isLive = portfolio.mode === 'LIVE';
@@ -428,6 +428,14 @@ async function handleIncomingFund(address, amount, txid) {
     const isInserted = await logNewDeposit(address, personName, amount, txid);
     if (!isInserted) return;
 
+    // 🚀 新增呢段：入金後，去鏈上查最新真實餘額，並寫入 system_config
+    if (globalWalletPublicKey) {
+        try {
+            const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
+            await supabase.from('system_config').update({ live_wallet_balance: realLamports / 1e9 }).eq('id', 1);
+        } catch (e) {}
+    }
+
     const stats = await getContributionStats(personName);
 
     if (stats) {
@@ -468,6 +476,16 @@ async function handleOutgoingFund(address, amount, txid) {
 
     const isInserted = await logNewWithdrawal(address, personName, amount, txid);
     if (!isInserted) return;
+
+    // 🚀 新增呢段：出金後，去鏈上查最新真實餘額，並寫入 system_config
+    if (globalWalletPublicKey) {
+        try {
+            // 等待2秒確保鏈上餘額已經確實扣除
+            await new Promise(r => setTimeout(r, 2000));
+            const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
+            await supabase.from('system_config').update({ live_wallet_balance: realLamports / 1e9 }).eq('id', 1);
+        } catch (e) {}
+    }
 
     const stats = await getContributionStats(personName);
 
