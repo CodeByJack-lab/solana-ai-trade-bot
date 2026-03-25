@@ -32,7 +32,7 @@ const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
 // 🚀 致命錯誤修復：將 botWallet 變量提升到全域，確保 toggleHeliusWebhook 讀得到
-const botWallet = process.env.SOLANA_PUBLIC_KEY;
+const botWallet = process.env.MY_WALLET_PUBLIC_KEY;
 
 let stats_totalWebhookSignals = 0;
 let stats_pumpFunCreates = 0;
