@@ -252,8 +252,6 @@ function startDatabaseNurseryMonitor() {
                 if (ageMins > config.max_age_mins) {
                     await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
                 } else if (ageMins >= config.min_age_mins) {
-                    // 🔇 取消這行擾人的 Console
-                    // console.log(`\n🎣 [Nursery] DB 撈出成熟代幣...`);
                     
                     const { securityGuard } = require('./securityGuard');
                     const secResult = await securityGuard.checkAll(mintAddress);
@@ -268,7 +266,6 @@ function startDatabaseNurseryMonitor() {
                         await triggerBuyPipeline(mintAddress, secResult, config);
                     } else {
                         const reason = secResult.reason || '';
-                        // 🔇 靜音常見的垃圾攔截，只顯示特殊狀況
                         if (!reason.includes('查無報價') && !reason.includes('死水') && !reason.includes('流動性太窮')) {
                             console.log(`🛡️ [Security] 攔截 ${mintAddress.substring(0,6)}: ${reason}`);
                         }
@@ -467,7 +464,6 @@ function startPositionMonitor() {
                     const pnlIcon = pnlPct > 0 ? '🚀 止盈' : '🩸 止損';
                     if (isBluechip && !isHalfSold && pnlPct > 0) {
                         const sellResult = await runSellPipeline(pos, currentPrice, `[老幣分批止盈] ${reason}`, 0.5);
-                        // 🚀 耀眼的賣出 Log
                         if (sellResult) {
                             console.log(`\n======================================================`);
                             console.log(`💳 🔴 【分批賣出成功 - ${pos.token_symbol}】 🔴 💳`);
@@ -478,7 +474,6 @@ function startPositionMonitor() {
                         }
                     } else {
                         const sellResult = await runSellPipeline(pos, currentPrice, reason, 1.0);
-                        // 🚀 耀眼的賣出 Log
                         if (sellResult) {
                             console.log(`\n======================================================`);
                             console.log(`💳 🔴 【全倉賣出成功 - ${pos.token_symbol}】 🔴 💳`);
@@ -486,16 +481,19 @@ function startPositionMonitor() {
                             console.log(`🤖 理由: ${reason}`);
                             console.log(`======================================================\n`);
 
-                            // 🚀 【核心修正】: 移除 20% 利潤限制！
-                            // 只要是 Meme 幣，且是「第一次賣出」(策略非 REENTRY)，一律放入接回觀察名單給予第二次機會！
+                            // 🚀 【防接飛刀機制】: Meme 幣第一次賣出，但如果虧損 >= -20%，直接判死刑！
                             const isFirstTimeMeme = !isBluechip && (!pos.strategy_type || !pos.strategy_type.includes('REENTRY'));
                             if (isFirstTimeMeme) {
-                                await supabase.from('reentry_watchlist').insert([{
-                                    mint_address: pos.mint_address, token_symbol: pos.token_symbol,
-                                    sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
-                                    consolidation_start_time: new Date().toISOString()
-                                }]);
-                                console.log(`📋 已將 ${pos.token_symbol} 加入橫盤觀察名單 (30分鐘後評估接回)`);
+                                if (pnlPct >= -20) {
+                                    await supabase.from('reentry_watchlist').insert([{
+                                        mint_address: pos.mint_address, token_symbol: pos.token_symbol,
+                                        sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
+                                        consolidation_start_time: new Date().toISOString()
+                                    }]);
+                                    console.log(`📋 已將 ${pos.token_symbol} 加入橫盤觀察名單 (30分鐘後評估接回)`);
+                                } else {
+                                    console.log(`💀 [Blacklist] ${pos.token_symbol} 虧損過大 (${pnlPct.toFixed(2)}%)，判處死刑，拒絕加入接回名單！`);
+                                }
                             }
                         }
                     }
