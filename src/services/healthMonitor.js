@@ -40,12 +40,19 @@ healthMonitor.setStatus('Portfolio_Cache', '🟡 讀取資金中...');
 healthMonitor.setStatus('Meme_Radar', '🟡 等待 Helius 水閘...');
 healthMonitor.setStatus('Bluechip_Radar', '🟡 等待啟動...');
 healthMonitor.setStatus('Macro_Radar', '🟡 雙源探測大盤中...');
+// 🚀 新增：會計部預先報到
+healthMonitor.setStatus('Wallet_Radar', '🟡 等待 WALLET Webhook 會計專線...'); 
 healthMonitor.setStatus('AI_Consensus', '🟡 三白劍俠就位中...');
+// 🚀 新增：AI 模型細分狀態預先報到
+healthMonitor.setStatus('AI_Scout', '🟡 Scout 模型預熱中...');         
+healthMonitor.setStatus('AI_Strategist', '🟡 Strategist 模型預熱中...'); 
+healthMonitor.setStatus('AI_Auditor', '🟡 Auditor 模型預熱中...');       
 healthMonitor.setStatus('AI_Overseer', '🟡 AI Reviewer 就位中...');
 healthMonitor.setStatus('AI_Reentry', '🟡 接回分析就位中...');
 healthMonitor.setStatus('Security_Guard', '🟡 防線建立中...'); // 🚀 新增保安
 healthMonitor.setStatus('Trade_Engine', '🟡 交易引擎預熱中...');
-healthMonitor.setStatus('Live_Engine', '🟡 檢查錢包狀態...');  // 🚀 新增實盤引擎
-healthMonitor.setStatus('AI_Evolution', '🟡 待命中 (12AM/PM 執行)...');
+healthMonitor.setStatus('Live_Engine', '🟡 檢查銀包狀態...');  // 🚀 新增實盤引擎
+// 🚀 修正：強迫症福音，時間已對齊 HKT
+healthMonitor.setStatus('AI_Evolution', '🟡 待命中 (9AM/9PM 執行)...');
 
 module.exports = { healthMonitor };

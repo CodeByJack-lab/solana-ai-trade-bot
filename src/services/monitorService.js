@@ -73,7 +73,7 @@ async function toggleHeliusWebhook(enable = true) {
             const payload2 = {
                 webhookURL: targetUrl,
                 // 🚀 優化 Webhook 2: 只抓 TOKEN_MINT 過濾雜訊
-                transactionTypes: ["TOKEN_MINT","CREATE_POOL","UNKNOWN"], 
+                transactionTypes: ["TOKEN_MINT","CREATE_POOL"], 
                 accountAddresses: [PUMP_FUN_PROGRAM_ID],
                 webhookType: "enhanced",
                 txnStatus: "success" 
