@@ -10,7 +10,7 @@ async function getRealModelIds() {
         
         response.data.models.forEach(m => {
             // 我哋只過濾出你有興趣嘅 Gemini 3 同 Gemma 模型
-            if (m.displayName.includes('3.1') || m.displayName.includes('Gemma 3')) {
+            if (m.displayName.includes('2') || m.displayName.includes('Gemma 3')) {
                 // 將 'models/' 前綴切走，剩低嘅就係寫 Code 要用嘅代號
                 const realId = m.name.replace('models/', '');
                 console.log(`👉 顯示名稱: ${m.displayName.padEnd(25)} | 💻 真正 API 代號: ${realId}`);

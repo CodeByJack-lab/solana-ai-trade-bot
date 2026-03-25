@@ -95,7 +95,7 @@ async function toggleHeliusWebhook(enable = true) {
            const payload3 = {
                 webhookURL: targetUrl,
                 // 🚀 修正 Webhook 3: 使用明確的交易類型避免 -32603 錯誤
-                transactionTypes: ["TRANSFER", "SWAP"], 
+                transactionTypes: [], 
                 accountAddresses: [botWallet], 
                 webhookType: "enhanced",
                 txnStatus: "success"
@@ -196,6 +196,34 @@ app.post('/webhook/helius', async (req, res) => {
         }
     } catch (err) {
         console.error('❌ [Webhook Error]', err.message);
+    }
+});
+
+            // ==========================================
+            // 🚀 秘密開關：手動強制觸發 Master AI 進化
+            // ==========================================
+            app.get('/force-evolution', async (req, res) => {
+                console.log('\n========================================');
+                console.log('👑 [Admin] 管理員已手動強制喚醒 Master AI！');
+                console.log('========================================\n');
+    
+              // 1. 立即回覆，防止瀏覽器轉圈圈到超時
+                res.status(200).send(`
+                    <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+                        <h1 style="color: #4CAF50;">🚀 Master AI 已被強制喚醒！</h1>
+                        <p style="font-size: 18px;">系統正準備進行自我進化分析...</p>
+                        <p style="color: #666;">請返回 Railway / Terminal 查看詳細的 Console Log 戰報。</p>
+                        <hr style="width: 200px; margin: 30px auto;">
+                        <p style="font-size: 14px; color: #999;">Status: Processing (Attempt 1)</p>
+                    </div>
+                `);
+    
+    // 2. 異步執行進化邏輯
+    try {
+        const { retrospectiveJob } = require('../jobs/retrospectiveJob');
+        await retrospectiveJob.runEvolutionWithRetry(1);
+    } catch (e) {
+        console.error("❌ 手動觸發進化失敗:", e.message);
     }
 });
 

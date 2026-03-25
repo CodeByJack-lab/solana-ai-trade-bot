@@ -119,7 +119,7 @@ const retrospectiveJob = {
 
                 try {
                     console.log(`🧠 [Evolution] 正在呼叫 Master AI (Gemini Pro) 撰寫進化提案 (使用 Key #${keyNumber})...`);
-                    const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:generateContent?key=${activeKey}`, {
+                    const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${activeKey}`, {
                         contents: [{ role: "user", parts: [{ text: promptText }] }],
                         generationConfig: { responseMimeType: "application/json", temperature: 0.1 } 
                     }, { 
