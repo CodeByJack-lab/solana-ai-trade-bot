@@ -20,7 +20,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY; // 董事會專用
 
 const retrospectiveJob = {
     async runAnalysis() {
-        console.log(`\n🌞 [Evolution] 啟動 12AM/PM (HKT) 全自動自我進化程序...`);
+        console.log(`\n🌞 [Evolution] 啟動 9AM/PM (HKT) 全自動自我進化程序...`);
         healthMonitor.setStatus('AI_Evolution', '🟢 分析與修正中...');
 
         try {
@@ -266,7 +266,7 @@ const retrospectiveJob = {
     },
 
     start() {
-        cron.schedule('0 0,12 * * *', () => { this.runAnalysis(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
+        cron.schedule('0 0 9,21 * * *', () => { this.runAnalysis(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
         console.log(`🤖 [Evolution] 雙軌審查進化排程已啟動 (自動輪替多條 Gemini API Key)...`);
     }
 };
