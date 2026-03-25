@@ -92,7 +92,7 @@ async function toggleHeliusWebhook(enable = true) {
          const url3 = `https://api.helius.xyz/v0/webhooks/${WALLET_WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
            const payload3 = {
                 webhookURL: targetUrl,
-                transactionTypes: ["ANY"], // 🚀 捕捉所有類型以偵測 SOL 轉帳
+                transactionTypes: ["TRANSFER", "SWAP", "BUY", "SELL"], // 🚀 捕捉所有類型以偵測 SOL 轉帳
                 accountAddresses: [botWallet], // 🚀 此處變數已修正
                 webhookType: "enhanced",
                 txnStatus: "success"
