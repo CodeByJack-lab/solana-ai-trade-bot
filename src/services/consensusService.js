@@ -142,7 +142,13 @@ const consensusService = {
             const [pScout, pStrat, pAudit] = await Promise.all([
                 this.getPrompt('meme_scout', promptData),
                 this.getPrompt('meme_strategist', promptData),
-                this.getPrompt('meme_auditor', { ...promptData, rug_score: 'N/A', top10_pct: 'N/A', lp_status: 'N/A' })
+                // 🚀 核心改動：將 latest_news_score 傳遞給最後判官
+                this.getPrompt('meme_auditor', { 
+                    ...promptData, 
+                    rug_score: 'N/A', 
+                    top10_pct: 'N/A', 
+                    lp_status: 'N/A' 
+                })
             ]);
 
             console.log("📡 正在呼叫先鋒 (Scout)...");

@@ -121,7 +121,7 @@ const macroMonitorService = {
     },
 
     start() {
-        console.log(`🌍 [Macro] 大盤防禦雷達已就位...`);
+        console.log(`🌍 [Macro] 大盤防禦雷達已就位 (軟權重模式)...`);
         
         setInterval(async () => {
             const now = Date.now();
@@ -148,26 +148,29 @@ const macroMonitorService = {
                 }
 
                 if (isPriceTriggered) {
-                    console.log(`🚨 [Macro] 價格異常，呼叫 AI 審查新聞...`);
+                    console.log(`🚨 [Macro] 偵測到市場大幅波動，更新 AI 災難情報...`);
                     const newsScore = await newsSentimentService.getDisasterScore();
-                    await supabase.from('system_config').update({ latest_news_score: newsScore }).eq('id', 1);
+                    
+                    // 🚀 核心改動：只更新分數，不再強制關機 (is_running 保持不變)
+                    await supabase.from('system_config').update({ 
+                        latest_news_score: newsScore,
+                        status_msg: newsScore >= 60 ? `市場恐慌 (指數:${newsScore})` : '正常運作中'
+                    }).eq('id', 1);
 
-                    if (newsScore >= 50) {
-                        await supabase.from('system_config').update({ is_running: false, status_msg: `避險中 (指數:${newsScore})` }).eq('id', 1);
-                        sendTelegramAlert(`🚨 <b>大盤崩盤確認</b>\n跌幅: ${priceAlertMsg}\nAI 災難分: ${newsScore}\n\n系統將暫停 30 分鐘，之後由 AI 重新審查。`);
-                        
-                        pauseCooldownUntil = Date.now() + (30 * 60 * 1000); 
-                        
-                        // 🚀 核心修正：30 分鐘後不再「無腦歸零」，而係 Call checkRecovery() 叫 AI 做嘢
-                        setTimeout(() => this.checkRecovery(), 30 * 60 * 1000);
+                    if (newsScore >= 60) {
+                        sendTelegramAlert(`⚠️ <b>市場預警</b>\n波動: ${priceAlertMsg}\nAI 恐慌指數: ${newsScore}/100\n\n系統維持運作，但 AI 將會以更嚴格標準審核買入申請。`);
+                        pauseCooldownUntil = Date.now() + (15 * 60 * 1000); // 避免連續狂轟 Telegram，冷卻 15 分鐘
                     }
+                } else {
+                    // 🚀 自我修復機制：如果大盤平穩，慢慢調低災難分數
+                    await supabase.rpc('decrement_disaster_score', { decrement_by: 5 });
                 }
             } catch (err) {
                 console.error(`❌ [Macro_Radar] 發生錯誤: ${err.message}`);
                 healthMonitor.setStatus('Macro_Radar', `🔴 數據中斷: ${err.message}`);
                 if (err.response?.status === 429) pauseCooldownUntil = Date.now() + (5 * 60 * 1000);
             }
-        }, 180000); 
+        }, 180000); // 每 3 分鐘掃描一次
     }
 };
 

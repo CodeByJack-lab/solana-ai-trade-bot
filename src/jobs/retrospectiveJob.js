@@ -54,11 +54,16 @@ const retrospectiveJob = {
                 return; // 正常結束，不需要 retry
             }
 
+            // ==========================================
+            // 🚀 核心升級：同時篩選出「最差 3 單」與「最佳 3 單」
+            // ==========================================
             const badTrades = allTrades.filter(t => t.realized_pnl_pct < 0).sort((a, b) => a.realized_pnl_pct - b.realized_pnl_pct).slice(0, 3);
-            if (badTrades.length === 0) {
-                console.log(`✅ [Evolution] 無虧損單，維持現狀。`);
+            const bestTrades = allTrades.filter(t => t.realized_pnl_pct > 0).sort((a, b) => b.realized_pnl_pct - a.realized_pnl_pct).slice(0, 3);
+            
+            if (badTrades.length === 0 && bestTrades.length === 0) {
+                console.log(`✅ [Evolution] 過去 12 小時無有效虧損或獲利單，維持現狀。`);
                 healthMonitor.setStatus('AI_Evolution', '🟢 待命中 (9AM/9PM 執行)...');
-                return; // 正常結束，不需要 retry
+                return; 
             }
 
             const { data: lastAudit } = await supabase.from('daily_audit_reports').select('*').order('created_at', { ascending: false }).limit(1).single();
@@ -76,18 +81,24 @@ const retrospectiveJob = {
                 }
             }
 
-            const hasBluechipLoss = badTrades.some(t => (t.strategy_type || '').includes('BLUECHIP'));
-            const hasMemeLoss = badTrades.some(t => !(t.strategy_type || '').includes('BLUECHIP'));
+            const hasBluechipTrade = [...badTrades, ...bestTrades].some(t => (t.strategy_type || '').includes('BLUECHIP'));
+            const hasMemeTrade = [...badTrades, ...bestTrades].some(t => !(t.strategy_type || '').includes('BLUECHIP'));
 
             const { data: param1 } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
             const { data: param2 } = await supabase.from('ai_strategy_params').select('*').eq('id', 2).single();
+            const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
             const { data: masterPrompt } = await supabase.from('master_auditor_prompts').select('content').eq('id', 1).single();
+
+            // 🚀 核心升級：組合最佳與最差戰報
+            const tradeDataToAI = {
+                "最差3單_虧損教訓": badTrades.map(t => ({ symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type })),
+                "最佳3單_成功經驗": bestTrades.map(t => ({ symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type }))
+            };
 
             let promptText = masterPrompt.content
                 .replace('{{last_audit_record}}', lastAuditText) 
-                .replace('{{loss_trades_data}}', JSON.stringify(badTrades.map(t => ({
-                    symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type
-                }))));
+                .replace('{{loss_trades_data}}', JSON.stringify(tradeDataToAI, null, 2))
+                .replace('{{current_disaster_score}}', config?.latest_news_score || 0);
                 
             promptText += `\n\n【重要系統設定說明】\n系統目前有兩套獨立參數：\n`;
             promptText += `ID 1 (老幣專用): min_liquidity=${param1?.min_liquidity}, min_vol_5m=${param1?.min_vol_5m}, bluechip_max_rsi=${param1?.bluechip_max_rsi}, bluechip_min_drop_pct=${param1?.bluechip_min_drop_pct}\n`;
@@ -97,12 +108,12 @@ const retrospectiveJob = {
 
             const { data: currentPrompts } = await supabase.from('bot_prompts').select('*');
             if (currentPrompts) {
-                let contextStr = "\n\n【當前系統使用的 AI 劇本 (僅提供有虧損的部門供你修改)】\n";
-                if (hasMemeLoss) {
+                let contextStr = "\n\n【當前系統使用的 AI 劇本 (僅提供有包含該策略好壞單的部門供你修改)】\n";
+                if (hasMemeTrade) {
                     const overseer = currentPrompts.find(p => p.prompt_id === 'reviewer_overseer');
                     if (overseer) contextStr += `\n目標ID: reviewer_overseer (Meme 幣監軍)\n內容: ${overseer.content}\n`;
                 }
-                if (hasBluechipLoss) {
+                if (hasBluechipTrade) {
                     const bluechip = currentPrompts.find(p => p.prompt_id === 'reviewer_bluechip');
                     if (bluechip) contextStr += `\n目標ID: reviewer_bluechip (老幣監軍)\n內容: ${bluechip.content}\n`;
                 }
@@ -152,7 +163,7 @@ const retrospectiveJob = {
             if (report.target_prompt_id && report.new_prompt_content && report.target_prompt_id !== "null") {
                 console.log(`⚖️ [Board of Directors] Master AI 提出修改 ${report.target_prompt_id}，正在交由 Groq 董事會審批...`);
                 
-                const auditorPrompt = `你是量化基金的「獨立風控董事會」。首席 AI 剛剛針對近期的虧損，提出了一份系統升級提案。
+                const auditorPrompt = `你是量化基金的「獨立風控董事會」。首席 AI 剛剛針對近期的虧損與獲利，提出了一份系統升級提案。
 【首席 AI 的敗因分析】: ${report.analysis}
 【它企圖修改的 Prompt ID】: ${report.target_prompt_id}
 【它寫出的新 Prompt 內容】: ${report.new_prompt_content}
@@ -224,9 +235,9 @@ const retrospectiveJob = {
                 if (isVetoed) {
                     promptUpdateLog = boardComment; 
                 } else {
-                    const isIllegalUpdate = (report.target_prompt_id === 'reviewer_bluechip' && !hasBluechipLoss);
+                    const isIllegalUpdate = (report.target_prompt_id === 'reviewer_bluechip' && !hasBluechipTrade);
                     if (isIllegalUpdate) {
-                        promptUpdateLog = `❌ 系統攔截：老幣無虧損，拒絕 Master AI 修改 reviewer_bluechip！`;
+                        promptUpdateLog = `❌ 系統攔截：老幣部門無交易紀錄，拒絕 Master AI 跨界修改 reviewer_bluechip！`;
                     } else {
                         const { error: pErr } = await supabase.from('bot_prompts').update({ content: report.new_prompt_content, updated_at: new Date() }).eq('prompt_id', report.target_prompt_id);
                         promptUpdateLog = !pErr ? `✅ 已自動更新 ${report.target_prompt_id} (${boardComment})` : `❌ 更新失敗: ${pErr.message}`;
@@ -242,7 +253,7 @@ const retrospectiveJob = {
 
             sendAdminAlert(`
 🌞 <b>[系統全自動進化完成]</b>
-📊 <b>敗因分析</b>: ${report.analysis}
+📊 <b>分析總結</b>: ${report.analysis}
 ⚖️ <b>董事會決議</b>: ${boardComment}
 ⚙️ <b>門檻修正</b>: ${paramUpdateLog}
 📝 <b>AI劇本進化</b>: ${promptUpdateLog}
