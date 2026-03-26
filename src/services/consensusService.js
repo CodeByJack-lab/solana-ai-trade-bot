@@ -184,6 +184,11 @@ const consensusService = {
 
             const pStrat = await this.getPrompt('bluechip_strategist', { 
                 token_symbol: marketData.symbol, 
+                current_price: marketData.currentPrice,
+                rsi_history: marketData.rsiHistory,
+                tech_indicators: marketData.techIndicators,
+                last_observed_time: marketData.lastTime,
+                last_ai_comment: marketData.lastComment,
                 latest_news_score: currentNewsScore 
             });
             

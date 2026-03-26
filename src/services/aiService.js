@@ -22,7 +22,7 @@ async function getDynamicPrompt(promptId, data) {
         }
         return content;
     } catch (err) {
-        console.warn(`⚠️ [AI Engine] 無法從 DB 獲取 ${promptId}，請檢查 Supabase。`);
+        console.warn(`⚠️ [AI Engine] 無法從 DB 獲取 ${promptId}，將使用本地備援配置。`);
         return ""; 
     }
 }
@@ -31,22 +31,21 @@ async function getDynamicPrompt(promptId, data) {
 // 🛡️ 監軍部門 (Reviewer) - 主副雙修 AI 分離
 // ==========================================
 async function reviewActivePosition(mintAddress, positionData) {
-    // 💡 1. 判斷兵種與時間
     const isBluechip = positionData.strategy_type === 'BLUECHIP_SWING';
     const promptId = isBluechip ? 'reviewer_bluechip' : 'reviewer_overseer';
     
-    // 🚀 核心升級：計算持倉時間 (分鐘)
-    // 💡 防呆機制：預設改為 0 (當作新買)，防止因為 RAM 甩漏而無辜被斬倉
     let holdingMinutes = 0; 
     if (positionData.created_at) {
         holdingMinutes = (Date.now() - new Date(positionData.created_at).getTime()) / 60000;
     }
 
-    // 🚀 獲取新聞指數
+    // 🚀 核心升級：穩健獲取大盤災難指數
     let currentNewsScore = 0;
     try {
         const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
-        if (config && config.latest_news_score) currentNewsScore = config.latest_news_score;
+        if (config && config.latest_news_score !== null) {
+            currentNewsScore = config.latest_news_score;
+        }
     } catch (e) {
         console.warn(`⚠️ [AI Engine] 無法獲取新聞指數，預設為 0`);
     }
@@ -58,19 +57,21 @@ async function reviewActivePosition(mintAddress, positionData) {
         latest_news_score: currentNewsScore
     });
 
+    // 🚀 強化：如果 DB 斷線，使用具備大盤防禦意識的 Hardcoded 備援 Prompt
     if (!promptText && isBluechip) {
         promptText = `你是一個專業的華爾街量化分析師，負責評估「老幣波段交易 (Bluechip Swing)」倉位。
 目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason} | 大盤災難指數：${currentNewsScore}/100
-請分析目前的技術指標是否已經破壞，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD/EXIT", "reason": "分析"}。`;
+【重要指令】若大盤指數 > 60，代表市場動盪，必須採取極度保守態度；若 > 70，請果斷斬倉避險。
+請分析目前的技術指標是否已經破壞，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD" 或 "EXIT", "reason": "限50字內分析"}。`;
     } else if (!promptText && !isBluechip) {
         promptText = `你是一個專業的 AI 監軍，負責評估 Meme 幣倉位。
 目前持倉：${positionData.token_symbol} | 盈虧：${positionData.pnlPct.toFixed(2)}% | 買入理由：${positionData.ai_reason} | 大盤災難指數：${currentNewsScore}/100
-請分析社群熱度與洗盤跡象，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD/EXIT", "reason": "分析"}。`;
+【重要指令】Meme 幣對大盤極度敏感。若大盤指數 > 50，代表資金正在撤退，請提高警覺；若 > 70 且處於虧損，請立刻果斷止損。
+請分析社群熱度與洗盤跡象，並給出 HOLD 或 EXIT 的決策。請回傳純 JSON 格式：{"decision": "HOLD" 或 "EXIT", "reason": "限50字內分析"}。`;
     }
 
-    // 🚀 將持倉時間告知 AI，並強調新幣保護原則
     const roleName = isBluechip ? "量化分析師" : "獨立監軍";
-    promptText += `\n\n【重要任務】\n當初買入這隻幣的理由是：「${positionData.ai_reason}」。\n這筆交易目前已持倉 ${holdingMinutes.toFixed(1)} 分鐘。\n請你作為${roleName}，嚴格審查目前市場情況是否已經偏離這個初衷。請給出你專屬的評語，**絕對不可**直接照抄買入理由！`;
+    promptText += `\n\n【重要任務】\n當初買入這隻幣的理由是：「${positionData.ai_reason}」。\n這筆交易目前已持倉 ${holdingMinutes.toFixed(1)} 分鐘。\n請你作為${roleName}，嚴格審查目前市場情況是否已經偏離這個初衷。請給出你專屬的評語，絕對不可直接照抄買入理由！`;
 
     let aiResult;
     let modelLabel = "";
@@ -99,29 +100,28 @@ async function reviewActivePosition(mintAddress, positionData) {
             }, { timeout: 6000 });
 
             const rawText = geminiRes.data.candidates[0].content.parts[0].text;
-            aiResult = JSON.parse(rawText);
+            const match = rawText.match(/\{[\s\S]*\}/);
+            aiResult = JSON.parse(match ? match[0] : rawText);
+            
             modelLabel = "Gemini-Lite";
             healthMonitor.setStatus('AI_Overseer', `🟡 備援運作中 (${isBluechip ? '老幣' : '新幣'})`);
 
         } catch (geminiErr) {
             healthMonitor.setStatus('AI_Overseer', `🔴 雙引擎全線失效: ${geminiErr.message}`);
             
-            // 🚀 新增：紀錄失敗時間，供外部 monitorService 判斷 5 分鐘後 Retry
             const tableName = positionData.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
             await supabase
                 .from(tableName)
                 .update({ 
                     last_review_comment: `⚠️ AI 離線，等待 5 分鐘後重試 (${new Date().toLocaleTimeString()})`,
-                    // 假設你 DB 有呢個欄位，或者我哋借用 last_review_comment 來標記
                 })
                 .eq('mint_address', mintAddress);
 
-            return { decision: "RETRY_LATER", reason: "AI 陣列暫時離線" }; // 🚀 傳回特定狀態
+            return { decision: "RETRY_LATER", reason: "AI 陣列暫時離線" }; 
         }
     }
 
     // 🚀 【終極防彈裝甲：10分鐘免死金牌】
-    // 如果 AI 決定要 EXIT，但持倉不足 10 分鐘，且利潤尚未跌穿 -10%，強制攔截並改為 HOLD！
     if (aiResult && aiResult.decision === 'EXIT') {
         const pnl = positionData.pnlPct;
         if (holdingMinutes < 10 && pnl > -10.0) {
@@ -131,7 +131,6 @@ async function reviewActivePosition(mintAddress, positionData) {
         }
     }
 
-    // 🚀 將 AI 評語更新回 Supabase
     if (aiResult && aiResult.reason) {
         try {
             const tableName = positionData.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
@@ -155,12 +154,24 @@ async function reviewActivePosition(mintAddress, positionData) {
 // ==========================================
 async function analyzeReentry(mintAddress, symbol, baselinePrice) {
     try {
-        const promptText = await getDynamicPrompt('reentry_analyst', {
+        // 🚀 核心升級：接回分析亦必須參考大盤分數
+        let currentNewsScore = 0;
+        try {
+            const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
+            if (config && config.latest_news_score !== null) currentNewsScore = config.latest_news_score;
+        } catch (e) {
+            console.warn(`⚠️ [AI Engine] 無法獲取新聞指數，預設為 0`);
+        }
+
+        let promptText = await getDynamicPrompt('reentry_analyst', {
             token_symbol: symbol,
-            baseline_price: baselinePrice
+            baseline_price: baselinePrice,
+            latest_news_score: currentNewsScore // 確保傳入分數
         });
 
-        if (!promptText) throw new Error("Prompt 獲取失敗");
+        if (!promptText) {
+            promptText = `你是橫盤吸籌分析師。\n目標：評估 ${symbol} 橫盤 30 分鐘後是否值得「吃回頭草」。\n基準價格: ${baselinePrice} SOL。\n當前大盤災難指數: ${currentNewsScore}/100。\n【指令】若大盤指數 > 50，代表市場資金正在離場，嚴禁接回橫盤死水，一律 SKIP。若大盤安全且流動性依然健康 (> $10,000)，代表莊家準備第二波，請回覆 BUY。\n請輸出嚴格 JSON: {"decision": "BUY" 或 "SKIP", "score": 整數, "reason": "限50字內"}`;
+        }
 
         const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${REENTRY_GEMINI_KEY}`, {
             contents: [{ role: "user", parts: [{ text: promptText }] }],
