@@ -7,7 +7,6 @@ let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;
 const { PublicKey } = require('@solana/web3.js');
 
-// 🚀 加入 handleIncomingFund, handleOutgoingFund
 const { runSellPipeline, executeBuy, handleIncomingFund, handleOutgoingFund } = require('./tradeService');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
@@ -18,7 +17,6 @@ const { retrospectiveJob } = require('../jobs/retrospectiveJob');
 const app = express();
 app.use(express.json());
 
-// 🚀 雙 Webhook 環境變數 (已對位)
 const HELIUS_API_KEY = process.env.HELIUS_API_KEY;           
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
 const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;       
@@ -32,7 +30,6 @@ const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
-// 🚀 致命錯誤修復：將 botWallet 變量提升到全域，確保 toggleHeliusWebhook 讀得到
 const botWallet = process.env.MY_WALLET_PUBLIC_KEY;
 
 let stats_totalWebhookSignals = 0;
@@ -64,8 +61,6 @@ async function toggleHeliusWebhook(enable = true) {
         } catch (err) {
             console.error('❌ [Webhook 1 Error] Raydium 更新失敗:', err.response?.data || err.message);
         }
-    } else {
-        console.warn('⚠️ [Webhook 1] 缺少 HELIUS_API_KEY 或 HELIUS_WEBHOOK_ID，跳過設定。');
     }
 
     if (HELIUS_API_KEY_2 && WEBHOOK_ID_2) {
@@ -73,19 +68,17 @@ async function toggleHeliusWebhook(enable = true) {
             const url2 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID_2}?api-key=${HELIUS_API_KEY_2}`;
             const payload2 = {
                 webhookURL: targetUrl,
-                // 🚀 優化 Webhook 2: 只抓 TOKEN_MINT 過濾雜訊
-                transactionTypes: ["TOKEN_MINT","CREATE_POOL"], 
+                // 🚀 使用最安全嘅設定，避免燒爆 Limit
+                transactionTypes: ["TOKEN_MINT", "CREATE_POOL"], 
                 accountAddresses: [PUMP_FUN_PROGRAM_ID],
                 webhookType: "enhanced",
                 txnStatus: "success" 
             };
             await axios.put(url2, payload2);
-            console.log('✅ [Webhook 2] Pump.fun 專線設定同步成功！');
+            console.log('✅ [Webhook 2] Pump.fun 專線設定同步成功 (安全模式)！');
         } catch (err) {
             console.error('❌ [Webhook 2 Error] Pump.fun 更新失敗:', err.response?.data || err.message);
         }
-    } else {
-        console.warn('⚠️ [Webhook 2] 缺少 HELIUS_API_KEY_2 或 HELIUS_WEBHOOK_ID_2，跳過設定。');
     }
 
     // --- 💰 Webhook 3: Wallet 會計專線 ---
@@ -94,7 +87,6 @@ async function toggleHeliusWebhook(enable = true) {
          const url3 = `https://api.helius.xyz/v0/webhooks/${WALLET_WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
            const payload3 = {
                 webhookURL: targetUrl,
-                // 🚀 修正 Webhook 3: 使用明確的交易類型避免 -32603 錯誤
                 transactionTypes: ["TRANSFER", "SWAP"], 
                 accountAddresses: [botWallet], 
                 webhookType: "enhanced",
@@ -105,8 +97,6 @@ async function toggleHeliusWebhook(enable = true) {
       } catch (err) {
           console.error('❌ [Webhook 3 Error] Wallet 監控更新失敗:', err.response?.data || err.message);
       }
-    } else {
-        console.warn('⚠️ [Webhook 3] 缺少 WALLET_WEBHOOK_ID，跳過會計監控設定。');
     }
 
     healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
@@ -118,11 +108,13 @@ async function toggleHeliusWebhook(enable = true) {
     }
 }
 
+// ==========================================
+// 🚀 Helius 專屬路由：處理會計部與雷達
+// ==========================================
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK'); // 🚀 優先回覆 Helius 避免 Timeout
 
     try {
-        // 1. 基礎檢查：系統有無行緊？
         const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
         if (!config || !config.is_running) return;
 
@@ -133,7 +125,7 @@ app.post('/webhook/helius', async (req, res) => {
 
         for (const event of events) {
             // ==========================================
-            // 💰 分流 A：會計部邏輯 (處理入金/出金)
+            // 💰 分流 A：會計部邏輯 (維持不變)
             // ==========================================
             const nativeTransfers = event.nativeTransfers || [];
             const isWalletAction = nativeTransfers.some(t => t.fromUserAccount === botWallet || t.toUserAccount === botWallet);
@@ -143,68 +135,64 @@ app.post('/webhook/helius', async (req, res) => {
                     const amount = t.amount / 1e9;
                     const txid = event.signature;
 
-                    // 📥 入金：射錢落 Bot 錢包
                     if (t.toUserAccount === botWallet && amount > 0) {
                         console.log(`💰 [Accounting] 偵測到入金: ${amount} SOL`);
                         await handleIncomingFund(t.fromUserAccount, amount, txid);
                     } 
-                    // 📤 出金：Bot 錢包射錢走 (過濾掉交易買幣)
                     else if (t.fromUserAccount === botWallet && amount > 0) {
-                        if (t.toUserAccount.length > 32) { // 簡單判定為普通錢包地址而非 Program
+                        if (t.toUserAccount.length > 32) { 
                             console.log(`💸 [Accounting] 偵測到出金: ${amount} SOL`);
                             await handleOutgoingFund(t.toUserAccount, amount, txid);
                         }
                     }
                 }
-                // 會計訊號處理完，跳過下面嘅買幣偵測
                 continue; 
             }
 
             // ==========================================
-            // 🔫 分流 B：強化版交易雷達 (Pump.fun & Raydium 偵測)
+            // 🔫 分流 B：終極版交易雷達 (Pump.fun 深層挖掘)
             // ==========================================
-            if (event.type === "TOKEN_MINT" || event.type === "CREATE_POOL" || event.type === "ADD_LIQUIDITY" || event.type === "PUMP_FUN_CREATE") {
-                
-                let mintAddress = null;
+            let newMemeAddress = null;
 
-                // 🚀 拆法 A：直接從 Token 轉帳紀錄搵 (Helius 標配)
-                if (event.tokenTransfers && event.tokenTransfers.length > 0) {
-                    mintAddress = event.tokenTransfers[0].mint;
-                }
+            // 🚀 智能過濾 1: 由 Token Transfers 入面搵 (一定要避開 SOL 同 System)
+            if (event.tokenTransfers && event.tokenTransfers.length > 0) {
+                const transfer = event.tokenTransfers.find(t => 
+                    t.mint !== SOL_MINT_ADDRESS && 
+                    t.mint !== SYSTEM_PROGRAM_ID && 
+                    t.mint.length > 32
+                );
+                if (transfer) newMemeAddress = transfer.mint;
+            }
 
-                // 🚀 拆法 B：如果 A 失敗，去 instructions 搵 (應對 Pump.fun 特殊封包)
-                if (!mintAddress && event.instructions) {
-                    for (const ix of event.instructions) {
-                        if ((ix.programId === PUMP_FUN_PROGRAM_ID || ix.programId === RAYDIUM_V4_PROGRAM_ID) && ix.accounts && ix.accounts.length > 0) {
-                            // 通常 instructions 嘅第一個 account 就係 mint
-                            mintAddress = ix.accounts[0]; 
-                            break;
+            // 🚀 智能過濾 2: 如果 Transfers 搵唔到，入 Instructions 逐個 Account 掃
+            if (!newMemeAddress && event.instructions) {
+                for (const ix of event.instructions) {
+                    if (ix.programId === PUMP_FUN_PROGRAM_ID || ix.programId === RAYDIUM_V4_PROGRAM_ID) {
+                        if (ix.accounts) {
+                            // 搵第一個唔係 SOL 嘅合理地址
+                            const potentialMint = ix.accounts.find(acc => 
+                                acc !== SOL_MINT_ADDRESS && 
+                                acc !== SYSTEM_PROGRAM_ID && 
+                                acc !== PUMP_FUN_PROGRAM_ID && 
+                                acc.length > 32
+                            );
+                            if (potentialMint) {
+                                newMemeAddress = potentialMint;
+                                break;
+                            }
                         }
                     }
                 }
-
-                // ✅ 成功抽到 Mint Address，掟入魚池！
-                if (mintAddress) {
-                    stats_pumpFunCreates++; 
-                    const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
-                        new_mint_address: mintAddress
-                    });
-                    if (isInserted) stats_addedToNursery++; 
-                } 
-                else {
-                    // 🚨 建築師 Debug 陷阱：如果 Helius 轉咗格式搞到我哋抽唔到
-                    if (stats_totalWebhookSignals === 1 || stats_totalWebhookSignals === 50) {
-                        console.log(`\n🔍 [Debug] 發現無法解析嘅 ${event.type}！Helius 傳來嘅 JSON 如下：`);
-                        console.log(JSON.stringify({
-                            description: event.description,
-                            type: event.type,
-                            tokenTransfers: event.tokenTransfers,
-                            instructions: event.instructions?.map(i => i.programId) 
-                        }, null, 2));
-                        console.log(`========================================\n`);
-                    }
-                }
             }
+
+            // ✅ 成功抽到，掟入魚池！
+            if (newMemeAddress) {
+                stats_pumpFunCreates++; 
+                const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
+                    new_mint_address: newMemeAddress
+                });
+                if (isInserted) stats_addedToNursery++; 
+            } 
         }
     } catch (err) {
         console.error('❌ [Webhook Error]', err.message);
@@ -219,7 +207,6 @@ app.get('/force-evolution', async (req, res) => {
     console.log('👑 [Admin] 管理員已手動強制喚醒 Master AI！');
     console.log('========================================\n');
 
-    // 1. 立即回覆，防止瀏覽器轉圈圈到超時
     res.status(200).send(`
         <div style="font-family: sans-serif; text-align: center; padding: 50px;">
             <h1 style="color: #4CAF50;">🚀 Master AI 已被強制喚醒！</h1>
@@ -230,7 +217,6 @@ app.get('/force-evolution', async (req, res) => {
         </div>
     `);
 
-    // 2. 異步執行進化邏輯
     try {
         const { retrospectiveJob } = require('../jobs/retrospectiveJob');
         await retrospectiveJob.runEvolutionWithRetry(1);
@@ -244,8 +230,8 @@ function startWebhookStatsMonitor() {
         const discarded = stats_totalWebhookSignals - stats_addedToNursery;
         console.log(`\n========================================`);
         console.log(`📡 [Webhook 戰況] 過去 5 分鐘雷達報告:`);
-        console.log(`   📥 總接收雜訊 : ${stats_totalWebhookSignals} 條`);
-        console.log(`   💊 包含發射幣 : ${stats_pumpFunCreates} 隻`);
+        console.log(`   📥 總接收訊號 : ${stats_totalWebhookSignals} 條`);
+        console.log(`   💊 初步過濾幣 : ${stats_pumpFunCreates} 隻`);
         console.log(`   🐟 成功入魚池 : ${stats_addedToNursery} 隻`);
         console.log(`   🗑️ 已拋棄雜訊 : ${discarded} 條`);
         console.log(`========================================\n`);
@@ -275,7 +261,6 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
             const strategy = secResult.isBlindSnipe ? 'MEME_BLIND' : 'MEME_SNIPE';
             const buyResult = await executeBuy(mintAddress, secResult.marketData.symbol, strategy, aiDecision.score, aiDecision.reason, config.trade_amount_sol);
             
-            // 🚀 耀眼的買入 Log
             if (buyResult !== false) {
                 console.log(`\n======================================================`);
                 console.log(`✅ 🟢 【買入指令已送出 - ${secResult.marketData.symbol}】 🟢 ✅`);
@@ -298,7 +283,6 @@ let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
     console.log('🐟 [Nursery Radar] 雙層過濾系統已啟動 (DB -> RAM -> Out)');
     
-    // 🚀 改為 3 秒一審，加快消化速度
     setInterval(async () => {
         if (isNurseryRunning) return;
         
@@ -442,7 +426,6 @@ function startWatchlistMonitor() {
                     
                     if (decisionObj.decision === 'BUY') {
                         const buyResult = await executeBuy(item.mint_address, item.token_symbol, 'MEME_REENTRY', 95, decisionObj.reason, config.trade_amount_sol);
-                        // 🚀 耀眼的接回 Log
                         if (buyResult !== false) {
                             console.log(`\n======================================================`);
                             console.log(`✅ 🟢 【接回成功 - ${item.token_symbol}】 🟢 ✅`);
@@ -554,18 +537,15 @@ function startPositionMonitor() {
                     action = 'SELL';
                     reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
                 } 
-                // 🚀 1. 翻倍回本機制：達 +100% 賣出一半
                 else if (!isHalfSold && highestPnlPct >= 100) {
                     action = 'SELL';
                     sellFraction = 0.5;
                     reason = `🚀 翻倍回本機制 (歷史最高達 +${highestPnlPct.toFixed(2)}%，賣出 50% 鎖定成本)`;
                 }
-                // 🚀 2. 尾倉登月止盈：已賣出一半後，給予 30% 的高位回撤空間
                 else if (isHalfSold && drawdownFromHigh <= -30) {
                     action = 'SELL';
                     reason = `💰 登月尾倉止盈 (翻倍後高位回撤 ${drawdownFromHigh.toFixed(2)}%，全數獲利了結)`;
                 }
-                // 🚀 3. 原本的利潤保護：未達 100% 之前，50% 且回撤 15% 即全數獲利了結
                 else if (!isHalfSold && highestPnlPct >= 50 && drawdownFromHigh <= -15) {
                     action = 'SELL';
                     reason = `💰 觸發無腦利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%，高位回撤: ${drawdownFromHigh.toFixed(2)}%)`;
@@ -602,7 +582,6 @@ function startPositionMonitor() {
                 if (action === 'SELL') {
                     const pnlIcon = pnlPct > 0 ? '🚀 止盈' : '🩸 止損';
                     
-                    // 🚀 整合原本的老幣邏輯
                     if (isBluechip && !isHalfSold && pnlPct > 0 && sellFraction === 1.0) {
                         sellFraction = 0.5;
                         reason = `[老幣分批止盈] ${reason}`;
