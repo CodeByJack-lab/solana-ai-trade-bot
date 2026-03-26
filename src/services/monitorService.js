@@ -69,7 +69,7 @@ async function toggleHeliusWebhook(enable = true) {
             const payload2 = {
                 webhookURL: targetUrl,
                 // 🚀 使用最安全嘅設定，避免燒爆 Limit
-                transactionTypes: ["TOKEN_MINT", "CREATE_POOL"], 
+                transactionTypes: ["TOKEN_MINT", "CREATE_POOL", "UNKNOWN"], 
                 accountAddresses: [PUMP_FUN_PROGRAM_ID],
                 webhookType: "enhanced",
                 txnStatus: "success" 
