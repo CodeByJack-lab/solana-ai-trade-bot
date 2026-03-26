@@ -40,6 +40,10 @@ function initStatKey(key) {
     }
 }
 
+const aiReviewCooldowns = new Map(); // 新增：AI 大腦專用冷卻計時器
+const ramSecondaryPool = new Map(); 
+let isAiReviewing = false;
+
 async function toggleHeliusWebhook(enable = true) {
     if (!enable) {
         console.log('🛑 [Helius] 系統關閉，保留 Helius Dashboard 現有設定，不作修改。');
@@ -100,8 +104,26 @@ app.post('/webhook/helius', async (req, res) => {
         const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
         if (!config || !config.is_running) return;
 
-        const events = req.body;
-        if (!Array.isArray(events)) return;
+        // 🚀 智能格式轉換：兼容 Helius (Array) 與 Alchemy (Object)
+        let events = [];
+        if (Array.isArray(req.body)) {
+            events = req.body; 
+        } else if (req.body && req.body.event && Array.isArray(req.body.event.activity)) {
+            // Alchemy 格式翻譯
+            const activities = req.body.event.activity;
+            const fakeHeliusEvent = {
+                type: 'ALCHEMY_TRANSFER',
+                signature: activities[0]?.hash || 'alchemy_tx',
+                nativeTransfers: activities.map(act => ({
+                    fromUserAccount: act.fromAddress,
+                    toUserAccount: act.toAddress,
+                    amount: parseFloat(act.value || 0) * 1e9 // 翻譯為 lamports
+                }))
+            };
+            events.push(fakeHeliusEvent);
+        } else {
+            return; // 格式不符，安靜拋棄
+        }
 
         for (const event of events) {
             // 🔍 1. 逆向追蹤：判定來源與 Type
@@ -132,7 +154,7 @@ app.post('/webhook/helius', async (req, res) => {
             if (isWalletAction) {
                 for (const t of nativeTransfers) {
                     const amount = t.amount / 1e9;
-                    const txid = event.signature;
+                    const txid = event.signature || 'alchemy_tx';
 
                     if (t.toUserAccount === botWallet && amount > 0) {
                         console.log(`💰 [Accounting] 偵測到入金: ${amount} SOL`);
@@ -242,7 +264,6 @@ function startWebhookStatsMonitor() {
                 totalAdded += s.added;
                 const discarded = s.received - s.added;
                 
-                // 印出每個來源及 Type 嘅詳細數據
                 console.log(`   🏷️ ${key}:`);
                 console.log(`      📥 接收: ${s.received} | 💊 抽幣: ${s.filtered} | 🐟 入池: ${s.added} | 🗑️ 拋棄: ${discarded}`);
             });
@@ -252,14 +273,9 @@ function startWebhookStatsMonitor() {
         }
         console.log(`========================================\n`);
 
-        // 清空紀錄，準備下一個 5 分鐘
         detailedStats = {}; 
     }, 5 * 60 * 1000); 
 }
-
-const aiReviewCooldowns = new Map(); // 新增：AI 大腦專用冷卻計時器
-const ramSecondaryPool = new Map(); 
-let isAiReviewing = false;          
 
 async function triggerBuyPipeline(mintAddress, secResult, config) {
     while (isAiReviewing) {
@@ -633,6 +649,9 @@ function startPositionMonitor() {
                             console.log(`📊 動作: ${pnlIcon} (${pnlPct.toFixed(2)}%)`);
                             console.log(`🤖 理由: ${reason}`);
                             console.log(`======================================================\n`);
+
+                            // 🚀 修復 Memory Leak：全倉賣出後，清除大腦冷卻計時器
+                            aiReviewCooldowns.delete(pos.mint_address);
 
                             const isFirstTimeMeme = !isBluechip && (!pos.strategy_type || !pos.strategy_type.includes('REENTRY'));
                             if (isFirstTimeMeme) {
