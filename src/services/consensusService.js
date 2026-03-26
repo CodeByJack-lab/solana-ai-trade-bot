@@ -115,16 +115,17 @@ const consensusService = {
         return content;
     },
 
-    async runMemeConsensus(mintAddress, marketData, options = { isReentry: false }) {
+    async runMemeConsensus(mintAddress, marketData, options = { isReentry: false, poolType: 'NURSERY' }) {
         return memeQueue.add(async () => {
-            console.log(`\n🏛️ [Meme 議事廳] 開始審核: ${marketData.symbol || mintAddress.substring(0,6)}`);
+            const hallName = options.poolType === 'TRENDING' ? '熱門動能 議事廳' : 'Meme 議事廳';
+            console.log(`\n🏛️ [${hallName}] 開始審核: ${marketData.symbol || mintAddress.substring(0,6)}`);
             
             let currentNewsScore = 0;
             try {
                 const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
                 currentNewsScore = config?.latest_news_score || 0;
             } catch (e) {
-                console.warn(`⚠️ [Meme 議事廳] 無法獲取大盤災難指數，預設為 0`);
+                console.warn(`⚠️ [${hallName}] 無法獲取大盤災難指數，預設為 0`);
             }
             
             const promptData = {
@@ -136,14 +137,15 @@ const consensusService = {
                 sell_txs: marketData.sells5m,
                 social_links: marketData.socials,
                 description: options.isReentry ? "【注意：橫盤30分鐘後接回】" : "無",
-                latest_news_score: currentNewsScore 
+                latest_news_score: currentNewsScore
             };
 
+            const promptPrefix = options.poolType === 'TRENDING' ? 'trending' : 'meme';
+
             const [pScout, pStrat, pAudit] = await Promise.all([
-                this.getPrompt('meme_scout', promptData),
-                this.getPrompt('meme_strategist', promptData),
-                // 🚀 核心改動：將 latest_news_score 傳遞給最後判官
-                this.getPrompt('meme_auditor', { 
+                this.getPrompt(`${promptPrefix}_scout`, promptData),
+                this.getPrompt(`${promptPrefix}_strategist`, promptData),
+                this.getPrompt(`${promptPrefix}_auditor`, { 
                     ...promptData, 
                     rug_score: 'N/A', 
                     top10_pct: 'N/A', 
@@ -163,7 +165,8 @@ const consensusService = {
             console.log(`⚡ 先鋒: ${scout.decision} | 🧠 軍師: ${strategist.decision} (${strategist.score || 'N/A'}分) | ⚖️ 判官: ${auditor.decision}`);
 
             if (auditor.decision === 'VETO') return { buy: false, reason: `⚖️ 判官否決: ${auditor.reason}` };
-            if (scout.decision === 'PASS' && strategist.decision === 'PASS') {
+            // 🚀 加入 EXECUTE_BUY 兼容
+            if (scout.decision === 'PASS' && (strategist.decision === 'PASS' || strategist.decision === 'EXECUTE_BUY')) {
                 return { buy: true, score: strategist.score || 80, reason: `⚡ ${scout.reason} | 🧠 ${strategist.reason}` };
             }
             return { buy: false, reason: "未達成共識" };
@@ -196,14 +199,12 @@ const consensusService = {
             
             console.log(`🧠 老幣軍師: ${strategist.decision} | 理由: ${strategist.reason}`);
             
-            // 🚀 修正後的精準決策邏輯
-            if (strategist.decision === 'PASS') {
+            // 🚀 核心修復：解放老幣策略！承認 EXECUTE_BUY 指令
+            if (strategist.decision === 'PASS' || strategist.decision === 'EXECUTE_BUY') {
                 return { buy: true, reason: `✅ 安全: ${strategist.reason}` };
             } else if (strategist.decision === 'ONHOLD') {
-                // 返回 buy: false，理由包含 ONHOLD，讓 Job 層更新 Database 評語
                 return { buy: false, reason: `⏳ ONHOLD: ${strategist.reason}` }; 
             } else {
-                // ABORT 或其他異常，均視為攔截
                 return { buy: false, reason: `🚨 攔截: ${strategist.reason}` };
             }
         });

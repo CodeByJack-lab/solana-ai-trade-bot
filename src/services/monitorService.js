@@ -34,11 +34,35 @@ const botWallet = process.env.MY_WALLET_PUBLIC_KEY;
 // 🚀 全新數據追蹤器：按來源及 Type 分類
 let detailedStats = {};
 
+// 🚀 本地防洪開關
+let isNurseryPoolFull = false; 
+
 function initStatKey(key) {
     if (!detailedStats[key]) {
         detailedStats[key] = { received: 0, filtered: 0, added: 0 };
     }
 }
+
+// 🚀 [新增] 定期檢查數據庫魚池容量，更新本地狀態
+async function refreshPoolStatus() {
+    try {
+        const { count, error } = await supabase
+            .from('nursery_pool')
+            .select('*', { count: 'exact', head: true });
+        
+            if (!error && count !== null) {
+            // 與 SQL Function 門檻一致，滿 250 隻即鎖死同步
+            isNurseryPoolFull = count >= 200; 
+            if (isNurseryPoolFull) {
+                healthMonitor.setStatus('Meme_Radar', '🟡 魚池已滿 (本地暫停同步)');
+            }
+        }
+    } catch (e) {
+        console.error("⚠️ 探測魚池狀態失敗:", e.message);
+    }
+}
+// 啟動 10 秒循環探針
+setInterval(refreshPoolStatus, 10000);
 
 const aiReviewCooldowns = new Map(); // 新增：AI 大腦專用冷卻計時器
 const ramSecondaryPool = new Map(); 
@@ -76,7 +100,7 @@ async function toggleHeliusWebhook(enable = true) {
             const url2 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID_2}?api-key=${HELIUS_API_KEY_2}`;
             const payload2 = {
                 webhookURL: targetUrl,
-                transactionTypes: ["TOKEN_MINT", "CREATE_POOL", "UNKNOWN"], 
+                transactionTypes: ["TOKEN_MINT", "CREATE_POOL"], 
                 accountAddresses: [PUMP_FUN_PROGRAM_ID],
                 webhookType: "enhanced",
                 txnStatus: "success" 
@@ -205,12 +229,22 @@ app.post('/webhook/helius', async (req, res) => {
 
             // ✅ 成功抽到，掟入魚池並記錄分類數據
             if (newMemeAddress) {
-                detailedStats[statKey].filtered++; 
+                detailedStats[statKey].filtered++;
+            
+                // 🚀 [核心修改] 斷路器邏輯：本地攔截
+                if (isNurseryPoolFull) {
+                    // 直接返回，不執行下方的 RPC，保護數據庫連線數
+                    return; 
+                }
                 const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
                     new_mint_address: newMemeAddress
                 });
                 if (isInserted) {
                     detailedStats[statKey].added++; 
+                } else {
+                    // 如果 RPC 返回 FALSE (代表剛好爆咗)，立刻更新本地狀態為 TRUE
+                    isNurseryPoolFull = true;
+                    detailedStats[statKey].dropped++;
                 }
             } 
         }
@@ -490,9 +524,23 @@ function startPositionMonitor() {
             const portfolio = getPortfolio();
             const positions = portfolio.positions;
             
+            // 🚀 Fix 3: 記憶體自動回收機制 (Memory Leak Protection)
             if (!positions || positions.length === 0) {
+                if (aiReviewCooldowns.size > 0) {
+                    console.log(`🧹 [Memory Clean] 檢測到全空倉，清空殘留的大腦冷卻記憶體 (${aiReviewCooldowns.size} 條)`);
+                    aiReviewCooldowns.clear();
+                }
                 healthMonitor.setStatus('AI_Overseer', '🟢 巡邏完畢 (無持倉)');
                 return;
+            }
+
+            // 找出已經不在 positions 裡面的孤兒 Keys 並刪除
+            const currentMints = new Set(positions.map(p => p.mint_address));
+            for (const mint of aiReviewCooldowns.keys()) {
+                if (!currentMints.has(mint)) {
+                    console.log(`🧹 [Memory Clean] 清除孤兒冷卻記憶體: ${mint.substring(0, 6)}`);
+                    aiReviewCooldowns.delete(mint);
+                }
             }
 
             const mints = positions.map(p => p.mint_address);
@@ -659,18 +707,28 @@ function startPositionMonitor() {
                             // 🚀 修復 Memory Leak：全倉賣出後，清除大腦冷卻計時器
                             aiReviewCooldowns.delete(pos.mint_address);
 
-                            const isFirstTimeMeme = !isBluechip && (!pos.strategy_type || !pos.strategy_type.includes('REENTRY'));
+                            // 🚀 嚴格限制：只有 MEME_SNIPE 或 MEME_BLIND 先可以跌入橫盤接回名單
+                            const isFirstTimeMeme = !isBluechip && 
+                                                    (pos.strategy_type && (pos.strategy_type.includes('MEME_SNIPE') || pos.strategy_type.includes('MEME_BLIND')));
+                            
+                            // 防止 TRENDING 被誤判
+                            const isTrending = pos.strategy_type && pos.strategy_type.includes('TRENDING');
+
                             if (isFirstTimeMeme) {
                                 if (pnlPct >= -20) {
-                                    await supabase.from('reentry_watchlist').insert([{
+                                    // 🚀 Phase 3 核心修復：使用 upsert 防止 UNIQUE Constraint 爆錯卡死迴圈
+                                    await supabase.from('reentry_watchlist').upsert([{
                                         mint_address: pos.mint_address, token_symbol: pos.token_symbol,
                                         sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
                                         consolidation_start_time: new Date().toISOString()
-                                    }]);
+                                    }], { onConflict: 'mint_address' });
                                     console.log(`📋 已將 ${pos.token_symbol} 加入橫盤觀察名單 (30分鐘後評估接回)`);
                                 } else {
                                     console.log(`💀 [Blacklist] ${pos.token_symbol} 虧損過大 (${pnlPct.toFixed(2)}%)，判處死刑，拒絕加入接回名單！`);
                                 }
+                            } else if (isTrending) {
+                                // 🚀 新增：Trending 幣專屬賣出 Log
+                                console.log(`🔥 [Trending] ${pos.token_symbol} (Top 50) 已完成歷史任務，功成身退，不作接回。`);
                             }
                         }
                     }

@@ -47,29 +47,40 @@ const janitorJob = {
             const sevenDaysAgoMs = Date.now() - (7 * 24 * 60 * 60 * 1000);
             const accountsToClose = [];
 
+            // 🚀 Phase 3 核心修復：N+1 查詢炸彈化解 (Batch Query)
+            const mints = emptyAccounts.map(acc => acc.account.data.parsed.info.mint);
+            let allTrades = [];
+            
+            // 將 Mints 分批 (每批 50 個)，防止 Supabase URL 超長
+            for (let i = 0; i < mints.length; i += 50) {
+                const chunk = mints.slice(i, i + 50);
+                const { data } = await supabase
+                    .from('trade_history_live')
+                    .select('token_mint, created_at')
+                    .in('token_mint', chunk);
+                if (data) allTrades = allTrades.concat(data);
+            }
+
+            // 建立 Hash Map 快速查找最後交易時間
+            const latestTradeMap = {};
+            for (const t of allTrades) {
+                const tradeTime = new Date(t.created_at).getTime();
+                if (!latestTradeMap[t.token_mint] || tradeTime > latestTradeMap[t.token_mint]) {
+                    latestTradeMap[t.token_mint] = tradeTime;
+                }
+            }
+
             for (const acc of emptyAccounts) {
                 const mint = acc.account.data.parsed.info.mint;
                 const ataPubkey = acc.pubkey;
 
-                // 從資料庫尋找這隻幣的「最後一次實盤交易紀錄」
-                const { data: recentTrade } = await supabase
-                    .from('trade_history_live')
-                    .select('created_at')
-                    .eq('token_mint', mint)
-                    .order('created_at', { ascending: false })
-                    .limit(1)
-                    .maybeSingle();
-
+                const lastTradeTime = latestTradeMap[mint];
                 let shouldClose = false;
-                if (!recentTrade) {
-                    // 如果 Database 無紀錄 (可能係不知名 Airdrop 垃圾，或者極早期手動買賣)，直接判死刑
-                    shouldClose = true;
-                } else {
-                    const lastTradeTime = new Date(recentTrade.created_at).getTime();
-                    if (lastTradeTime < sevenDaysAgoMs) {
-                        // 最後交易超過 7 日，無起色，關閉！
-                        shouldClose = true;
-                    }
+
+                if (!lastTradeTime) {
+                    shouldClose = true; // 如果 Database 無紀錄 (不知名垃圾幣)
+                } else if (lastTradeTime < sevenDaysAgoMs) {
+                    shouldClose = true; // 超過 7 日無起色
                 }
 
                 if (shouldClose) {
@@ -96,8 +107,8 @@ const janitorJob = {
                     transaction.add(
                         createCloseAccountInstruction(
                             new PublicKey(ataPubkey),
-                            wallet.publicKey, // 租金退回地址
-                            wallet.publicKey  // 權限擁有者
+                            wallet.publicKey, 
+                            wallet.publicKey  
                         )
                     );
                 }
@@ -130,7 +141,6 @@ const janitorJob = {
     },
 
     start() {
-        // 設定 Cron Job：每天凌晨 4 點執行 (避開 3 點 graveyardJob 同 0 點 AI 進化)
         cron.schedule('0 4 * * *', () => {
             this.cleanEmptyAccounts();
         });

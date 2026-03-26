@@ -1,7 +1,7 @@
 // src/services/liveTradeService.js
 const { Keypair, VersionedTransaction, Transaction, SystemProgram, PublicKey } = require('@solana/web3.js');
 const { connection } = require('../config/solana');
-const { supabase } = require('../config/supabase'); // 🚀 引入 Supabase 以讀取動態設定
+const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
 const path = require('path');
 const { healthMonitor } = require('./healthMonitor'); 
@@ -43,6 +43,26 @@ try {
     }
 } catch (err) {
     healthMonitor.setStatus('Live_Engine', `🔴 私鑰解析失敗`); 
+}
+
+// 🚀 核心修復：自定義 Jito 簽名輪詢機制 (15秒超時防卡死)
+async function pollSignatureStatus(signature, timeoutMs = 15000) {
+    const startTime = Date.now();
+    while (Date.now() - startTime < timeoutMs) {
+        try {
+            const { value: status } = await connection.getSignatureStatus(signature, { searchTransactionHistory: true });
+            if (status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
+                if (status.err) {
+                    throw new Error(`Transaction failed on-chain: ${JSON.stringify(status.err)}`);
+                }
+                return true; 
+            }
+        } catch (e) {
+            // 忽略查詢過程中的小 error，繼續 poll
+        }
+        await new Promise(r => setTimeout(r, 2000)); // 每 2 秒查一次
+    }
+    throw new Error('Jito Bundle 確認超時 (Transaction Dropped or Pending)');
 }
 
 async function getJupiterSwapTransaction(quoteResponse) {
@@ -99,8 +119,7 @@ async function executeLiveSwapUAT(quoteResponse, action) {
         console.log(`✅ [Pre-flight Success] 模擬通過，準備打包 Jito Bundle...`);
         healthMonitor.setStatus('Live_Engine', '🟢 送出 Jito Bundle 中...'); 
 
-        // 🚀 核心修正：從 Database 讀取動態小費
-        let dynamicTip = 100000; // 預設 0.0001 SOL
+        let dynamicTip = 100000; 
         try {
             const { data: config } = await supabase.from('system_config').select('jito_tip_lamports').eq('id', 1).single();
             if (config && config.jito_tip_lamports) {
@@ -118,7 +137,7 @@ async function executeLiveSwapUAT(quoteResponse, action) {
             SystemProgram.transfer({
                 fromPubkey: wallet.publicKey,
                 toPubkey: tipAccount,
-                lamports: dynamicTip, // 🚀 改為動態數值
+                lamports: dynamicTip, 
             })
         );
         tipTx.recentBlockhash = latestBlockHash.blockhash;
@@ -141,13 +160,10 @@ async function executeLiveSwapUAT(quoteResponse, action) {
 
         const txid = bs58.encode(transaction.signatures[0]);
         console.log(`🔗 追蹤連結: https://solscan.io/tx/${txid}`);
+        console.log(`⏳ 等待區塊鏈確認 (最大等候 15 秒)...`);
 
-        console.log(`⏳ 等待區塊鏈確認...`);
-        await connection.confirmTransaction({
-            blockhash: latestBlockHash.blockhash,
-            lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
-            signature: txid
-        });
+        // 🚀 核心修復：使用自定義 Polling 代替原生 confirmTransaction，防止線程假死
+        await pollSignatureStatus(txid, 15000); 
         
         console.log(`🎉 [Live Trade] ${action} 交易已在鏈上確認！`);
         healthMonitor.setStatus('Live_Engine', `🟢 交易確認成功`); 
@@ -156,8 +172,8 @@ async function executeLiveSwapUAT(quoteResponse, action) {
         return { success: true, txid: txid }; 
 
     } catch (err) {
-        console.error(`❌ [Live Execution] 發送或確認時發生錯誤:`, err.response?.data || err.message);
-        healthMonitor.setStatus('Live_Engine', '🔴 交易確認超時或失敗'); 
+        console.error(`❌ [Live Execution] 交易未完成 (已被 Jito 拋棄或超時):`, err.message);
+        healthMonitor.setStatus('Live_Engine', '🔴 交易確認超時/丟包'); 
         return { success: false, txid: null };
     }
 }

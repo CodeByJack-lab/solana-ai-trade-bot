@@ -11,7 +11,6 @@ const {
 const axios = require('axios');
 const path = require('path');
 
-// 🛠️ 修正 bs58 導入 (解決錢包初始化失敗的問題)
 let bs58 = require('bs58');
 if (bs58.default) {
     bs58 = bs58.default;
@@ -19,7 +18,6 @@ if (bs58.default) {
 
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-// 🔐 智能初始化錢包 (用於支付手動 Burn 的 Gas，並接收退回的租金)
 let wallet;
 try {
     const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
@@ -49,7 +47,6 @@ const graveyardJob = {
         console.log('\n🔥 [Graveyard] 劊子手巡邏中：正在搜尋符合火化條件的死幣...');
 
         try {
-            // 1. 搵出入獄超過 3 日嘅幣 (緩刑期滿)
             const threeDaysAgo = new Date(Date.now() - 3 * 24 * 60 * 60 * 1000).toISOString();
             const { data: deadTokens, error } = await supabase
                 .from('graveyard_pool')
@@ -65,7 +62,6 @@ const graveyardJob = {
             for (const token of deadTokens) {
                 console.log(`💀 [Graveyard] 正在核實 ${token.token_symbol} (${token.mint_address}) 的死刑...`);
 
-                // 2. 最後慈悲檢查：去 DexScreener 睇下係咪仲係死水 (< $500)
                 try {
                     const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${token.mint_address}`);
                     const pair = dexRes.data?.pairs?.find(p => p.chainId === 'solana');
@@ -80,58 +76,54 @@ const graveyardJob = {
                     console.warn(`⚠️ [Graveyard] 無法連接 DexScreener 驗屍，預設維持死刑判決。`);
                 }
 
-                // 3. 執行鏈上火化 (Burn & Close Account)
                 try {
                     const mintPubkey = new PublicKey(token.mint_address);
                     const ataAddress = await getAssociatedTokenAddress(mintPubkey, wallet.publicKey);
 
-                    // 獲取該帳戶的最新代幣餘額
-                    const balanceInfo = await connection.getTokenAccountBalance(ataAddress);
-                    const amountRaw = balanceInfo.value.amount;
+                    let amountRaw = "0";
+                    let ataExists = false;
 
-                    const transaction = new Transaction();
-
-                    // A. 如果餘額 > 0，先執行 Burn (銷毀)
-                    if (parseInt(amountRaw) > 0) {
-                        transaction.add(
-                            createBurnInstruction(
-                                ataAddress,
-                                mintPubkey,
-                                wallet.publicKey,
-                                amountRaw
-                            )
-                        );
+                    // 🚀 Phase 3 核心修復：防止因無帳戶導致卡死迴圈
+                    try {
+                        const balanceInfo = await connection.getTokenAccountBalance(ataAddress);
+                        amountRaw = balanceInfo.value.amount;
+                        ataExists = true;
+                    } catch (ataErr) {
+                        console.warn(`⚠️ [Graveyard] 找不到 ATA 帳戶 (${token.token_symbol})，跳過鏈上火化，直接從墓地除名。`);
                     }
 
-                    // B. 執行 Close Account (關閉帳戶並退回 0.002 SOL 租金)
-                    transaction.add(
-                        createCloseAccountInstruction(
-                            ataAddress,
-                            wallet.publicKey, // 租金退回給誰
-                            wallet.publicKey  // 權限持有者
-                        )
-                    );
+                    if (ataExists) {
+                        const transaction = new Transaction();
 
-                    // 🛠️ [修正] 加入區塊鏈必需嘅 Recent Blockhash 同 Fee Payer
-                    const latestBlockhash = await connection.getLatestBlockhash();
-                    transaction.recentBlockhash = latestBlockhash.blockhash;
-                    transaction.feePayer = wallet.publicKey;
+                        if (parseInt(amountRaw) > 0) {
+                            transaction.add(
+                                createBurnInstruction(ataAddress, mintPubkey, wallet.publicKey, amountRaw)
+                            );
+                        }
 
-                    // 送出交易
-                    const signature = await connection.sendTransaction(transaction, [wallet]);
-                    await connection.confirmTransaction({
-                        blockhash: latestBlockhash.blockhash,
-                        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-                        signature: signature
-                    });
+                        transaction.add(
+                            createCloseAccountInstruction(ataAddress, wallet.publicKey, wallet.publicKey)
+                        );
 
-                    console.log(`🔥 [Graveyard] 火化成功！${token.token_symbol} 已消滅，0.002 SOL 租金已回流主錢包。Tx: ${signature}`);
+                        const latestBlockhash = await connection.getLatestBlockhash();
+                        transaction.recentBlockhash = latestBlockhash.blockhash;
+                        transaction.feePayer = wallet.publicKey;
+
+                        const signature = await connection.sendTransaction(transaction, [wallet]);
+                        await connection.confirmTransaction({
+                            blockhash: latestBlockhash.blockhash,
+                            lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+                            signature: signature
+                        });
+
+                        console.log(`🔥 [Graveyard] 火化成功！${token.token_symbol} 已消滅，0.002 SOL 租金已回流。Tx: ${signature}`);
+                    }
                     
-                    // 4. 從數據庫刪除
+                    // 🚀 無論如何，確保在數據庫中刪除，防止死結
                     await supabase.from('graveyard_pool').delete().eq('id', token.id);
 
                 } catch (burnErr) {
-                    console.error(`❌ [Graveyard] 執行火化時失敗 (${token.token_symbol}):`, burnErr.message);
+                    console.error(`❌ [Graveyard] 執行火化時發生無法預期的錯誤 (${token.token_symbol}):`, burnErr.message);
                 }
             }
         } catch (err) {
@@ -140,11 +132,9 @@ const graveyardJob = {
     },
 
     start() {
-        // 設定 Cron Job：每晚凌晨 3 點執行一次
         cron.schedule('0 3 * * *', () => {
             this.incinerateOldTokens();
         });
-        
         console.log('🕒 [GraveyardJob] 火化排程已啟動 (每晚凌晨 3 點執行)');
     }
 };

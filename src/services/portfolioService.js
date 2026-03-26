@@ -36,8 +36,8 @@ let my_portfolio = {
     last_sync: null
 };
 
-// 儲存全域 max_positions
-let globalMaxPositions = 8; 
+// 🚀 三軍資金鎖設定 (2:4:4 比例)
+let globalMaxPositions = 10;
 
 async function updateSystemStatus(msg) {
     try {
@@ -101,7 +101,8 @@ async function initPortfolio() {
         my_portfolio.last_sync = new Date();
 
         healthMonitor.setStatus('Portfolio_Cache', '🟢 載入完成');
-        console.log(`📊 [Portfolio] 資金鎖設定完畢。總額度: ${globalMaxPositions} (新幣: ${getPositionLimits().maxMeme}, 老幣: ${getPositionLimits().maxBluechip})`);
+        const limits = getPositionLimits();
+        console.log(`📊 [Portfolio] 資金鎖設定完畢。總額度: ${globalMaxPositions} (老幣: ${limits.maxBluechip}, Trending: ${limits.maxTrending}, 新幣: ${limits.maxMeme})`);
         
         return my_portfolio;
     } catch (err) {
@@ -131,19 +132,33 @@ function getPortfolio() { return my_portfolio; }
 // 🛡️ V5.5 核心：資金與倉位絕對鎖 (The Money Gate)
 // ==========================================
 
+// ==========================================
+// 🛡️ V6.0 核心：三軍資金與倉位絕對鎖 (The Money Gate 2:4:4)
+// ==========================================
+
 function getPositionLimits() {
-    const maxMeme = Math.ceil(globalMaxPositions * 0.6); 
-    const maxBluechip = globalMaxPositions - maxMeme;
-    return { maxMeme, maxBluechip };
+    const maxBluechip = Math.floor(globalMaxPositions * 0.2); // 20%
+    const maxTrending = Math.floor(globalMaxPositions * 0.4); // 40%
+    const maxMeme = globalMaxPositions - maxBluechip - maxTrending; // 剩餘歸 Meme (約 40%)
+    return { maxMeme, maxTrending, maxBluechip };
 }
 
 function getMemeCount() {
+    // 🚀 只計算純 Meme 策略 (Snipe 或 Blind)
     return my_portfolio.positions.filter(p => 
-        p.strategy_type && p.strategy_type.includes('MEME')
+        p.strategy_type && (p.strategy_type.includes('MEME_SNIPE') || p.strategy_type.includes('MEME_BLIND'))
+    ).length;
+}
+
+function getTrendingCount() {
+    // 🚀 新增：只計算 Top 50 追擊策略
+    return my_portfolio.positions.filter(p => 
+        p.strategy_type && p.strategy_type.includes('TRENDING')
     ).length;
 }
 
 function getBlueChipCount() {
+    // 只計算老幣抄底策略
     return my_portfolio.positions.filter(p => 
         p.strategy_type && p.strategy_type.includes('BLUECHIP')
     ).length;
@@ -174,6 +189,11 @@ module.exports = {
     syncLiveBalanceToDB, 
     updateSystemStatus,
     getMemeCount,
+    getTrendingCount, // 🚀 新增導出
     getBlueChipCount,
-    getPositionLimits
+    getPositionLimits,
+    // 🛡️ 買入准入檢查 (供其他 Service 調用)
+    canBuyMeme: () => getMemeCount() < getPositionLimits().maxMeme,
+    canBuyTrending: () => getTrendingCount() < getPositionLimits().maxTrending,
+    canBuyBluechip: () => getBlueChipCount() < getPositionLimits().maxBluechip
 };

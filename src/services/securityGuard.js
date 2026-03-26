@@ -15,20 +15,9 @@ const securityGuard = {
         const target = `${name} ${symbol}`.toLowerCase();
         
         const badPatterns = [
-            /\.com/i,           
-            /\.io/i,
-            /\.org/i,
-            /\.xyz/i,
-            /t\.me\//i,         
-            /test\s*token/i,    
-            /testnet/i,
-            /presale/i,         
-            /airdrop/i,         
-            /claim/i,           
-            /free/i,
-            /scam/i,            
-            /fake/i,
-            /honeypot/i
+            /\.com/i, /\.io/i, /\.org/i, /\.xyz/i, /t\.me\//i,         
+            /test\s*token/i, /testnet/i, /presale/i, /airdrop/i,         
+            /claim/i, /free/i, /scam/i, /fake/i, /honeypot/i
         ];
 
         for (const pattern of badPatterns) {
@@ -39,7 +28,8 @@ const securityGuard = {
         return { isGarbage: false };
     },
 
-    async checkAll(mintAddress) {
+    // 🚀 核心升級：新增 poolType 參數 ('NURSERY' 或 'TRENDING')
+    async checkAll(mintAddress, poolType = 'NURSERY') {
         try {
             healthMonitor.setStatus('Security_Guard', '🟢 運作中');
 
@@ -50,11 +40,11 @@ const securityGuard = {
 
             await new Promise(r => setTimeout(r, 500));
 
-            // 🚀 [核心修正] 凡是進入 Security Guard 的全部都是 Webhook 抓來的新魚 (包含 Raydium 與 Pump.fun)
-            // 本質上全部都是 Meme，所以無條件讀取 ID 2 (Meme 專屬參數)，且免受大盤新聞干擾！
-            const targetParamId = 2; 
+            // 🚀 智能分流：決定讀取邊一套參數
+            // ID 2: Meme 盲狙專用 | ID 3: Trending 專用
+            const targetParamId = poolType === 'TRENDING' ? 3 : 2;
 
-            // 從資料庫讀取對應的動態參數 (ID 2)
+            // 從資料庫讀取對應的動態參數
             const { data: params, error: dbErr } = await supabase
                 .from('ai_strategy_params')
                 .select('*')
@@ -63,23 +53,17 @@ const securityGuard = {
             
             if (dbErr) throw new Error(`無法讀取參數 ID ${targetParamId}`);
 
-            // 🐶 Meme 專屬通道：直接用 ID 2 的參數，【無條件無視】新聞分數
-            let requiredLiq = params.min_liquidity || 5000;
-
             const limits = {
-                minLiq: requiredLiq,
-                minVol: params.min_vol_5m || 1000,
+                minLiq: params.min_liquidity || (poolType === 'TRENDING' ? 30000 : 5000),
+                minVol: params.min_vol_5m || (poolType === 'TRENDING' ? 10000 : 1000),
                 minRatio: params.min_liq_fdv_ratio || 0.05
             };
 
             let marketData = await this.fetchDexData(cleanMint);
-            let isBlindSnipe = false;
 
             if (!marketData) {
-                // 🚀 核心優化：直接攔截無 Dex 數據的垃圾幣，不再浪費 API 進行盲狙
-                // 理由：坐監 3 分鐘後 DexScreener 仍無數據，代表流動性為 0 或根本無人交易，絕對是死盤！
+                // 🚀 直接物理攔截無 Dex 數據的垃圾幣
                 return { isSafe: false, reason: '🗑️ 物理攔截: DexScreener 無報價 (死水/垃圾幣)' };
-            
             } else {
                 const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
                 if (garbageCheck.isGarbage) {
@@ -87,21 +71,19 @@ const securityGuard = {
                 }
 
                 if (marketData.liquidity < limits.minLiq) {
-                    // 🚀 動態緩刑機制：只要達到 AI 目標流動性的 80%，就可以入緩刑區！
+                    // Trending 幣不設緩刑，唔夠水就即刻死；Meme 幣保留緩刑
+                    if (poolType === 'TRENDING') {
+                        return { isSafe: false, reason: `📉 流動性未達熱門標準 ($${marketData.liquidity} < $${limits.minLiq})` };
+                    }
                     const purgatoryThreshold = limits.minLiq * 0.8;
-                    
                     if (marketData.liquidity >= purgatoryThreshold) {
-                        return { 
-                            isSafe: false, 
-                            isPurgatory: true, 
-                            reason: `⏳ 流動性緩刑 ($${marketData.liquidity} < $${limits.minLiq})` 
-                        };
+                        return { isSafe: false, isPurgatory: true, reason: `⏳ 流動性緩刑 ($${marketData.liquidity} < $${limits.minLiq})` };
                     }
                     return { isSafe: false, reason: `📉 流動性太窮 ($${marketData.liquidity} < $${limits.minLiq})` };
                 }
 
                 if (marketData.vol5m < limits.minVol) {
-                    return { isSafe: false, reason: `📉 5分量死水 ($${marketData.vol5m})` };
+                    return { isSafe: false, reason: `📉 5分量死水 ($${marketData.vol5m} < $${limits.minVol})` };
                 }
                 const currentRatio = marketData.fdv > 0 ? (marketData.liquidity / marketData.fdv) : 0;
                 if (currentRatio < limits.minRatio) {
@@ -114,7 +96,7 @@ const securityGuard = {
 
             return { 
                 isSafe: true, 
-                isBlindSnipe: isBlindSnipe,
+                isBlindSnipe: false, // 移除盲狙
                 marketData: marketData,
                 reason: '✅ 物理與合約防線全數通過'
             };
@@ -151,7 +133,7 @@ const securityGuard = {
 
             if (hasMintRisk) return { isSafe: false, reason: "🛑 未放棄 Mint 權限" };
             if (hasFreezeRisk) return { isSafe: false, reason: "🛑 未放棄 Freeze 權限" };
-            if (hasLPRisk) return { isSafe: false, reason: "🛑 LP 池未銷毀或未鎖定 (高危撤資)" };
+            if (hasLPRisk) return { isSafe: false, reason: "🛑 LP 池未鎖定 (高危撤資)" };
 
             return { isSafe: true };
         } catch (err) {
@@ -203,19 +185,6 @@ const securityGuard = {
             };
         } catch (err) {
             return null;
-        }
-    },
-
-    async checkBirdeyeExists(mintAddress) {
-        if (!BIRDEYE_API_KEY) return false;
-        try {
-            const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${mintAddress}`, {
-                headers: { 'X-API-KEY': BIRDEYE_API_KEY.replace(/['"]/g, '').trim(), 'x-chain': 'solana' },
-                timeout: 3000
-            });
-            return !!res.data?.data?.value; 
-        } catch (e) {
-            return false;
         }
     }
 };

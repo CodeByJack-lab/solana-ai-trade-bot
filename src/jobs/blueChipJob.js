@@ -154,6 +154,8 @@ const blueChipJob = {
                 const time_from = time_to - (30 * 15 * 60); 
 
                 for (const token of targetTokens) {
+                    console.log(`⏳ [Birdeye Safety] 為防 429 限流，冷卻 1.5 秒後分析下一隻...`);
+                    await new Promise(r => setTimeout(r, 1500));
                     let strategy = 'BLUECHIP_SWING';
                     let isDipConfirmed = false;
                     let marketData = {

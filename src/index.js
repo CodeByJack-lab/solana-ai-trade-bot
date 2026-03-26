@@ -10,7 +10,10 @@ const { retrospectiveJob } = require('./jobs/retrospectiveJob');
 const { healthMonitor } = require('./services/healthMonitor');             
 
 const { graveyardJob } = require('./jobs/graveyardJob');                   
-const { janitorJob } = require('./jobs/janitorJob');                       
+const { janitorJob } = require('./jobs/janitorJob');   
+
+const { trendingMonitorService } = require('./services/trendingMonitorService');
+const { trendingJob } = require('./jobs/trendingJob');
 
 async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
     try {
@@ -109,7 +112,9 @@ async function startApp() {
     macroMonitorService.start(); 
     blueChipJob.start();         
     retrospectiveJob.start();    
-    janitorJob.start();          
+    janitorJob.start();    
+    trendingMonitorService.start();
+    trendingJob.start();      
     
     if (graveyardJob && typeof graveyardJob.start === 'function') {
         graveyardJob.start();    
