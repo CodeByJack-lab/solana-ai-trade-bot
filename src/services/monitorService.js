@@ -31,9 +31,14 @@ const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
 const botWallet = process.env.MY_WALLET_PUBLIC_KEY;
 
-let stats_totalWebhookSignals = 0;
-let stats_pumpFunCreates = 0;
-let stats_addedToNursery = 0;
+// 🚀 全新數據追蹤器：按來源及 Type 分類
+let detailedStats = {};
+
+function initStatKey(key) {
+    if (!detailedStats[key]) {
+        detailedStats[key] = { received: 0, filtered: 0, added: 0 };
+    }
+}
 
 async function toggleHeliusWebhook(enable = true) {
     if (!enable) {
@@ -81,13 +86,12 @@ async function toggleHeliusWebhook(enable = true) {
 
     console.log('🔵 [Accounting] 會計部已移交 Alchemy 託管，程式內 Webhook 3 已解除掛載。');
 
-    // 🚀 已修正：刪除多餘且矛盾的 healthMonitor 狀態設定
     healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
     healthMonitor.setStatus('Wallet_Radar', '🔵 由 Alchemy 監控中');
 }
 
 // ==========================================
-// 🚀 Helius 專屬路由：處理會計部與雷達
+// 🚀 Helius / Alchemy 專屬路由：處理會計部與雷達
 // ==========================================
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK'); 
@@ -99,15 +103,32 @@ app.post('/webhook/helius', async (req, res) => {
         const events = req.body;
         if (!Array.isArray(events)) return;
 
-        stats_totalWebhookSignals += events.length; 
-
         for (const event of events) {
-            // ==========================================
-            // 💰 分流 A：會計部邏輯 (維持不變)
-            // ==========================================
+            // 🔍 1. 逆向追蹤：判定來源與 Type
+            const eventType = event.type || 'UNKNOWN_TYPE';
+            let sourceName = 'Other';
+
             const nativeTransfers = event.nativeTransfers || [];
             const isWalletAction = nativeTransfers.some(t => t.fromUserAccount === botWallet || t.toUserAccount === botWallet);
 
+            if (isWalletAction) {
+                sourceName = 'Wallet';
+            } else if (event.instructions) {
+                if (event.instructions.some(ix => ix.programId === PUMP_FUN_PROGRAM_ID)) {
+                    sourceName = 'PumpFun';
+                } else if (event.instructions.some(ix => ix.programId === RAYDIUM_V4_PROGRAM_ID)) {
+                    sourceName = 'Raydium';
+                }
+            }
+
+            // 📝 記錄接收數量
+            const statKey = `[${sourceName}] ${eventType}`;
+            initStatKey(statKey);
+            detailedStats[statKey].received++;
+
+            // ==========================================
+            // 💰 分流 A：會計部邏輯
+            // ==========================================
             if (isWalletAction) {
                 for (const t of nativeTransfers) {
                     const amount = t.amount / 1e9;
@@ -128,7 +149,7 @@ app.post('/webhook/helius', async (req, res) => {
             }
 
             // ==========================================
-            // 🔫 分流 B：終極版交易雷達 (Pump.fun 深層挖掘)
+            // 🔫 分流 B：終極版交易雷達 (Meme 挖掘)
             // ==========================================
             let newMemeAddress = null;
 
@@ -160,12 +181,15 @@ app.post('/webhook/helius', async (req, res) => {
                 }
             }
 
+            // ✅ 成功抽到，掟入魚池並記錄分類數據
             if (newMemeAddress) {
-                stats_pumpFunCreates++; 
+                detailedStats[statKey].filtered++; 
                 const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
                     new_mint_address: newMemeAddress
                 });
-                if (isInserted) stats_addedToNursery++; 
+                if (isInserted) {
+                    detailedStats[statKey].added++; 
+                }
             } 
         }
     } catch (err) {
@@ -201,18 +225,35 @@ app.get('/force-evolution', async (req, res) => {
 
 function startWebhookStatsMonitor() {
     setInterval(() => {
-        const discarded = stats_totalWebhookSignals - stats_addedToNursery;
         console.log(`\n========================================`);
-        console.log(`📡 [Webhook 戰況] 過去 5 分鐘雷達報告:`);
-        console.log(`   📥 總接收訊號 : ${stats_totalWebhookSignals} 條`);
-        console.log(`   💊 初步過濾幣 : ${stats_pumpFunCreates} 隻`);
-        console.log(`   🐟 成功入魚池 : ${stats_addedToNursery} 隻`);
-        console.log(`   🗑️ 已拋棄雜訊 : ${discarded} 條`);
-        console.log(`========================================\n`);
+        console.log(`📡 [Webhook 戰況] 過去 5 分鐘詳細雷達報告:`);
+
+        const keys = Object.keys(detailedStats);
         
-        stats_totalWebhookSignals = 0;
-        stats_pumpFunCreates = 0;
-        stats_addedToNursery = 0;
+        if (keys.length === 0) {
+            console.log(`   📭 暫無收到任何 Webhook 訊號`);
+        } else {
+            let totalReceived = 0, totalFiltered = 0, totalAdded = 0;
+            
+            keys.forEach(key => {
+                const s = detailedStats[key];
+                totalReceived += s.received;
+                totalFiltered += s.filtered;
+                totalAdded += s.added;
+                const discarded = s.received - s.added;
+                
+                // 印出每個來源及 Type 嘅詳細數據
+                console.log(`   🏷️ ${key}:`);
+                console.log(`      📥 接收: ${s.received} | 💊 抽幣: ${s.filtered} | 🐟 入池: ${s.added} | 🗑️ 拋棄: ${discarded}`);
+            });
+            
+            console.log(`   -------------------------------------`);
+            console.log(`   📊 總計 -> 📥: ${totalReceived} | 💊: ${totalFiltered} | 🐟: ${totalAdded}`);
+        }
+        console.log(`========================================\n`);
+
+        // 清空紀錄，準備下一個 5 分鐘
+        detailedStats = {}; 
     }, 5 * 60 * 1000); 
 }
 
@@ -525,27 +566,16 @@ function startPositionMonitor() {
                     reason = `💰 觸發無腦利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%，高位回撤: ${drawdownFromHigh.toFixed(2)}%)`;
                 } 
                 else {
-                    // ==========================================
-                    // 🧠 AI 大腦冷卻機制 (Brain Cooldown)
-                    // ==========================================
                     const lastComment = pos.last_review_comment || "";
                     const lastUpdate = new Date(pos.updated_at || pos.created_at).getTime();
                     const minsSinceLastReview = (Date.now() - lastUpdate) / 60000;
 
-                    // 1. 如果上次 AI 炒車 (API 離線/Rate Limit)，等 5 分鐘再試
                     if (lastComment.includes('AI 離線') || lastComment.includes('RETRY_LATER')) {
-                        if (minsSinceLastReview < 5) {
-                            continue; // 靜默跳過，唔印 Log 阻住個畫面
-                        }
-                    } 
-                    // 2. 🚀 新增：正常情況下，AI 大腦每 5 分鐘先會望一次個盤！
-                    else {
-                        if (minsSinceLastReview < 5) {
-                            continue; // 物理防線安全，AI 審查未夠鐘，繼續安靜地 Hold
-                        }
+                        if (minsSinceLastReview < 5) continue; 
+                    } else {
+                        if (minsSinceLastReview < 5) continue; 
                     }
 
-                    // 3. 夠鐘！叫醒 AI 審查
                     console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
                     const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
                     
@@ -609,7 +639,7 @@ function startPositionMonitor() {
             console.error(`❌ [Position Monitor] 監控迴圈異常:`, err.message);
             healthMonitor.setStatus('AI_Overseer', `🔴 監控異常: ${err.message}`);
         }
-    }, 15000); // 🚀 救命修改：將 120000 (2分鐘) 改為 15000 (15秒)，極速止損！
+    }, 15000); 
 }
 
 function startCommandListener() {
