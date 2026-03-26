@@ -257,6 +257,7 @@ function startWebhookStatsMonitor() {
     }, 5 * 60 * 1000); 
 }
 
+const aiReviewCooldowns = new Map(); // 新增：AI 大腦專用冷卻計時器
 const ramSecondaryPool = new Map(); 
 let isAiReviewing = false;          
 
@@ -566,30 +567,45 @@ function startPositionMonitor() {
                     reason = `💰 觸發無腦利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%，高位回撤: ${drawdownFromHigh.toFixed(2)}%)`;
                 } 
                 else {
-                    const lastComment = pos.last_review_comment || "";
-                    const lastUpdate = new Date(pos.updated_at || pos.created_at).getTime();
-                    const minsSinceLastReview = (Date.now() - lastUpdate) / 60000;
+                    // ==========================================
+                    // 🧠 AI 大腦冷卻機制 (RAM-based Cooldown)
+                    // ==========================================
+                    const nowMs = Date.now();
+                    const lastReviewMs = aiReviewCooldowns.get(pos.mint_address) || 0;
+                    const minsSinceLastReview = (nowMs - lastReviewMs) / 60000;
 
-                    if (lastComment.includes('AI 離線') || lastComment.includes('RETRY_LATER')) {
-                        if (minsSinceLastReview < 5) continue; 
-                    } else {
-                        if (minsSinceLastReview < 5) continue; 
-                    }
-
-                    console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
-                    const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
-                    
-                    if (reviewResult.decision === 'RETRY_LATER') {
+                    // 1. 如果距離上次審查不足 5 分鐘，安靜地跳過
+                    if (minsSinceLastReview < 5) {
                         continue; 
                     }
 
-                    action = reviewResult.decision;
-                    reason = `AI 指示: ${reviewResult.reason}`;
+                    // 2. 夠 5 分鐘！更新計時器，並叫醒 AI 審查
+                    aiReviewCooldowns.set(pos.mint_address, nowMs);
+
+                    console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
                     
-                    if (action === 'EXIT') action = 'SELL';
-                    
-                    if (action === 'HOLD') {
-                        console.log(`🛡️ [AI 決策] ${pos.token_symbol} 繼續持有。理由: ${reviewResult.reason}\n`);
+                    try {
+                        const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
+                        
+                        if (reviewResult.decision === 'RETRY_LATER') {
+                            // 如果 AI 炒車，將冷卻時間回撥少少 (例如等 2 分鐘就再試，唔洗等足 5 分鐘)
+                            aiReviewCooldowns.set(pos.mint_address, nowMs - (3 * 60 * 1000));
+                            continue; 
+                        }
+
+                        action = reviewResult.decision;
+                        reason = `AI 指示: ${reviewResult.reason}`;
+                        
+                        if (action === 'EXIT') action = 'SELL';
+                        
+                        if (action === 'HOLD') {
+                            console.log(`🛡️ [AI 決策] ${pos.token_symbol} 繼續持有。理由: ${reviewResult.reason}\n`);
+                        }
+                    } catch (aiErr) {
+                        console.error(`❌ [AI Reviewer] 發生錯誤:`, aiErr.message);
+                        // 出錯時提早 1 分鐘重試
+                        aiReviewCooldowns.set(pos.mint_address, nowMs - (4 * 60 * 1000));
+                        continue;
                     }
                 }
 
