@@ -1,4 +1,4 @@
-// src/index.js - V6.0 實盤防彈版
+// src/index.js - V7.0 Protocol-level Diagnosis
 const { supabase } = require('./config/supabase'); 
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
 const { startMarketMonitor } = require('./services/monitorService'); 
@@ -52,7 +52,7 @@ async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
 
 async function startApp() {
     console.log("======================================================");
-    console.log("🚀 SOL_Trade V6.0 實盤防彈版啟動...");
+    console.log("🚀 SOL_Trade V7.0 協議級防彈版啟動...");
     console.log("======================================================");
 
     let isFirstLoad = true; 
@@ -64,11 +64,10 @@ async function startApp() {
             async (payload) => {
                 const newData = payload.new;
                 
-                // 🚀 FIX: 當偵測到模式 (PAPER/LIVE) 發生切換時，強制清洗並重新載入整個 Portfolio 記憶體！
                 if (global.tradeMode !== newData.trade_mode) {
                     console.log(`\n🔄 [系統指令] 偵測到交易模式切換 (${global.tradeMode} ➡️ ${newData.trade_mode})`);
                     console.log(`🧹 正在清洗大腦記憶體，重新載入 ${newData.trade_mode} 專屬數據庫...`);
-                    await initPortfolio(); // 強制重刷
+                    await initPortfolio(); 
                 }
 
                 const portfolio = getPortfolio();
@@ -113,9 +112,13 @@ async function startApp() {
     blueChipJob.start();         
     retrospectiveJob.start();    
     janitorJob.start();    
-    trendingMonitorService.start();
-    trendingJob.start();      
     
+    if (trendingMonitorService && typeof trendingMonitorService.start === 'function') {
+        trendingMonitorService.start();
+    }
+    if (trendingJob && typeof trendingJob.start === 'function') {
+        trendingJob.start();      
+    }
     if (graveyardJob && typeof graveyardJob.start === 'function') {
         graveyardJob.start();    
     }

@@ -43,6 +43,14 @@ function initStatKey(key) {
     }
 }
 
+// 🚀 V7.0 升級：嚴格 Base58 洗白，防 400 Bad Request
+function sanitizeAddress(address) {
+    if (!address) return null;
+    const clean = address.toString().trim().replace(/[\n\r\t\s]/g, '');
+    if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(clean)) return null;
+    return clean;
+}
+
 // 🚀 [新增] 定期檢查數據庫魚池容量，更新本地狀態
 async function refreshPoolStatus() {
     try {
@@ -65,7 +73,8 @@ async function refreshPoolStatus() {
 setInterval(refreshPoolStatus, 10000);
 
 const aiReviewCooldowns = new Map(); // 新增：AI 大腦專用冷卻計時器
-const ramSecondaryPool = new Map(); 
+// 🚀 V7.0 升級：404 緩刑防頂死 Queue 嘅 15秒冷卻
+const nurseryScanCooldown = new Map(); 
 let isAiReviewing = false;
 
 async function toggleHeliusWebhook(enable = true) {
@@ -205,7 +214,8 @@ app.post('/webhook/helius', async (req, res) => {
                     t.mint !== SYSTEM_PROGRAM_ID && 
                     t.mint.length > 32
                 );
-                if (transfer) newMemeAddress = transfer.mint;
+                // 🚀 洗白地址
+                if (transfer) newMemeAddress = sanitizeAddress(transfer.mint);
             }
 
             if (!newMemeAddress && event.instructions) {
@@ -218,8 +228,9 @@ app.post('/webhook/helius', async (req, res) => {
                                 acc !== PUMP_FUN_PROGRAM_ID && 
                                 acc.length > 32
                             );
+                            // 🚀 洗白地址
                             if (potentialMint) {
-                                newMemeAddress = potentialMint;
+                                newMemeAddress = sanitizeAddress(potentialMint);
                                 break;
                             }
                         }
@@ -347,7 +358,7 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
 
 let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
-    console.log('🐟 [Nursery Radar] 雙層過濾系統已啟動 (DB -> RAM -> Out)');
+    console.log('🐟 [Nursery Radar] 全 DB 依賴過濾系統已啟動 (404 緩刑防頂死支援)');
     
     setInterval(async () => {
         if (isNurseryRunning) return;
@@ -366,74 +377,57 @@ function startDatabaseNurseryMonitor() {
                 isNurseryRunning = false; return;
             }
 
-            const now = Date.now();
-            for (const [mint, data] of ramSecondaryPool.entries()) {
-                if (now >= data.nextProcessTime) {
-                    const { securityGuard } = require('./securityGuard');
-                    const secResult = await securityGuard.checkAll(mint);
+            // 🚀 V7.0 核心：一次性拉取頭 20 隻最舊嘅幣，防止同一隻 404 幣不斷頂死條隊
+            const { data: tokens } = await supabase.from('nursery_pool').select('*').order('created_at', { ascending: true }).limit(20);
 
-                    if (secResult.isSafe) {
-                        console.log(`\n======================================================`);
-                        console.log(`🎣 [RAM Nursery] 緩刑出獄: ${mint.substring(0,6)}`);
-                        console.log(`🛡️ [Security] 物理與合約防線通關！準備交由 AI 審查...`);
-                        console.log(`======================================================\n`);
-                        await triggerBuyPipeline(mint, secResult, config);
-                        ramSecondaryPool.delete(mint);
-                    } else {
-                        const reason = secResult.reason || '';
-                        if (!reason.includes('查無報價') && !reason.includes('死水') && !reason.includes('流動性太窮')) {
-                            console.log(`🛡️ [Security] RAM二次攔截 ${mint.substring(0,6)}: ${reason}`);
-                        }
-                        data.failCount++;
-                        if (data.failCount >= 3) {
-                            ramSecondaryPool.delete(mint);
+            if (tokens && tokens.length > 0) {
+                let processed = false;
+                for (const token of tokens) {
+                    const mintAddress = token.mint_address;
+                    
+                    // 🚀 15 秒冷卻：防止 404 幣被無限狂 Scan，保護 Dexscreener 頻率
+                    const lastChecked = nurseryScanCooldown.get(mintAddress) || 0;
+                    if (Date.now() - lastChecked < 15000) continue; 
+
+                    nurseryScanCooldown.set(mintAddress, Date.now());
+                    const ageMins = (Date.now() - new Date(token.created_at).getTime()) / 60000;
+
+                    if (ageMins > config.max_age_mins) {
+                        await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
+                        continue;
+                    } 
+                    
+                    if (ageMins >= config.min_age_mins) {
+                        
+                        const { securityGuard } = require('./securityGuard');
+                        const secResult = await securityGuard.checkAll(mintAddress);
+
+                        if (secResult.isSafe) {
+                            // 確定安全，可以買，正式由池內刪除
+                            await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
+                            console.log(`\n======================================================`);
+                            console.log(`🎣 [Nursery] 撈出熟魚: ${mintAddress.substring(0,6)} (已坐監 ${ageMins.toFixed(1)} 分鐘)`);
+                            console.log(`🛡️ [Security] 物理與合約防線通關！準備交由 AI 審查...`);
+                            console.log(`======================================================\n`);
+                            await triggerBuyPipeline(mintAddress, secResult, config);
                         } else {
-                            data.nextProcessTime = Date.now() + (15 * 60 * 1000);
+                            // 🚀 V7.0 緩刑處理：如果係 404/流動性少少唔夠，但年紀未夠 5 分鐘，留喺池度！
+                            if (secResult.isPurgatory && ageMins < 5) {
+                                console.log(`⏳ [Nursery] ${mintAddress.substring(0,6)} Indexer 未準備好或流動性不足，留池等待 (年齡: ${ageMins.toFixed(1)}m)`);
+                            } else {
+                                // 垃圾幣或者超過 5 分鐘都救唔返，徹底 Delete！
+                                const reason = secResult.reason || '';
+                                if (!reason.includes('查無報價') && !reason.includes('死水') && !reason.includes('流動性太窮') && !reason.includes('等待廣播中')) {
+                                    console.log(`🛡️ [Security] 攔截並移除 ${mintAddress.substring(0,6)}: ${reason}`);
+                                }
+                                await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
+                            }
                         }
+                        processed = true;
+                        break; // 每次迴圈只真正打一次 API，保護 Rate Limit
                     }
                 }
-            }
-
-            const { data: oldestToken } = await supabase
-                .from('nursery_pool')
-                .select('*')
-                .order('created_at', { ascending: true })
-                .limit(1)
-                .maybeSingle();
-
-            if (oldestToken) {
-                const mintAddress = oldestToken.mint_address;
-                const ageMins = (Date.now() - new Date(oldestToken.created_at).getTime()) / 60000;
-
-                if (ageMins > config.max_age_mins) {
-                    await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
-                } else if (ageMins >= config.min_age_mins) {
-                    
-                    const { securityGuard } = require('./securityGuard');
-                    const secResult = await securityGuard.checkAll(mintAddress);
-
-                    await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
-
-                    if (secResult.isSafe) {
-                        console.log(`\n======================================================`);
-                        console.log(`🎣 [Nursery] 撈出熟魚: ${mintAddress.substring(0,6)} (已坐監 ${config.min_age_mins} 分鐘)`);
-                        console.log(`🛡️ [Security] 物理與合約防線通關！準備交由 AI 審查...`);
-                        console.log(`======================================================\n`);
-                        await triggerBuyPipeline(mintAddress, secResult, config);
-                    } else {
-                        const reason = secResult.reason || '';
-                        if (!reason.includes('查無報價') && !reason.includes('死水') && !reason.includes('流動性太窮')) {
-                            console.log(`🛡️ [Security] 攔截 ${mintAddress.substring(0,6)}: ${reason}`);
-                        }
-
-                        if (secResult.isPurgatory) {
-                            ramSecondaryPool.set(mintAddress, {
-                                failCount: 1, 
-                                nextProcessTime: Date.now() + (10 * 60 * 1000)
-                            });
-                        }
-                    }
-                } else {
+                if (!processed) {
                     healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
                 }
             } else {
@@ -524,7 +518,6 @@ function startPositionMonitor() {
             const portfolio = getPortfolio();
             const positions = portfolio.positions;
             
-            // 🚀 Fix 3: 記憶體自動回收機制 (Memory Leak Protection)
             if (!positions || positions.length === 0) {
                 if (aiReviewCooldowns.size > 0) {
                     console.log(`🧹 [Memory Clean] 檢測到全空倉，清空殘留的大腦冷卻記憶體 (${aiReviewCooldowns.size} 條)`);
@@ -534,7 +527,6 @@ function startPositionMonitor() {
                 return;
             }
 
-            // 找出已經不在 positions 裡面的孤兒 Keys 並刪除
             const currentMints = new Set(positions.map(p => p.mint_address));
             for (const mint of aiReviewCooldowns.keys()) {
                 if (!currentMints.has(mint)) {
@@ -613,7 +605,6 @@ function startPositionMonitor() {
                 let reason = '';
                 let sellFraction = 1.0; 
 
-                // 🚀 核心升級：老幣專屬保本防護線 (Meme 幣不受影響)
                 if (isBluechip && highestPnlPct >= 5.0 && pnlPct <= 0.5) {
                     action = 'SELL';
                     reason = `🛡️ [老幣保本機制] 利潤曾達 +${highestPnlPct.toFixed(2)}% 現回落至成本線，強制結利`;
@@ -637,19 +628,14 @@ function startPositionMonitor() {
                     reason = `💰 觸發無腦利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%，高位回撤: ${drawdownFromHigh.toFixed(2)}%)`;
                 } 
                 else {
-                    // ==========================================
-                    // 🧠 AI 大腦冷卻機制 (RAM-based Cooldown)
-                    // ==========================================
                     const nowMs = Date.now();
                     const lastReviewMs = aiReviewCooldowns.get(pos.mint_address) || 0;
                     const minsSinceLastReview = (nowMs - lastReviewMs) / 60000;
 
-                    // 1. 如果距離上次審查不足 5 分鐘，安靜地跳過
                     if (minsSinceLastReview < 5) {
                         continue; 
                     }
 
-                    // 2. 夠 5 分鐘！更新計時器，並叫醒 AI 審查
                     aiReviewCooldowns.set(pos.mint_address, nowMs);
 
                     console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
@@ -658,7 +644,6 @@ function startPositionMonitor() {
                         const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
                         
                         if (reviewResult.decision === 'RETRY_LATER') {
-                            // 如果 AI 炒車，將冷卻時間回撥少少 (例如等 2 分鐘就再試，唔洗等足 5 分鐘)
                             aiReviewCooldowns.set(pos.mint_address, nowMs - (3 * 60 * 1000));
                             continue; 
                         }
@@ -673,7 +658,6 @@ function startPositionMonitor() {
                         }
                     } catch (aiErr) {
                         console.error(`❌ [AI Reviewer] 發生錯誤:`, aiErr.message);
-                        // 出錯時提早 1 分鐘重試
                         aiReviewCooldowns.set(pos.mint_address, nowMs - (4 * 60 * 1000));
                         continue;
                     }
@@ -704,30 +688,32 @@ function startPositionMonitor() {
                             console.log(`🤖 理由: ${reason}`);
                             console.log(`======================================================\n`);
 
-                            // 🚀 修復 Memory Leak：全倉賣出後，清除大腦冷卻計時器
                             aiReviewCooldowns.delete(pos.mint_address);
 
-                            // 🚀 嚴格限制：只有 MEME_SNIPE 或 MEME_BLIND 先可以跌入橫盤接回名單
                             const isFirstTimeMeme = !isBluechip && 
                                                     (pos.strategy_type && (pos.strategy_type.includes('MEME_SNIPE') || pos.strategy_type.includes('MEME_BLIND')));
                             
-                            // 防止 TRENDING 被誤判
                             const isTrending = pos.strategy_type && pos.strategy_type.includes('TRENDING');
 
                             if (isFirstTimeMeme) {
                                 if (pnlPct >= -20) {
-                                    // 🚀 Phase 3 核心修復：使用 upsert 防止 UNIQUE Constraint 爆錯卡死迴圈
-                                    await supabase.from('reentry_watchlist').upsert([{
-                                        mint_address: pos.mint_address, token_symbol: pos.token_symbol,
-                                        sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
-                                        consolidation_start_time: new Date().toISOString()
-                                    }], { onConflict: 'mint_address' });
-                                    console.log(`📋 已將 ${pos.token_symbol} 加入橫盤觀察名單 (30分鐘後評估接回)`);
+                                    // 🚀 V7.0 核心修復：防止分拆砸盤無限重置 Re-entry 的 Baseline Price 同計時器
+                                    const { data: existingWatch } = await supabase.from('reentry_watchlist').select('id').eq('mint_address', pos.mint_address).maybeSingle();
+                                    
+                                    if (!existingWatch) {
+                                        await supabase.from('reentry_watchlist').insert([{
+                                            mint_address: pos.mint_address, token_symbol: pos.token_symbol,
+                                            sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
+                                            consolidation_start_time: new Date().toISOString()
+                                        }]);
+                                        console.log(`📋 已將 ${pos.token_symbol} 加入橫盤觀察名單 (30分鐘後評估接回)`);
+                                    } else {
+                                        console.log(`📋 ${pos.token_symbol} 已在觀察名單中，跳過覆蓋以保留初始計時。`);
+                                    }
                                 } else {
                                     console.log(`💀 [Blacklist] ${pos.token_symbol} 虧損過大 (${pnlPct.toFixed(2)}%)，判處死刑，拒絕加入接回名單！`);
                                 }
                             } else if (isTrending) {
-                                // 🚀 新增：Trending 幣專屬賣出 Log
                                 console.log(`🔥 [Trending] ${pos.token_symbol} (Top 50) 已完成歷史任務，功成身退，不作接回。`);
                             }
                         }

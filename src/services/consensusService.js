@@ -164,9 +164,14 @@ const consensusService = {
 
             console.log(`⚡ 先鋒: ${scout.decision} | 🧠 軍師: ${strategist.decision} (${strategist.score || 'N/A'}分) | ⚖️ 判官: ${auditor.decision}`);
 
-            if (auditor.decision === 'VETO') return { buy: false, reason: `⚖️ 判官否決: ${auditor.reason}` };
-            // 🚀 加入 EXECUTE_BUY 兼容
-            if (scout.decision === 'PASS' && (strategist.decision === 'PASS' || strategist.decision === 'EXECUTE_BUY')) {
+            // 🚀 核心字串洗白：防止 " EXECUTE_BUY" 空格或換行報錯
+            const cleanScout = (scout.decision || '').trim().toUpperCase();
+            const cleanStrat = (strategist.decision || '').trim().toUpperCase();
+            const cleanAudit = (auditor.decision || '').trim().toUpperCase();
+
+            if (cleanAudit === 'VETO' || cleanAudit.includes('VETO')) return { buy: false, reason: `⚖️ 判官否決: ${auditor.reason}` };
+
+            if (cleanScout.includes('PASS') && (cleanStrat.includes('PASS') || cleanStrat.includes('EXECUTE_BUY') || cleanStrat === 'BUY')) {
                 return { buy: true, score: strategist.score || 80, reason: `⚡ ${scout.reason} | 🧠 ${strategist.reason}` };
             }
             return { buy: false, reason: "未達成共識" };
@@ -199,10 +204,12 @@ const consensusService = {
             
             console.log(`🧠 老幣軍師: ${strategist.decision} | 理由: ${strategist.reason}`);
             
-            // 🚀 核心修復：解放老幣策略！承認 EXECUTE_BUY 指令
-            if (strategist.decision === 'PASS' || strategist.decision === 'EXECUTE_BUY') {
+            // 🚀 核心字串洗白：完美對接 AI 指令，無視多餘空格
+            const cleanDecision = (strategist.decision || '').trim().toUpperCase();
+
+            if (cleanDecision.includes('PASS') || cleanDecision.includes('EXECUTE_BUY') || cleanDecision === 'BUY') {
                 return { buy: true, reason: `✅ 安全: ${strategist.reason}` };
-            } else if (strategist.decision === 'ONHOLD') {
+            } else if (cleanDecision.includes('ONHOLD')) {
                 return { buy: false, reason: `⏳ ONHOLD: ${strategist.reason}` }; 
             } else {
                 return { buy: false, reason: `🚨 攔截: ${strategist.reason}` };
