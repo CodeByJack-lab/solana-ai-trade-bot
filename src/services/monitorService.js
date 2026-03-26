@@ -21,7 +21,6 @@ const HELIUS_API_KEY = process.env.HELIUS_API_KEY;
 const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
 const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;       
 const WEBHOOK_ID_2 = process.env.HELIUS_WEBHOOK_ID_2;
-const WALLET_WEBHOOK_ID = process.env.HELIUS_WALLET_WEBHOOK_ID;
 
 const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
 
@@ -68,7 +67,6 @@ async function toggleHeliusWebhook(enable = true) {
             const url2 = `https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID_2}?api-key=${HELIUS_API_KEY_2}`;
             const payload2 = {
                 webhookURL: targetUrl,
-                // 🚀 使用最安全嘅設定，避免燒爆 Limit
                 transactionTypes: ["TOKEN_MINT", "CREATE_POOL", "UNKNOWN"], 
                 accountAddresses: [PUMP_FUN_PROGRAM_ID],
                 webhookType: "enhanced",
@@ -81,38 +79,18 @@ async function toggleHeliusWebhook(enable = true) {
         }
     }
 
-    // --- 💰 Webhook 3: Wallet 會計專線 ---
-    if (HELIUS_API_KEY && WALLET_WEBHOOK_ID && botWallet) {
-        try {
-         const url3 = `https://api.helius.xyz/v0/webhooks/${WALLET_WEBHOOK_ID}?api-key=${HELIUS_API_KEY}`;
-           const payload3 = {
-                webhookURL: targetUrl,
-                transactionTypes: ["TRANSFER", "SWAP"], 
-                accountAddresses: [botWallet], 
-                webhookType: "enhanced",
-                txnStatus: "success"
-          };
-          await axios.put(url3, payload3);
-          console.log('✅ [Webhook 3] Wallet 會計專線同步成功！');
-      } catch (err) {
-          console.error('❌ [Webhook 3 Error] Wallet 監控更新失敗:', err.response?.data || err.message);
-      }
-    }
+    console.log('🔵 [Accounting] 會計部已移交 Alchemy 託管，程式內 Webhook 3 已解除掛載。');
 
+    // 🚀 已修正：刪除多餘且矛盾的 healthMonitor 狀態設定
     healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
-    
-    if (WALLET_WEBHOOK_ID) {
-        healthMonitor.setStatus('Wallet_Radar', '🟢 資金監控中 (入金/出金)...');
-    } else {
-        healthMonitor.setStatus('Wallet_Radar', '⚪ 未啟動');
-    }
+    healthMonitor.setStatus('Wallet_Radar', '🔵 由 Alchemy 監控中');
 }
 
 // ==========================================
 // 🚀 Helius 專屬路由：處理會計部與雷達
 // ==========================================
 app.post('/webhook/helius', async (req, res) => {
-    res.status(200).send('OK'); // 🚀 優先回覆 Helius 避免 Timeout
+    res.status(200).send('OK'); 
 
     try {
         const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -154,7 +132,6 @@ app.post('/webhook/helius', async (req, res) => {
             // ==========================================
             let newMemeAddress = null;
 
-            // 🚀 智能過濾 1: 由 Token Transfers 入面搵 (一定要避開 SOL 同 System)
             if (event.tokenTransfers && event.tokenTransfers.length > 0) {
                 const transfer = event.tokenTransfers.find(t => 
                     t.mint !== SOL_MINT_ADDRESS && 
@@ -164,12 +141,10 @@ app.post('/webhook/helius', async (req, res) => {
                 if (transfer) newMemeAddress = transfer.mint;
             }
 
-            // 🚀 智能過濾 2: 如果 Transfers 搵唔到，入 Instructions 逐個 Account 掃
             if (!newMemeAddress && event.instructions) {
                 for (const ix of event.instructions) {
                     if (ix.programId === PUMP_FUN_PROGRAM_ID || ix.programId === RAYDIUM_V4_PROGRAM_ID) {
                         if (ix.accounts) {
-                            // 搵第一個唔係 SOL 嘅合理地址
                             const potentialMint = ix.accounts.find(acc => 
                                 acc !== SOL_MINT_ADDRESS && 
                                 acc !== SYSTEM_PROGRAM_ID && 
@@ -185,7 +160,6 @@ app.post('/webhook/helius', async (req, res) => {
                 }
             }
 
-            // ✅ 成功抽到，掟入魚池！
             if (newMemeAddress) {
                 stats_pumpFunCreates++; 
                 const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
@@ -447,7 +421,7 @@ function startWatchlistMonitor() {
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] 智能雙引擎 (Jup V3/Dex) 批次持倉監控啟動 (2分鐘循環防限流)...');
+    console.log('👁️ [Radar] 智能雙引擎 (Jup V3/Dex) 批次持倉監控啟動 (15秒特種防禦)...');
     
     setInterval(async () => {
         try {
@@ -551,17 +525,27 @@ function startPositionMonitor() {
                     reason = `💰 觸發無腦利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%，高位回撤: ${drawdownFromHigh.toFixed(2)}%)`;
                 } 
                 else {
+                    // ==========================================
+                    // 🧠 AI 大腦冷卻機制 (Brain Cooldown)
+                    // ==========================================
                     const lastComment = pos.last_review_comment || "";
+                    const lastUpdate = new Date(pos.updated_at || pos.created_at).getTime();
+                    const minsSinceLastReview = (Date.now() - lastUpdate) / 60000;
+
+                    // 1. 如果上次 AI 炒車 (API 離線/Rate Limit)，等 5 分鐘再試
                     if (lastComment.includes('AI 離線') || lastComment.includes('RETRY_LATER')) {
-                        const lastUpdate = new Date(pos.updated_at || pos.created_at).getTime();
-                        const minsSinceFail = (Date.now() - lastUpdate) / 60000;
-                        
-                        if (minsSinceFail < 5) {
-                            console.log(`⏳ [Retry Delay] ${pos.token_symbol} 上次審查失敗，${(5 - minsSinceFail).toFixed(1)} 分鐘後再試。`);
-                            continue; 
+                        if (minsSinceLastReview < 5) {
+                            continue; // 靜默跳過，唔印 Log 阻住個畫面
+                        }
+                    } 
+                    // 2. 🚀 新增：正常情況下，AI 大腦每 5 分鐘先會望一次個盤！
+                    else {
+                        if (minsSinceLastReview < 5) {
+                            continue; // 物理防線安全，AI 審查未夠鐘，繼續安靜地 Hold
                         }
                     }
 
+                    // 3. 夠鐘！叫醒 AI 審查
                     console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
                     const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
                     
@@ -625,7 +609,7 @@ function startPositionMonitor() {
             console.error(`❌ [Position Monitor] 監控迴圈異常:`, err.message);
             healthMonitor.setStatus('AI_Overseer', `🔴 監控異常: ${err.message}`);
         }
-    }, 120000); 
+    }, 15000); // 🚀 救命修改：將 120000 (2分鐘) 改為 15000 (15秒)，極速止損！
 }
 
 function startCommandListener() {
