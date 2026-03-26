@@ -100,11 +100,12 @@ const retrospectiveJob = {
                 .replace('{{loss_trades_data}}', JSON.stringify(tradeDataToAI, null, 2))
                 .replace('{{current_disaster_score}}', config?.latest_news_score || 0);
                 
-            promptText += `\n\n【重要系統設定說明】\n系統目前有兩套獨立參數：\n`;
-            promptText += `ID 1 (老幣專用): min_liquidity=${param1?.min_liquidity}, min_vol_5m=${param1?.min_vol_5m}, bluechip_max_rsi=${param1?.bluechip_max_rsi}, bluechip_min_drop_pct=${param1?.bluechip_min_drop_pct}\n`;
-            promptText += `ID 2 (Meme專用): min_liquidity=${param2?.min_liquidity}, min_vol_5m=${param2?.min_vol_5m}\n`;
-            promptText += `\n【輸出要求升級】\n你的 \`recommended_params\` 必須包含 \`bluechip\` 和 \`meme\` 兩個子物件，例如：\n`;
-            promptText += `"recommended_params": { "bluechip": { "min_liquidity": 20000, "bluechip_max_rsi": 40 }, "meme": { "min_liquidity": 6000 } }`;
+                promptText += `\n\n【重要系統設定說明】\n系統目前有兩套獨立參數：\n`;
+                promptText += `ID 1 (老幣專用): min_liquidity=${param1?.min_liquidity}, min_vol_5m=${param1?.min_vol_5m}, bluechip_max_rsi=${param1?.bluechip_max_rsi}, bluechip_min_drop_pct=${param1?.bluechip_min_drop_pct}\n`;
+                promptText += `ID 2 (Meme專用): min_liquidity=${param2?.min_liquidity}, min_vol_5m=${param2?.min_vol_5m}\n`;
+                promptText += `\n【資金配置說明 (參考用)】\nMeme幣單筆: ${config?.trade_amount_sol || 0.1} SOL | 老幣單筆: ${config?.bluechip_trade_amount_sol || 0.1} SOL\n`;
+                promptText += `\n【輸出要求升級】\n你的 \`recommended_params\` 必須包含 \`bluechip\` 和 \`meme\` 兩個子物件，例如：\n`;
+                promptText += `"recommended_params": { "bluechip": { "min_liquidity": 20000, "bluechip_max_rsi": 40 }, "meme": { "min_liquidity": 6000 } }`;
 
             const { data: currentPrompts } = await supabase.from('bot_prompts').select('*');
             if (currentPrompts) {

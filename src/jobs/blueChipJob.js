@@ -86,6 +86,12 @@ const blueChipJob = {
                 console.log(`\n💎 [Bluechip Radar] 每10分鐘例行報告: 目前雷達正鎖定 ${pool.length} 隻老幣進行靜默掃描...`);
             }
 
+            // 🚀 核心變數：大盤分數、錢包餘額與老幣專屬資金
+            const currentNewsScore = config.latest_news_score || 0;
+            const currentWalletBalance = parseFloat(config.live_wallet_balance) || 0;
+            // 兼容防呆：如果資料庫未更新 bluechip_trade_amount_sol，則跌回使用 trade_amount_sol
+            const baseBluechipAmount = parseFloat(config.bluechip_trade_amount_sol) || parseFloat(config.trade_amount_sol) || 0.1; 
+
             try {
                 // 1. DexScreener 初步篩選
                 let dexPairs = [];
@@ -108,7 +114,6 @@ const blueChipJob = {
                     await new Promise(r => setTimeout(r, 500)); 
                 }
 
-                // 🚀 修復：強行 parseFloat 轉換字串為數字，消滅幽靈 Bug
                 const { data: params } = await supabase.from('ai_strategy_params').select('*').eq('id', 1).single();
                 const bluechipLimits = {
                     maxRSI: parseFloat(params?.bluechip_max_rsi) || 40,
@@ -127,8 +132,11 @@ const blueChipJob = {
                     
                     if (vol24h < bluechipLimits.minVolUsd) continue;
                     
-                    if (h1Change <= -(targetDrop / 2) || h24Change <= -targetDrop) {
-                        targetTokens.push(token);
+                    // 🚀 觸發「閃崩特權」條件：1小時跌幅 > 8%
+                    const isFlashCrash = h1Change <= -8.0;
+
+                    if (isFlashCrash || h1Change <= -(targetDrop / 2) || h24Change <= -targetDrop) {
+                        targetTokens.push({ ...token, isFlashCrash, pair }); // 儲存閃崩狀態
                     }
                 }
 
@@ -164,7 +172,7 @@ const blueChipJob = {
                         marketData.lastTime = new Date(memory.last_observed_at).toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
                     }
 
-                    // 🛡️ [防線一]: Birdeye 深度技術分析 (🚀 方案 B：全權交畀 AI)
+                    // 🛡️ [防線一]: Birdeye 深度技術分析
                     let layer1Success = false;
                     try {
                         const birdeyeRes = await axios.get(`https://public-api.birdeye.so/defi/ohlcv?address=${token.mint_address}&type=15m&time_from=${time_from}&time_to=${time_to}`, {
@@ -176,6 +184,7 @@ const blueChipJob = {
                         if (items.length >= 30) {
                             layer1Success = true;
                             const closes = items.map(k => parseFloat(k.o));
+                            const volumes = items.map(k => parseFloat(k.v)); // 取出成交量
                             marketData.currentPrice = closes[closes.length - 1];
 
                             const rsiHist = getRSIHistory(closes);
@@ -186,27 +195,38 @@ const blueChipJob = {
 
                             marketData.rsiHistory = `[${rsiHist.map(r => r.toFixed(1)).join(', ')}]`;
                             
-                            // 🚀 核心優化：只要求超賣 + 勾頭，放寬布林帶硬限制
+                            // 🚀 核心優化：成交量背離分析
+                            // 取過去19根K線的平均成交量 (排除最後一根)
+                            const avgVol = volumes.slice(-20, -1).reduce((a, b) => a + b, 0) / 19;
+                            const currentVol = volumes[volumes.length - 1];
+                            const volRatio = avgVol > 0 ? (currentVol / avgVol) : 1;
+
                             const isOversold = prevRsi <= bluechipLimits.maxRSI;
                             const isRsiHook = currentRsi > prevRsi;
-                            
-                            isDipConfirmed = isOversold && isRsiHook;
+                            const isVolumeHealthy = volRatio < 3.0; // 拋壓若大於平均 3 倍，視為機構砸盤，攔截
 
-                            if (isDipConfirmed) {
-                                // 將布林帶狀態化為文字，交畀 AI 判斷，而唔係寫死 IF-ELSE
+                            // ⚡ 閃崩左側特權 vs 常規右側抄底
+                            if (token.isFlashCrash && isVolumeHealthy) {
+                                isDipConfirmed = true;
+                                strategy = 'BLUECHIP_FLASH_CRASH';
+                                marketData.techIndicators = `閃崩特權啟動: 1h跌幅>8%, 量能比:${volRatio.toFixed(1)}`;
+                                console.log(`🎯 [Level 1 Birdeye] ${token.token_symbol} 觸發【閃崩抄底】(1h跌幅>8%)，呼叫 AI 大腦！`);
+                            } else if (isOversold && isRsiHook && isVolumeHealthy) {
+                                isDipConfirmed = true;
                                 const bbStatus = (bb && marketData.currentPrice <= bb.lower) 
                                     ? '已跌穿布林下軌 (極度恐慌)' 
                                     : (bb ? `高於布林下軌 ${((marketData.currentPrice - bb.lower)/bb.lower*100).toFixed(1)}%` : '無布林帶數據');
                                 
-                                marketData.techIndicators = `MACD Hist: ${macdData?.hist?.toFixed(6)}, 狀態: ${bbStatus}`;
-                                
+                                marketData.techIndicators = `MACD Hist: ${macdData?.hist?.toFixed(6)}, 狀態: ${bbStatus}, 量能比:${volRatio.toFixed(1)}`;
                                 console.log(`🎯 [Level 1 Birdeye] ${token.token_symbol} 觸發【右側抄底】(RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})，呼叫 AI 大腦！`);
                             } else {
-                                // 清晰列出被雷達攔截嘅真正原因
-                                if (!isOversold) {
-                                     console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達 RSI 超賣門檻 (前RSI: ${prevRsi.toFixed(1)} > 門檻 ${bluechipLimits.maxRSI})`);
-                                } else if (!isRsiHook) {
-                                     console.log(`⏸️ [Bluechip] ${token.token_symbol} RSI 達標但未見勾頭反彈，防接飛刀 (RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})`);
+                                // 列出精準的雷達攔截原因
+                                if (!isVolumeHealthy) {
+                                    console.log(`⏸️ [Bluechip] ${token.token_symbol} 成交量異常放大 (${volRatio.toFixed(1)}x)，防範機構砸盤`);
+                                } else if (!isOversold && !token.isFlashCrash) {
+                                    console.log(`⏸️ [Bluechip] ${token.token_symbol} 未達 RSI 超賣門檻 (前RSI: ${prevRsi.toFixed(1)} > 門檻 ${bluechipLimits.maxRSI})`);
+                                } else if (!isRsiHook && !token.isFlashCrash) {
+                                    console.log(`⏸️ [Bluechip] ${token.token_symbol} RSI 達標但未見勾頭反彈，防接飛刀 (RSI: ${prevRsi.toFixed(1)} -> ${currentRsi.toFixed(1)})`);
                                 }
                             }
                         }
@@ -217,7 +237,7 @@ const blueChipJob = {
                     // 🛡️ [防線二]: CoinGecko / DexScreener 降級備援分析
                     if (!layer1Success) {
                         console.log(`📡 [Level 2] 啟動 CoinGecko / DexScreener 備援分析 ${token.token_symbol}...`);
-                        const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === token.mint_address);
+                        const pair = token.pair; // 使用前面存的 pair
                         
                         let cgPrice = null;
                         try {
@@ -267,7 +287,25 @@ const blueChipJob = {
                         const decisionObj = await consensusService.runBluechipConsensus(token.mint_address, marketData);
 
                         if (decisionObj.buy) {
-                            await executeBuy(token.mint_address, token.token_symbol, strategy, 100, decisionObj.reason, config.trade_amount_sol);
+                            // 🚀 核心升級：動態資金分配邏輯
+                            let finalAmount = baseBluechipAmount;
+                            
+                            // A. 避險減倉 (新聞指數 > 60)
+                            if (currentNewsScore > 60) {
+                                finalAmount *= 0.5;
+                                console.log(`🛡️ [Macro Risk] 大盤不穩 (得分:${currentNewsScore})，老幣倉位自動減半至 ${finalAmount.toFixed(3)} SOL`);
+                            }
+                            
+                            // B. 極限加碼 (RSI < 20 且 餘額 >= 1.0 SOL)
+                            const currentRsiMatch = marketData.rsiHistory.match(/[\d.]+(?=\])/);
+                            const currentRsiValue = currentRsiMatch ? parseFloat(currentRsiMatch[0]) : 50;
+                            
+                            if (currentRsiValue < 20 && currentWalletBalance >= 1.0) {
+                                finalAmount *= 1.5;
+                                console.log(`🔥 [Extreme Deep] RSI 極度超賣 (${currentRsiValue.toFixed(1)}) 且餘額安全，觸發 1.5x 加碼至 ${finalAmount.toFixed(3)} SOL`);
+                            }
+
+                            await executeBuy(token.mint_address, token.token_symbol, strategy, 100, decisionObj.reason, finalAmount);
                             await supabase.from('bluechip_pool').update({ last_ai_comment: null, last_observed_at: null }).eq('mint_address', token.mint_address);
                         } else {
                             console.log(`🧠 [Bluechip AI] ${token.token_symbol} 抄底被否決: ${decisionObj.reason}`);
@@ -301,7 +339,7 @@ const blueChipJob = {
 
     start() {
         cron.schedule('*/5 * * * *', () => { this.runRoutine(); });
-        console.log(`📡 [Bluechip] 老幣抄底雷達已啟動 (右側動能解鎖版)`);
+        console.log(`📡 [Bluechip] 老幣抄底雷達已啟動 (閃崩/量價過濾版)`);
     }
 };
 

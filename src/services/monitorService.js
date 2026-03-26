@@ -565,6 +565,12 @@ function startPositionMonitor() {
                 let reason = '';
                 let sellFraction = 1.0; 
 
+                // 🚀 核心升級：老幣專屬保本防護線 (Meme 幣不受影響)
+                if (isBluechip && highestPnlPct >= 5.0 && pnlPct <= 0.5) {
+                    action = 'SELL';
+                    reason = `🛡️ [老幣保本機制] 利潤曾達 +${highestPnlPct.toFixed(2)}% 現回落至成本線，強制結利`;
+                }
+
                 if (pnlPct <= STOP_LOSS_PCT) {
                     action = 'SELL';
                     reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
