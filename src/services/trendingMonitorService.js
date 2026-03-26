@@ -8,7 +8,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override
 
 const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
 
-const trendingMonitoService = {
+const trendingMonitorService = {
     async scanTrending() {
         console.log(`\n🔥 [Trending Radar] 啟動全網 Top 50 金狗掃描...`);
         healthMonitor.setStatus('Trending_Radar', '🟢 掃描中...');
@@ -106,4 +106,4 @@ const trendingMonitoService = {
     }
 };
 
-module.exports = { trendingMonitoService };
+module.exports = { trendingMonitorService };
