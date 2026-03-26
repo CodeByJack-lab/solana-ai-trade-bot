@@ -76,24 +76,10 @@ const securityGuard = {
             let isBlindSnipe = false;
 
             if (!marketData) {
-                const existsOnBirdeye = await this.checkBirdeyeExists(cleanMint);
-                if (existsOnBirdeye) {
-                    console.log(`🎯 [Security] 觸發 0 秒盲狙模式！跳過算術題交由 AI 處理。`);
-                    isBlindSnipe = true;
-                    marketData = {
-                        liquidity: "未知 (0秒盲狙，無池數據)", 
-                        fdv: "未知",
-                        vol5m: "未知",
-                        buys5m: "未知",
-                        sells5m: "未知",
-                        socials: "未知 (極高風險)",
-                        symbol: "BLIND_SNIPE",
-                        name: "UNKNOWN",
-                        pairCreatedAt: Date.now() 
-                    };
-                } else {
-                    return { isSafe: false, reason: '🛑 查無報價 (Dex/Birdeye 皆無)' };
-                }
+                // 🚀 核心優化：直接攔截無 Dex 數據的垃圾幣，不再浪費 API 進行盲狙
+                // 理由：坐監 3 分鐘後 DexScreener 仍無數據，代表流動性為 0 或根本無人交易，絕對是死盤！
+                return { isSafe: false, reason: '🗑️ 物理攔截: DexScreener 無報價 (死水/垃圾幣)' };
+            
             } else {
                 const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
                 if (garbageCheck.isGarbage) {
