@@ -1,6 +1,7 @@
 // src/services/newsSentimentService.js
 const axios = require('axios');
 const Parser = require('rss-parser');
+const configEnv = require('../config/env'); // 👈 引入彈藥庫
 
 const parser = new Parser();
 
@@ -8,7 +9,6 @@ const newsSentimentService = {
     async getDisasterScore() {
         console.log('📰 [News_AI] 收到大盤暴跌信號！啟動 RSS 突發新聞掃描...');
         try {
-            // 🚀 修正 1：手動用 axios 獲取 RSS，並加上瀏覽器 Header，防止被 CoinTelegraph 攔截
             const rssUrl = 'https://cointelegraph.com/rss';
             const response = await axios.get(rssUrl, {
                 headers: {
@@ -18,7 +18,6 @@ const newsSentimentService = {
                 timeout: 8000
             });
 
-            // 將獲取到的 XML 字串傳給 parser
             const feed = await parser.parseString(response.data);
             
             if (!feed.items || feed.items.length === 0) {
@@ -26,12 +25,10 @@ const newsSentimentService = {
                 return 50;
             }
 
-            // 抽最新 8 條標題
             const recentTitles = feed.items.slice(0, 8).map(item => `- ${item.title}`).join('\n');
             console.log(`📑 [News_AI] 成功抓取 ${feed.items.length} 條新聞，準備分析...`);
 
-            // 🚀 修正 2：準備 Groq API 呼叫 (增加防呆)
-            const groqApiKey = process.env.GROQ_API_KEY; 
+            const groqApiKey = configEnv.ai.groqKey; 
             if (!groqApiKey) throw new Error("環境變數缺少 GROQ_API_KEY");
 
             const prompt = `你是量化基金首席風控官。請閱讀以下過去一小時的最新幣圈新聞標題，評估目前的『市場恐慌指數』。
@@ -44,7 +41,7 @@ const newsSentimentService = {
             最新新聞標題：
             ${recentTitles}`;
             
-                        const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+            const groqRes = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
                 model: "llama3-70b-8192",
                 messages: [{ role: "user", content: prompt }],
                 temperature: 0.1
@@ -56,7 +53,6 @@ const newsSentimentService = {
                 timeout: 10000
             });
 
-            // 5. 提取分數
             const scoreStr = groqRes.data.choices[0].message.content.trim();
             const score = parseInt(scoreStr.replace(/\D/g, ''), 10) || 50; 
 
@@ -64,7 +60,6 @@ const newsSentimentService = {
             return score;
 
         } catch (error) {
-            // 🚀 修正 3：更詳細的報錯，幫你分清楚係 RSS 定係 Groq 出事
             if (error.response) {
                 console.error(`❌ [News_AI] API 報錯 (Status ${error.response.status}):`, error.response.data);
             } else {

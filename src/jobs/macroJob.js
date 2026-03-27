@@ -1,13 +1,12 @@
 // src/jobs/macroJob.js
 const axios = require('axios');
 const cron = require('node-cron');
-// 確保下面呢行指去你真實嘅 Supabase Client 位置 (根據你 index.js 嘅結構，通常係 ../config/supabase)
-const { supabase } = require('../config/supabase'); 
+const { supabase } = require('../config/supabase'); // 👈 確保指引正確
 
 const macroJob = {
   
   /**
-   * 獲取並更新恐懼與貪婪指數
+   * 獲取並更新恐懼與貪婪指數 (Fear & Greed Index)
    */
   async fetchAndUpdateIndex() {
     console.log('🌍 [MacroJob] 正在探測全球加密貨幣恐懼與貪婪指數...');
@@ -51,8 +50,7 @@ const macroJob = {
     // 1. Bot 啟動時，即刻強制行一次攞最新數據
     this.fetchAndUpdateIndex();
 
-    // 2. 設定 Cron Job：每 6 小時執行一次 (防禦 API Timeout，確保每日最少 Update 到)
-    // 分 時 日 月 星期
+    // 2. 設定 Cron Job：每 6 小時執行一次
     cron.schedule('0 */6 * * *', () => {
       this.fetchAndUpdateIndex();
     });
@@ -61,5 +59,4 @@ const macroJob = {
   }
 };
 
-// 以 CommonJS 格式匯出
 module.exports = { macroJob };

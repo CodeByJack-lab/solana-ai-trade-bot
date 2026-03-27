@@ -4,28 +4,23 @@ const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const { PublicKey, Keypair } = require('@solana/web3.js'); 
 const { connection } = require('../config/solana'); 
-const path = require('path');
 const BigNumber = require('bignumber.js'); 
 const { executeLiveSwapUAT } = require('./liveTradeService');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService'); 
 const { healthMonitor } = require('./healthMonitor');
-
-// 🚀 新增引入：數據庫與入/出金統計服務
 const { getPersonNameByAddress, logNewDeposit, logNewWithdrawal, getContributionStats } = require('./dbService');
+const configEnv = require('../config/env'); // 👈 引入彈藥庫
 
 let bs58 = require('bs58');
 if (bs58.default) {
     bs58 = bs58.default;
 }
 
-require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
-
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-// 🚀 頂層初始化：只解析一次 Private Key，供全檔案使用
 let globalWalletPublicKey = null;
 try {
-    const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
+    const rawKey = configEnv.solana.walletPrivateKey ? configEnv.solana.walletPrivateKey.trim() : null;
     if (rawKey) {
         if (rawKey.startsWith('[')) {
             globalWalletPublicKey = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey.toString();
@@ -37,7 +32,6 @@ try {
     console.error("⚠️ [TradeService] 無法解析 Private Key");
 }
 
-// 實盤核數師 (獲取鏈上真實 SPL Token 餘額)
 async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     try {
         const walletKey = new PublicKey(walletPubKeyStr);
@@ -61,7 +55,6 @@ async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     }
 }
 
-// 🚀 升級版 Quote 函數：支援自定義 Slippage
 async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageBps = null) {
     try {
         let decimals = 6; 
@@ -79,13 +72,13 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
 
         const SLIPPAGE_BPS = customSlippageBps !== null ? customSlippageBps : (isBuying ? 1000 : 1500); 
 
-        const baseUrl = (process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag').replace(/\/$/, '');
+        const baseUrl = (configEnv.external.jupiterBaseUrl || 'https://quote-api.jup.ag').replace(/\/$/, '');
         const endpoint = baseUrl.includes('quote-api') ? '/v6/quote' : '/swap/v1/quote';
         const url = `${baseUrl}${endpoint}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${SLIPPAGE_BPS}`;
 
         const config = { headers: {} };
-        if (process.env.JUPITER_API_KEY) {
-            config.headers['x-api-key'] = process.env.JUPITER_API_KEY.replace(/['"]/g, '').trim();
+        if (configEnv.external.jupiterApiKey) {
+            config.headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
         }
 
         const response = await axios.get(url, config);
@@ -187,7 +180,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         let currentBalance = isLive ? Number(dbConfig.live_wallet_balance || 0) : Number(dbConfig.simulated_balance || 10);
         let newBalance = currentBalance - Number(configTradeAmountSol);
 
-        // 🚀 實盤：更新錢包餘額為鏈上真實數字 (已扣除 ATA 租金與 Tip)
         if (isLive && globalWalletPublicKey) {
             try {
                 const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
@@ -229,7 +221,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     return false;
 }
 
-// 🚀 核心升級：帶有雙重滑點保護與分拆砸盤機制的 executeSell
 async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction = 1.0) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
@@ -257,11 +248,10 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     }
 
     const isStopLoss = reason.includes('止損') || reason.includes('硬止損') || reason.includes('虧損') || reason.includes('拔線');
-    let currentSlippage = isStopLoss ? 1500 : 500; // 止損預設 15% 容忍度，止盈 5%
+    let currentSlippage = isStopLoss ? 1500 : 500; 
 
     let quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
     
-    // 🛡️ 防線 1：流動性枯竭，嘗試以 30% 絕望滑點強平
     if (!quoteData) {
         console.log(`⚠️ [Liquidity Warning] ${tokenSymbol} 查無常規報價，流動性可能枯竭。嘗試最高絕望滑點 (30%) 強平...`);
         currentSlippage = 3000;
@@ -277,19 +267,16 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         return false; 
     }
 
-    // 🛡️ 防線 2：最大滑點與分拆砸盤保護 (防止 Price Impact 過大)
     let impactPct = Number(quoteData.rawResponse.priceImpactPct || 0);
     if (isStopLoss && impactPct > 0.15) {
         console.log(`\n🚨 [Slippage Control] 警告！偵測到毀滅性砸盤影響 (${(impactPct*100).toFixed(2)}%)！`);
         
-        // 🚀 Fix 2: 殘值判定 (防止芝諾的烏龜 / 無限切半)
         const expectedTotalSol = Number(quoteData.rawResponse.outAmount || 0) / 1e9;
         
-        // 如果呢一刀落去，預計攞得返少於 0.05 SOL，分拆已經失去意義，直接一刀切！
         if (expectedTotalSol < 0.05 && sellFraction === 1.0) {
             console.log(`🗑️ [Dust Clean] 剩餘預期價值極低 (${expectedTotalSol.toFixed(4)} SOL < 0.05 SOL)！`);
             console.log(`⚔️ 啟動「斷頭台模式」：放棄分拆保護，解鎖極限滑點 (50%) 執行一刀切清倉止血！`);
-            currentSlippage = 5000; // 5000 bps = 50%
+            currentSlippage = 5000; 
             quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
             if (!quoteData) {
                 console.log(`❌ 斷頭台滑點亦無法生成報價，等待下次重試。`);
@@ -318,7 +305,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     let tradeSuccess = true;
     let finalTxid = "SELL_" + Math.random().toString(36).substring(2, 8).toUpperCase(); 
 
-    // 🚀 紀錄售前餘額 (對撞起點)
     let preSellBalanceLamports = 0;
     if (isLive && globalWalletPublicKey) {
         try {
@@ -334,7 +320,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         }
     }
 
-    // 🚀 計算真實入袋 SOL (對撞終點)
     let actualSolReceived = 0;
     if (isLive && tradeSuccess && !finalTxid.startsWith('SELL_') && globalWalletPublicKey) {
         console.log(`🔍 [Live Check] 正在驗證鏈上真實 SOL 收益 (等待 5 秒確認區塊)...`);
@@ -349,7 +334,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     if (tradeSuccess) {
         let sellValueSol = new BigNumber(sellQuantity).times(finalPriceSol).toNumber();
 
-        // 🚀 實盤精準對撞：使用真實入袋 SOL (已全數扣除 Tip/Gas/滑點摩擦)
         if (isLive && actualSolReceived > 0) {
             sellValueSol = actualSolReceived;
         }
@@ -358,7 +342,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         const pnlSol = new BigNumber(sellValueSol).minus(entryTotalValue).toNumber();
         const pnlPct = new BigNumber(pnlSol).div(entryTotalValue).times(100).toNumber();
 
-        // 🚀 耀眼的賣出 Terminal Log
         const pnlIcon = pnlPct > 0 ? '🚀 止盈' : '🩸 止損';
         console.log(`\n======================================================`);
         console.log(`💳 🔴 【賣出成功 - ${tokenSymbol}】 🔴 💳`);
@@ -460,9 +443,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
     }
 }
 
-// =========================================================================
-// 🚀 入帳偵測 (入金)
-// =========================================================================
 async function handleIncomingFund(address, amount, txid) {
     console.log(`🚀 [Process] 處理新入帳: ${amount} SOL from ${address}`);
 
@@ -509,15 +489,12 @@ async function handleIncomingFund(address, amount, txid) {
     }
 }
 
-// =========================================================================
-// 🚀 巨鯨提款偵測 (出金)
-// =========================================================================
 async function handleOutgoingFund(address, amount, txid) {
     console.log(`💸 [Process] 處理新出金: ${amount} SOL to ${address}`);
 
     let personName = await getPersonNameByAddress(address);
     if (!personName) {
-        personName = "未知金主"; // 如果搵唔到，照扣系統資金
+        personName = "未知金主"; 
     }
 
     const isInserted = await logNewWithdrawal(address, personName, amount, txid);

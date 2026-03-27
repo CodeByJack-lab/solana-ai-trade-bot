@@ -1,12 +1,11 @@
 // src/services/consensusService.js
-const axios = require('axios');
 const { supabase } = require('../config/supabase');
+const { aiOrchestrator } = require('./aiOrchestrator'); // 👈 引入大腦總機
 const { healthMonitor } = require('./healthMonitor');
-const path = require('path');
-const { GoogleGenerativeAI } = require("@google/generative-ai");
 
-require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
-
+/**
+ * 🏛️ 最高法院任務隊列 (防止瞬間湧入過多審判)
+ */
 class TaskQueue {
     constructor(name) { 
         this.name = name;
@@ -27,7 +26,7 @@ class TaskQueue {
         while (this.queue.length > 0) {
             const task = this.queue.shift();
             await task();
-            await new Promise(r => setTimeout(r, 1050)); 
+            await new Promise(r => setTimeout(r, 1000)); // 每個審判間隔 1 秒
         }
         this.isProcessing = false;
     }
@@ -36,76 +35,10 @@ class TaskQueue {
 const memeQueue = new TaskQueue('Meme');
 const bluechipQueue = new TaskQueue('Bluechip');
 
-const API_CONFIG = {
-    MISTRAL: { url: 'https://api.mistral.ai/v1/chat/completions', key: process.env.MISTRAL_API_KEY },
-    GROQ: { url: 'https://api.groq.com/openai/v1/chat/completions', key: process.env.GROQ_API_KEY }
-};
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-async function callProvider(provider, modelName, promptText) {
-    if (provider === 'GOOGLE') {
-        const model = genAI.getGenerativeModel({ model: modelName });
-        
-        let timeoutId;
-        const timeoutPromise = new Promise((_, reject) => {
-            timeoutId = setTimeout(() => reject(new Error(`[${modelName}] Google API 超時無回應`)), 10000);
-        });
-
-        try {
-            const fetchPromise = model.generateContent({
-                contents: [{ role: "user", parts: [{ text: promptText }] }],
-                generationConfig: { responseMimeType: "application/json" }
-            });
-
-            const result = await Promise.race([fetchPromise, timeoutPromise]);
-            clearTimeout(timeoutId);
-
-            let rawText = result.response.text();
-            const match = rawText.match(/\{[\s\S]*\}/);
-            if (!match) throw new Error("Google API 沒有返回 JSON");
-            return JSON.parse(match[0]);
-            
-        } catch (error) {
-            clearTimeout(timeoutId);
-            throw error; 
-        }
-    } else {
-        const res = await axios.post(API_CONFIG[provider].url, {
-            model: modelName,
-            messages: [{ role: "user", content: promptText }],
-            response_format: { type: "json_object" }
-        }, {
-            headers: { 'Authorization': `Bearer ${API_CONFIG[provider].key}`, 'Content-Type': 'application/json' },
-            timeout: 10000 
-        });
-        return JSON.parse(res.data.choices[0].message.content);
-    }
-}
-
-async function callWithFallback(role, primary, backup, promptText) {
-    try {
-        const result = await callProvider(primary.provider, primary.model, promptText);
-        healthMonitor.setStatus(`AI_${role}`, `🟢 正常 (${primary.provider})`);
-        return { ...result, usedModel: primary.model };
-    } catch (err) {
-        const errMsg = err.response?.data ? JSON.stringify(err.response.data) : err.message;
-        console.warn(`⚠️ [AI_${role}] ${primary.provider} 失敗 (${errMsg})，自動切換至備援 ${backup.provider}...`);
-        healthMonitor.setStatus(`AI_${role}`, `🟡 切換備援 (${backup.provider})`);
-        
-        await new Promise(r => setTimeout(r, 1050)); 
-        
-        try {
-            const fallbackResult = await callProvider(backup.provider, backup.model, promptText);
-            return { ...fallbackResult, usedModel: backup.model };
-        } catch (fallbackErr) {
-            healthMonitor.setStatus(`AI_${role}`, `🔴 雙端失效`);
-            return { decision: "VETO", reason: "API 雙端失效" };
-        }
-    }
-}
-
 const consensusService = {
+    /**
+     * ☁️ 從 Supabase 動態拉取 Prompt 並注入數據
+     */
     async getPrompt(promptId, data) {
         const { data: promptData } = await supabase.from('bot_prompts').select('content').eq('prompt_id', promptId).single();
         let content = promptData?.content || "";
@@ -115,6 +48,9 @@ const consensusService = {
         return content;
     },
 
+    /**
+     * ⚔️ 核心：Meme / Trending 幣種三司會審 (漏斗式決策)
+     */
     async runMemeConsensus(mintAddress, marketData, options = { isReentry: false, poolType: 'NURSERY' }) {
         return memeQueue.add(async () => {
             const hallName = options.poolType === 'TRENDING' ? '熱門動能 議事廳' : 'Meme 議事廳';
@@ -142,42 +78,71 @@ const consensusService = {
 
             const promptPrefix = options.poolType === 'TRENDING' ? 'trending' : 'meme';
 
-            const [pScout, pStrat, pAudit] = await Promise.all([
-                this.getPrompt(`${promptPrefix}_scout`, promptData),
-                this.getPrompt(`${promptPrefix}_strategist`, promptData),
-                this.getPrompt(`${promptPrefix}_auditor`, { 
-                    ...promptData, 
-                    rug_score: 'N/A', 
-                    top10_pct: 'N/A', 
-                    lp_status: 'N/A' 
-                })
-            ]);
+            // 🔀 1. 向大腦總機索取本次審判的「錯峰陣型」
+            const plan = aiOrchestrator.getRoutingPlan();
 
-            console.log("📡 正在呼叫先鋒 (Scout)...");
-            const scout = await callWithFallback('Scout', {provider:'GROQ', model:'llama-3.1-8b-instant'}, {provider:'MISTRAL', model:'mistral-small-latest'}, pScout);
+            // ==========================================
+            // 🗡️ 第一關：先鋒 (Scout) 負責感性與敘事
+            // ==========================================
+            const pScout = await this.getPrompt(`${promptPrefix}_scout`, promptData);
+            console.log(`📡 正在呼叫先鋒 (${plan.scout})...`);
+            const scout = await aiOrchestrator.executeTask('SCOUT', plan.scout, pScout);
             
-            console.log("📡 正在呼叫軍師 (Strategist)...");
-            const strategist = await callWithFallback('Strategist', {provider:'GOOGLE', model:'gemini-3.1-flash-lite-preview'}, {provider:'MISTRAL', model:'mistral-large-latest'}, pStrat);
+            const cleanScout = (scout.decision || scout.verdict || '').trim().toUpperCase();
             
-            console.log("📡 正在呼叫判官 (Auditor)...");
-            const auditor = await callWithFallback('Auditor', {provider:'GROQ', model:'llama-3.3-70b-versatile'}, {provider:'GOOGLE', model:'gemini-3.1-pro-preview'}, pAudit);
-
-            console.log(`⚡ 先鋒: ${scout.decision} | 🧠 軍師: ${strategist.decision} (${strategist.score || 'N/A'}分) | ⚖️ 判官: ${auditor.decision}`);
-
-            // 🚀 核心字串洗白：防止 " EXECUTE_BUY" 空格或換行報錯
-            const cleanScout = (scout.decision || '').trim().toUpperCase();
-            const cleanStrat = (strategist.decision || '').trim().toUpperCase();
-            const cleanAudit = (auditor.decision || '').trim().toUpperCase();
-
-            if (cleanAudit === 'VETO' || cleanAudit.includes('VETO')) return { buy: false, reason: `⚖️ 判官否決: ${auditor.reason}` };
-
-            if (cleanScout.includes('PASS') && (cleanStrat.includes('PASS') || cleanStrat.includes('EXECUTE_BUY') || cleanStrat === 'BUY')) {
-                return { buy: true, score: strategist.score || 80, reason: `⚡ ${scout.reason} | 🧠 ${strategist.reason}` };
+            // 🛑 【漏斗截斷 1】：先鋒話唔得，即刻斬！(修復：加入 VETO 判斷)
+            if (cleanScout === 'REJECT' || cleanScout === 'VETO' || cleanScout.includes('VETO')) {
+                console.log(`🛑 [提早截斷] 先鋒否決: ${scout.reason}`);
+                return { buy: false, reason: `先鋒首輪淘汰: ${scout.reason}` };
             }
-            return { buy: false, reason: "未達成共識" };
+
+            // ==========================================
+            // 🧠 第二關：軍師 (Strategist) 負責硬數據與風險
+            // ==========================================
+            const pStrat = await this.getPrompt(`${promptPrefix}_strategist`, promptData);
+            console.log(`📡 正在呼叫軍師 (${plan.strategist})...`);
+            const strategist = await aiOrchestrator.executeTask('STRATEGIST', plan.strategist, pStrat);
+            
+            const cleanStrat = (strategist.decision || strategist.verdict || '').trim().toUpperCase();
+
+            // 🛑 【漏斗截斷 2】：軍師話唔得，即刻斬！(修復：新增軍師截斷)
+            if (cleanStrat === 'REJECT' || cleanStrat === 'VETO' || cleanStrat.includes('VETO')) {
+                console.log(`🛑 [提早截斷] 軍師否決: ${strategist.reason}`);
+                return { buy: false, reason: `軍師數據淘汰: ${strategist.reason}` };
+            }
+
+            // ==========================================
+            // ⚖️ 第三關：判官 (Auditor) 行使一票否定權
+            // ==========================================
+            // 📦 戰報強制打包 (修復：確保判官一定睇到先鋒同軍師嘅意見)
+            const pAuditBase = await this.getPrompt(`${promptPrefix}_auditor`, promptData);
+            const pAuditWrapped = `${pAuditBase}\n\n【前線戰報彙整】\n先鋒意見 (${cleanScout}): ${scout.reason}\n軍師意見 (${cleanStrat}): ${strategist.reason}\n\n請綜合以上資訊，做最終判決 (PASS 或 VETO)。你有絕對一票否定權。`;
+
+            console.log(`📡 正在呼叫判官 (${plan.auditor})...`);
+            const auditor = await aiOrchestrator.executeTask('AUDITOR', plan.auditor, pAuditWrapped);
+
+            console.log(`⚡ 先鋒: ${cleanScout} | 🧠 軍師: ${cleanStrat} | ⚖️ 判官: ${auditor.decision || auditor.verdict}`);
+
+            const cleanAudit = (auditor.decision || auditor.verdict || '').trim().toUpperCase();
+
+            // 🛑 【絕對一票否定權】：只要判官唔係話 BUY/PASS，全部當 REJECT
+            if (cleanAudit === 'REJECT' || cleanAudit === 'VETO' || cleanAudit.includes('VETO')) {
+                return { buy: false, reason: `⚖️ 判官否決: ${auditor.reason}` };
+            }
+
+            if (cleanAudit === 'BUY' || cleanAudit === 'PASS' || cleanAudit === 'PASSED' || cleanAudit.includes('EXECUTE_BUY')) {
+                // 最終分數由判官決定，如果判官無畀分就用軍師嘅
+                const finalScore = auditor.score || strategist.score || 80;
+                return { buy: true, score: finalScore, reason: `⚖️ 終審通過: ${auditor.reason}` };
+            }
+
+            return { buy: false, reason: "判官未給出明確買入指令" };
         });
     },
 
+    /**
+     * 🔭 老幣巡邏共識 (單一軍師機制)
+     */
     async runBluechipConsensus(mintAddress, marketData) {
         return bluechipQueue.add(async () => {
             console.log(`\n🏛️ [老幣 議事廳] 開始審核: ${marketData.symbol}`);
@@ -191,21 +156,16 @@ const consensusService = {
             }
 
             const pStrat = await this.getPrompt('bluechip_strategist', { 
-                token_symbol: marketData.symbol, 
-                current_price: marketData.currentPrice,
-                rsi_history: marketData.rsiHistory,
-                tech_indicators: marketData.techIndicators,
-                last_observed_time: marketData.lastTime,
-                last_ai_comment: marketData.lastComment,
+                ...marketData,
                 latest_news_score: currentNewsScore 
             });
             
-            const strategist = await callWithFallback('Strategist_Bluechip', {provider:'GOOGLE', model:'gemini-3.1-flash-lite-preview'}, {provider:'MISTRAL', model:'mistral-large-latest'}, pStrat);
+            // 老幣巡邏直接用無限水喉 GEMINI 負責
+            const strategist = await aiOrchestrator.executeTask('STRATEGIST_BLUECHIP', 'GEMINI', pStrat);
             
-            console.log(`🧠 老幣軍師: ${strategist.decision} | 理由: ${strategist.reason}`);
+            console.log(`🧠 老幣軍師: ${strategist.decision || strategist.verdict} | 理由: ${strategist.reason}`);
             
-            // 🚀 核心字串洗白：完美對接 AI 指令，無視多餘空格
-            const cleanDecision = (strategist.decision || '').trim().toUpperCase();
+            const cleanDecision = (strategist.decision || strategist.verdict || '').trim().toUpperCase();
 
             if (cleanDecision.includes('PASS') || cleanDecision.includes('EXECUTE_BUY') || cleanDecision === 'BUY') {
                 return { buy: true, reason: `✅ 安全: ${strategist.reason}` };

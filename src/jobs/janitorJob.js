@@ -4,15 +4,14 @@ const { connection } = require('../config/solana');
 const { supabase } = require('../config/supabase');
 const { PublicKey, Transaction, Keypair } = require('@solana/web3.js');
 const { createCloseAccountInstruction, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
-const path = require('path');
+const configEnv = require('../config/env'); // 👈 引入中央彈藥庫
 
 let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;
-require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
 let wallet;
 try {
-    const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
+    const rawKey = configEnv.solana.walletPrivateKey ? configEnv.solana.walletPrivateKey.trim() : null;
     if (rawKey) {
         wallet = rawKey.startsWith('[') 
             ? Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))) 
@@ -28,12 +27,10 @@ const janitorJob = {
         console.log('\n🧹 [Janitor] 清道夫啟動：掃描閒置超過 7 日的零餘額 ATA 帳戶...');
 
         try {
-            // 1. 獲取錢包所有 Token Accounts
             const parsedTokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
                 programId: TOKEN_PROGRAM_ID
             });
 
-            // 2. 篩選出餘額為 0 的帳戶
             const emptyAccounts = parsedTokenAccounts.value.filter(
                 accInfo => accInfo.account.data.parsed.info.tokenAmount.uiAmount === 0
             );
@@ -43,15 +40,12 @@ const janitorJob = {
                 return;
             }
 
-            // 3. 執行 7 日冷卻期審查
             const sevenDaysAgoMs = Date.now() - (7 * 24 * 60 * 60 * 1000);
             const accountsToClose = [];
 
-            // 🚀 Phase 3 核心修復：N+1 查詢炸彈化解 (Batch Query)
             const mints = emptyAccounts.map(acc => acc.account.data.parsed.info.mint);
             let allTrades = [];
             
-            // 將 Mints 分批 (每批 50 個)，防止 Supabase URL 超長
             for (let i = 0; i < mints.length; i += 50) {
                 const chunk = mints.slice(i, i + 50);
                 const { data } = await supabase
@@ -61,7 +55,6 @@ const janitorJob = {
                 if (data) allTrades = allTrades.concat(data);
             }
 
-            // 建立 Hash Map 快速查找最後交易時間
             const latestTradeMap = {};
             for (const t of allTrades) {
                 const tradeTime = new Date(t.created_at).getTime();
@@ -78,14 +71,12 @@ const janitorJob = {
                 let shouldClose = false;
 
                 if (!lastTradeTime) {
-                    shouldClose = true; // 如果 Database 無紀錄 (不知名垃圾幣)
+                    shouldClose = true; 
                 } else if (lastTradeTime < sevenDaysAgoMs) {
-                    shouldClose = true; // 超過 7 日無起色
+                    shouldClose = true; 
                 }
 
-                if (shouldClose) {
-                    accountsToClose.push(ataPubkey);
-                }
+                if (shouldClose) accountsToClose.push(ataPubkey);
             }
 
             if (accountsToClose.length === 0) {
@@ -95,7 +86,6 @@ const janitorJob = {
 
             console.log(`🗑️ [Janitor] 找到 ${accountsToClose.length} 個超過 7 日的死水帳戶，準備批量回收租金...`);
 
-            // 4. 批量執行 Close Account (打包交易慳 Gas，每張單最多塞 12 個 Close 指令)
             const chunkSize = 12;
             let recoveredSol = 0;
 

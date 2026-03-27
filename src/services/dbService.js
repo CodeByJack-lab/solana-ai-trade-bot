@@ -1,10 +1,5 @@
-const { createClient } = require('@supabase/supabase-js');
-require('dotenv').config(); // 確保讀取到環境變量
-
-// 初始化 Supabase 客戶端
-const supabaseUrl = process.env.SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY; 
-const supabase = createClient(supabaseUrl, supabaseKey);
+// src/services/dbService.js
+const { supabase } = require('../config/supabase'); 
 
 /**
  * 根據 Solana 地址尋找對應的用戶名稱 (嚴格區分大小寫)
@@ -12,13 +7,12 @@ const supabase = createClient(supabaseUrl, supabaseKey);
  */
 async function getPersonNameByAddress(address) {
     try {
-        // ⚠️ Solana 地址必須原汁原味，不能用 toLowerCase()
         const exactAddress = address.trim();
 
         const { data, error } = await supabase
             .from('deposit_history')
             .select('person_name')
-            .eq('sender_address', exactAddress) // 嚴格比對
+            .eq('sender_address', exactAddress) 
             .limit(1)
             .single();
 
@@ -46,7 +40,6 @@ async function logNewDeposit(address, name, amount, txid) {
             }]);
 
         if (error) {
-            // 如果係重複嘅 txid，會觸發 unique constraint error
             console.error("❌ [DB] 寫入 deposit_history 失敗:", error.message);
             return false;
         }

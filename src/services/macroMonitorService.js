@@ -4,6 +4,7 @@ const { supabase } = require('../config/supabase');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
 const { newsSentimentService } = require('./newsSentimentService'); 
+const configEnv = require('../config/env'); // 👈 引入彈藥庫
 
 let pauseCooldownUntil = 0; 
 let useCoinGeckoNext = true; 
@@ -17,9 +18,8 @@ const macroMonitorService = {
             timeout: 10000
         };
 
-        // 🚀 注入 CoinGecko API Key (Demo Plan 防限流)
-        if (process.env.COINGECKO_API_KEY) {
-            config.headers['x-cg-demo-api-key'] = process.env.COINGECKO_API_KEY;
+        if (configEnv.external.coingeckoApiKey) {
+            config.headers['x-cg-demo-api-key'] = configEnv.external.coingeckoApiKey;
         }
 
         const res = await axios.get(url, config);
@@ -86,14 +86,12 @@ const macroMonitorService = {
         }
     },
 
-    // 🚀 新增：由 AI 定時重審新聞的「智能解封」機制
     async checkRecovery() {
         console.log(`⏳ [Macro] 30 分鐘避險期滿，交由 AI 重新審查大盤新聞...`);
         try {
             const newScore = await newsSentimentService.getDisasterScore();
             
             if (newScore >= 50) {
-                // 如果仲係恐慌，就繼續鎖住，再等 30 分鐘！
                 console.log(`🚨 [Macro] 危機未除 (AI 指數: ${newScore})，延長避險 30 分鐘！`);
                 await supabase.from('system_config').update({ 
                     latest_news_score: newScore, 
@@ -101,22 +99,21 @@ const macroMonitorService = {
                 }).eq('id', 1);
                 
                 pauseCooldownUntil = Date.now() + (30 * 60 * 1000); 
-                setTimeout(() => this.checkRecovery(), 30 * 60 * 1000); // 30 分鐘後再審
+                setTimeout(() => this.checkRecovery(), 30 * 60 * 1000); 
 
             } else {
-                // 分數跌落 50 以下，安全解封！
                 console.log(`✅ [Macro] 危機解除 (AI 指數: ${newScore})，系統恢復運作！`);
                 await supabase.from('system_config').update({ 
                     is_running: true, 
                     status_msg: '正常運作中', 
-                    latest_news_score: newScore  // AI 真實低分數寫入，自然放鬆防線
+                    latest_news_score: newScore  
                 }).eq('id', 1);
                 
                 sendAdminAlert(`✅ <b>[自動恢復]</b> AI 確認新聞危機已解除 (指數: ${newScore})，系統已重新著機！`);
             }
         } catch (err) {
             console.error(`❌ [Macro] 恢復審查失敗，5 分鐘後重試: ${err.message}`);
-            setTimeout(() => this.checkRecovery(), 5 * 60 * 1000); // 防呆機制，API死咗就 5 分鐘後再試
+            setTimeout(() => this.checkRecovery(), 5 * 60 * 1000); 
         }
     },
 
@@ -151,7 +148,6 @@ const macroMonitorService = {
                     console.log(`🚨 [Macro] 偵測到市場大幅波動，更新 AI 災難情報...`);
                     const newsScore = await newsSentimentService.getDisasterScore();
                     
-                    // 🚀 核心改動：只更新分數，不再強制關機 (is_running 保持不變)
                     await supabase.from('system_config').update({ 
                         latest_news_score: newsScore,
                         status_msg: newsScore >= 60 ? `市場恐慌 (指數:${newsScore})` : '正常運作中'
@@ -159,10 +155,9 @@ const macroMonitorService = {
 
                     if (newsScore >= 60) {
                         sendTelegramAlert(`⚠️ <b>市場預警</b>\n波動: ${priceAlertMsg}\nAI 恐慌指數: ${newsScore}/100\n\n系統維持運作，但 AI 將會以更嚴格標準審核買入申請。`);
-                        pauseCooldownUntil = Date.now() + (15 * 60 * 1000); // 避免連續狂轟 Telegram，冷卻 15 分鐘
+                        pauseCooldownUntil = Date.now() + (15 * 60 * 1000); 
                     }
                 } else {
-                    // 🚀 自我修復機制：如果大盤平穩，慢慢調低災難分數
                     await supabase.rpc('decrement_disaster_score', { decrement_by: 5 });
                 }
             } catch (err) {
@@ -170,7 +165,7 @@ const macroMonitorService = {
                 healthMonitor.setStatus('Macro_Radar', `🔴 數據中斷: ${err.message}`);
                 if (err.response?.status === 429) pauseCooldownUntil = Date.now() + (5 * 60 * 1000);
             }
-        }, 180000); // 每 3 分鐘掃描一次
+        }, 180000); 
     }
 };
 

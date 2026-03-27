@@ -1,16 +1,17 @@
 // src/services/telegramService.js
 const axios = require('axios');
 const path = require('path');
-const { healthMonitor } = require('./healthMonitor'); // 🩺 引入看板讀取狀態
+const { healthMonitor } = require('./healthMonitor'); 
+const configEnv = require('../config/env');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
 // 📈 交易戰報 Bot (Main)
-const TRADE_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const TRADE_CHAT_ID = process.env.TELEGRAM_CHANNEL_ID;
+const TRADE_BOT_TOKEN = configEnv.telegram.mainBotToken;
+const TRADE_CHAT_ID = configEnv.telegram.chatId;
 
 // ⚙️ 系統管理員 Bot (Admin)
-const ADMIN_BOT_TOKEN = process.env.TELEGRAM_ADMIN_BOT_TOKEN;
-const ADMIN_CHAT_ID = process.env.TELEGRAM_ADMIN_CHAT_ID;
+const ADMIN_BOT_TOKEN = configEnv.telegram.adminBotToken;
+const ADMIN_CHAT_ID = configEnv.telegram.channelId;
 
 /**
  * 🚀 安全清洗函數：防止 AI 輸出的 < 或 > 破壞 HTML 看板結構

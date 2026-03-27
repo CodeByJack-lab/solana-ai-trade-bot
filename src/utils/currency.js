@@ -1,12 +1,13 @@
+// src/services/currency.js
 const axios = require('axios');
-require('dotenv').config();
+const configEnv = require('../config/env'); // 👈 引入中央彈藥庫
 
 /**
  * 獲取實時 USD 到 HKD 匯率
  */
 async function getUSDHKDRate() {
     try {
-        const response = await axios.get(process.env.EXCHANGE_RATE_API_URL);
+        const response = await axios.get(configEnv.external.exchangeRateApi);
         const rate = response.data.conversion_rates.HKD;
         console.log(`💵 實時匯率: 1 USD = ${rate} HKD`);
         return rate;

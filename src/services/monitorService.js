@@ -3,6 +3,8 @@ const express = require('express');
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const crypto = require('crypto');
+const configEnv = require('../config/env'); // 👈 [V7.0] 引入中央彈藥庫
+
 let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;
 const { PublicKey } = require('@solana/web3.js');
@@ -14,13 +16,18 @@ const { consensusService, getPendingMemeCount } = require('./consensusService');
 const { analyzeReentry, reviewActivePosition } = require('./aiService');
 const { retrospectiveJob } = require('../jobs/retrospectiveJob');
 
+// 👇👇👇 [V7.0 新增] 引入 Price Oracle 
+const { priceOracleService } = require('./priceOracleService');
+// 👆👆👆
+
 const app = express();
 app.use(express.json());
 
-const HELIUS_API_KEY = process.env.HELIUS_API_KEY;           
-const WEBHOOK_ID = process.env.HELIUS_WEBHOOK_ID;
-const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;       
-const WEBHOOK_ID_2 = process.env.HELIUS_WEBHOOK_ID_2;
+// 🚀 [V7.0] 轉用中央彈藥庫
+const HELIUS_API_KEY = configEnv.rpc.helius1.apiKey;           
+const WEBHOOK_ID = configEnv.rpc.helius1.webhookId;
+const HELIUS_API_KEY_2 = configEnv.rpc.helius2.apiKey;       
+const WEBHOOK_ID_2 = configEnv.rpc.helius2.webhookId;
 
 const NGROK_URL = process.env.NGROK_URL || "https://solana-ai-trade-bot-production.up.railway.app";
 
@@ -29,7 +36,7 @@ const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
-const botWallet = process.env.MY_WALLET_PUBLIC_KEY;
+const botWallet = configEnv.solana.walletPublicKey; // 👈 [V7.0] 轉用中央彈藥庫
 
 // 🚀 全新數據追蹤器：按來源及 Type 分類
 let detailedStats = {};
@@ -59,7 +66,6 @@ async function refreshPoolStatus() {
             .select('*', { count: 'exact', head: true });
         
             if (!error && count !== null) {
-            // 與 SQL Function 門檻一致，滿 250 隻即鎖死同步
             isNurseryPoolFull = count >= 200; 
             if (isNurseryPoolFull) {
                 healthMonitor.setStatus('Meme_Radar', '🟡 魚池已滿 (本地暫停同步)');
@@ -69,11 +75,9 @@ async function refreshPoolStatus() {
         console.error("⚠️ 探測魚池狀態失敗:", e.message);
     }
 }
-// 啟動 10 秒循環探針
 setInterval(refreshPoolStatus, 10000);
 
-const aiReviewCooldowns = new Map(); // 新增：AI 大腦專用冷卻計時器
-// 🚀 V7.0 升級：404 緩刑防頂死 Queue 嘅 15秒冷卻
+const aiReviewCooldowns = new Map(); 
 const nurseryScanCooldown = new Map(); 
 let isAiReviewing = false;
 
@@ -127,9 +131,6 @@ async function toggleHeliusWebhook(enable = true) {
     healthMonitor.setStatus('Wallet_Radar', '🔵 由 Alchemy 監控中');
 }
 
-// ==========================================
-// 🚀 Helius / Alchemy 專屬路由：處理會計部與雷達
-// ==========================================
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK'); 
 
@@ -137,12 +138,10 @@ app.post('/webhook/helius', async (req, res) => {
         const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
         if (!config || !config.is_running) return;
 
-        // 🚀 智能格式轉換：兼容 Helius (Array) 與 Alchemy (Object)
         let events = [];
         if (Array.isArray(req.body)) {
             events = req.body; 
         } else if (req.body && req.body.event && Array.isArray(req.body.event.activity)) {
-            // Alchemy 格式翻譯
             const activities = req.body.event.activity;
             const fakeHeliusEvent = {
                 type: 'ALCHEMY_TRANSFER',
@@ -150,16 +149,15 @@ app.post('/webhook/helius', async (req, res) => {
                 nativeTransfers: activities.map(act => ({
                     fromUserAccount: act.fromAddress,
                     toUserAccount: act.toAddress,
-                    amount: parseFloat(act.value || 0) * 1e9 // 翻譯為 lamports
+                    amount: parseFloat(act.value || 0) * 1e9
                 }))
             };
             events.push(fakeHeliusEvent);
         } else {
-            return; // 格式不符，安靜拋棄
+            return; 
         }
 
         for (const event of events) {
-            // 🔍 1. 逆向追蹤：判定來源與 Type
             const eventType = event.type || 'UNKNOWN_TYPE';
             let sourceName = 'Other';
 
@@ -176,14 +174,10 @@ app.post('/webhook/helius', async (req, res) => {
                 }
             }
 
-            // 📝 記錄接收數量
             const statKey = `[${sourceName}] ${eventType}`;
             initStatKey(statKey);
             detailedStats[statKey].received++;
 
-            // ==========================================
-            // 💰 分流 A：會計部邏輯
-            // ==========================================
             if (isWalletAction) {
                 for (const t of nativeTransfers) {
                     const amount = t.amount / 1e9;
@@ -203,9 +197,6 @@ app.post('/webhook/helius', async (req, res) => {
                 continue; 
             }
 
-            // ==========================================
-            // 🔫 分流 B：終極版交易雷達 (Meme 挖掘)
-            // ==========================================
             let newMemeAddress = null;
 
             if (event.tokenTransfers && event.tokenTransfers.length > 0) {
@@ -214,7 +205,6 @@ app.post('/webhook/helius', async (req, res) => {
                     t.mint !== SYSTEM_PROGRAM_ID && 
                     t.mint.length > 32
                 );
-                // 🚀 洗白地址
                 if (transfer) newMemeAddress = sanitizeAddress(transfer.mint);
             }
 
@@ -228,7 +218,6 @@ app.post('/webhook/helius', async (req, res) => {
                                 acc !== PUMP_FUN_PROGRAM_ID && 
                                 acc.length > 32
                             );
-                            // 🚀 洗白地址
                             if (potentialMint) {
                                 newMemeAddress = sanitizeAddress(potentialMint);
                                 break;
@@ -238,13 +227,10 @@ app.post('/webhook/helius', async (req, res) => {
                 }
             }
 
-            // ✅ 成功抽到，掟入魚池並記錄分類數據
             if (newMemeAddress) {
                 detailedStats[statKey].filtered++;
             
-                // 🚀 [核心修改] 斷路器邏輯：本地攔截
                 if (isNurseryPoolFull) {
-                    // 直接返回，不執行下方的 RPC，保護數據庫連線數
                     return; 
                 }
                 const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', {
@@ -253,7 +239,6 @@ app.post('/webhook/helius', async (req, res) => {
                 if (isInserted) {
                     detailedStats[statKey].added++; 
                 } else {
-                    // 如果 RPC 返回 FALSE (代表剛好爆咗)，立刻更新本地狀態為 TRUE
                     isNurseryPoolFull = true;
                     detailedStats[statKey].dropped++;
                 }
@@ -265,28 +250,35 @@ app.post('/webhook/helius', async (req, res) => {
 });
 
 // ==========================================
-// 🚀 秘密開關：手動強制觸發 Master AI 進化
+// 🌐 [API 路由] 手動觸發 AI 檢討程序 (射後不理版)
 // ==========================================
-app.get('/force-evolution', async (req, res) => {
+app.get('/force-evolution', (req, res) => { 
     console.log('\n========================================');
     console.log('👑 [Admin] 管理員已手動強制喚醒 Master AI！');
     console.log('========================================\n');
-
-    res.status(200).send(`
-        <div style="font-family: sans-serif; text-align: center; padding: 50px;">
-            <h1 style="color: #4CAF50;">🚀 Master AI 已被強制喚醒！</h1>
-            <p style="font-size: 18px;">系統正準備進行自我進化分析...</p>
-            <p style="color: #666;">請返回 Railway / Terminal 查看詳細的 Console Log 戰報。</p>
-            <hr style="width: 200px; margin: 30px auto;">
-            <p style="font-size: 14px; color: #999;">Status: Processing (Attempt 1)</p>
-        </div>
-    `);
-
+    
     try {
         const { retrospectiveJob } = require('../jobs/retrospectiveJob');
-        await retrospectiveJob.runEvolutionWithRetry(1);
+        
+        // 🚀 關鍵：無 await！等佢自己喺背景慢慢行 (Fire-and-forget)
+        retrospectiveJob.runEvolutionWithRetry(1).catch(e => {
+            console.error("❌ 手動觸發進化失敗:", e.message);
+        });
+
+        // ⚡ 0.1 秒極速回覆瀏覽器！
+        res.status(200).send(`
+            <div style="font-family: sans-serif; text-align: center; padding: 50px;">
+                <h1 style="color: #4CAF50;">🚀 Master AI 已被強制喚醒！</h1>
+                <p style="font-size: 18px;">系統正準備進行自我進化或空倉分析...</p>
+                <p style="color: #666;">請返回 Railway / Terminal 查看詳細的 Console Log 戰報，或稍後查收 Email 報告。</p>
+                <hr style="width: 200px; margin: 30px auto;">
+                <p style="font-size: 14px; color: #999;">Status: Processing (Background Task Started)</p>
+            </div>
+        `);
+        
     } catch (e) {
-        console.error("❌ 手動觸發進化失敗:", e.message);
+        console.error("❌ Route 發生錯誤:", e.message);
+        res.status(500).send('<h1>❌ 啟動失敗</h1>');
     }
 });
 
@@ -377,7 +369,6 @@ function startDatabaseNurseryMonitor() {
                 isNurseryRunning = false; return;
             }
 
-            // 🚀 V7.0 核心：一次性拉取頭 20 隻最舊嘅幣，防止同一隻 404 幣不斷頂死條隊
             const { data: tokens } = await supabase.from('nursery_pool').select('*').order('created_at', { ascending: true }).limit(20);
 
             if (tokens && tokens.length > 0) {
@@ -385,7 +376,6 @@ function startDatabaseNurseryMonitor() {
                 for (const token of tokens) {
                     const mintAddress = token.mint_address;
                     
-                    // 🚀 15 秒冷卻：防止 404 幣被無限狂 Scan，保護 Dexscreener 頻率
                     const lastChecked = nurseryScanCooldown.get(mintAddress) || 0;
                     if (Date.now() - lastChecked < 15000) continue; 
 
@@ -403,7 +393,6 @@ function startDatabaseNurseryMonitor() {
                         const secResult = await securityGuard.checkAll(mintAddress);
 
                         if (secResult.isSafe) {
-                            // 確定安全，可以買，正式由池內刪除
                             await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
                             console.log(`\n======================================================`);
                             console.log(`🎣 [Nursery] 撈出熟魚: ${mintAddress.substring(0,6)} (已坐監 ${ageMins.toFixed(1)} 分鐘)`);
@@ -411,11 +400,9 @@ function startDatabaseNurseryMonitor() {
                             console.log(`======================================================\n`);
                             await triggerBuyPipeline(mintAddress, secResult, config);
                         } else {
-                            // 🚀 V7.0 緩刑處理：如果係 404/流動性少少唔夠，但年紀未夠 5 分鐘，留喺池度！
                             if (secResult.isPurgatory && ageMins < 5) {
                                 console.log(`⏳ [Nursery] ${mintAddress.substring(0,6)} Indexer 未準備好或流動性不足，留池等待 (年齡: ${ageMins.toFixed(1)}m)`);
                             } else {
-                                // 垃圾幣或者超過 5 分鐘都救唔返，徹底 Delete！
                                 const reason = secResult.reason || '';
                                 if (!reason.includes('查無報價') && !reason.includes('死水') && !reason.includes('流動性太窮') && !reason.includes('等待廣播中')) {
                                     console.log(`🛡️ [Security] 攔截並移除 ${mintAddress.substring(0,6)}: ${reason}`);
@@ -424,7 +411,7 @@ function startDatabaseNurseryMonitor() {
                             }
                         }
                         processed = true;
-                        break; // 每次迴圈只真正打一次 API，保護 Rate Limit
+                        break; 
                     }
                 }
                 if (!processed) {
@@ -451,15 +438,14 @@ function startWatchlistMonitor() {
             const { data: watchlist } = await supabase.from('reentry_watchlist').select('*');
             if (!watchlist || watchlist.length === 0) return;
 
-            const mints = watchlist.map(w => w.mint_address).join(',');
-            const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mints}`, { timeout: 5000 });
-            const dexPairs = dexRes.data?.pairs || [];
+            const mints = watchlist.map(w => w.mint_address);
+            
+            const pricesMap = await priceOracleService.getPrices(mints);
 
             for (const item of watchlist) {
-                const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === item.mint_address);
-                if (!pair) continue;
-
-                const currentPrice = parseFloat(pair.priceUsd) || 0;
+                const tokenData = pricesMap[item.mint_address];
+                const currentPrice = tokenData ? tokenData.priceUsd : 0;
+                
                 if (currentPrice === 0) continue;
 
                 const baseline = parseFloat(item.baseline_price_sol);
@@ -485,7 +471,7 @@ function startWatchlistMonitor() {
                     const decisionObj = await analyzeReentry(item.mint_address, item.token_symbol, baseline);
                     
                     if (decisionObj.decision === 'BUY') {
-                        const buyResult = await executeBuy(item.mint_address, item.token_symbol, 'MEME_REENTRY', 95, decisionObj.reason, config.trade_amount_sol);
+                        const buyResult = await executeBuy(item.mint_address, item.token_symbol, 'MEME_REENTRY', decisionObj.score || 95, decisionObj.reason, config.trade_amount_sol);
                         if (buyResult !== false) {
                             console.log(`\n======================================================`);
                             console.log(`✅ 🟢 【接回成功 - ${item.token_symbol}】 🟢 ✅`);
@@ -507,8 +493,19 @@ function startWatchlistMonitor() {
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] 智能雙引擎 (Jup V3/Dex) 批次持倉監控啟動 (15秒特種防禦)...');
+    console.log('👁️ [Radar] 智能極速雙軌持倉監控啟動 (2s物理止損 + 15s大腦巡邏)...');
     
+    let cachedSolPriceUsd = 150; 
+    const sellingLocks = new Set(); // 👈 互斥鎖已就位
+
+    setInterval(async () => {
+        try {
+            const { getSolPriceInHKD } = require('./priceService');
+            const solPriceHKD = await getSolPriceInHKD();
+            cachedSolPriceUsd = solPriceHKD / 7.8;
+        } catch(e) {}
+    }, 60000);
+
     setInterval(async () => {
         try {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -518,68 +515,28 @@ function startPositionMonitor() {
             const portfolio = getPortfolio();
             const positions = portfolio.positions;
             
-            if (!positions || positions.length === 0) {
-                if (aiReviewCooldowns.size > 0) {
-                    console.log(`🧹 [Memory Clean] 檢測到全空倉，清空殘留的大腦冷卻記憶體 (${aiReviewCooldowns.size} 條)`);
-                    aiReviewCooldowns.clear();
-                }
-                healthMonitor.setStatus('AI_Overseer', '🟢 巡邏完畢 (無持倉)');
-                return;
-            }
-
-            const currentMints = new Set(positions.map(p => p.mint_address));
-            for (const mint of aiReviewCooldowns.keys()) {
-                if (!currentMints.has(mint)) {
-                    console.log(`🧹 [Memory Clean] 清除孤兒冷卻記憶體: ${mint.substring(0, 6)}`);
-                    aiReviewCooldowns.delete(mint);
-                }
-            }
+            if (!positions || positions.length === 0) return;
 
             const mints = positions.map(p => p.mint_address);
             let pricesMap = {};
-            let missingMints = [...mints]; 
 
-            try {
-                const dexUrl = `https://api.dexscreener.com/latest/dex/tokens/${mints.join(',')}`;
-                const dexRes = await axios.get(dexUrl, { timeout: 4000 });
-                const dexPairs = dexRes.data?.pairs || [];
-                
-                if (dexPairs.length > 0) {
-                    const { getSolPriceInHKD } = require('./priceService');
-                    const solPriceHKD = await getSolPriceInHKD();
-                    const solPriceUSD = solPriceHKD / 7.8;
-
-                    for (const mint of mints) {
-                        const pair = dexPairs.find(p => p.chainId === 'solana' && p.baseToken?.address === mint);
-                        if (pair && pair.priceUsd) {
-                            pricesMap[mint] = parseFloat(pair.priceUsd) / solPriceUSD; 
-                            missingMints = missingMints.filter(m => m !== mint);
-                        }
+            for (const mint of mints) {
+                const cachedData = priceOracleService.cache.get(mint);
+                if (cachedData) {
+                    if (cachedData.priceSol) {
+                        pricesMap[mint] = cachedData.priceSol;
+                    } else if (cachedData.priceUsd) {
+                        pricesMap[mint] = cachedData.priceUsd / cachedSolPriceUsd;
                     }
-                }
-            } catch (dexErr) {
-                console.warn(`⚠️ [Radar] DexScreener 報價失敗，準備切換 Jupiter 備援...`);
-            }
-
-            if (missingMints.length > 0) {
-                try {
-                    const jupUrl = `https://api.jup.ag/price/v2?ids=${missingMints.join(',')}&vsToken=${SOL_MINT_ADDRESS}`;
-                    const jupRes = await axios.get(jupUrl, { timeout: 3000 });
-                    const jupData = jupRes.data?.data || {};
-                    
-                    for (const [mint, info] of Object.entries(jupData)) {
-                        if (info && info.price) {
-                            pricesMap[mint] = parseFloat(info.price);
-                        }
-                    }
-                } catch (jupErr) {
-                    console.warn(`⚠️ [Radar] Jupiter V3 報價亦失敗。`);
                 }
             }
 
             const STOP_LOSS_PCT = parseFloat(config.stop_loss_pct || -10);
 
             for (const pos of positions) {
+                // 🛑 核心防禦：如果這隻幣已經在執行賣出，直接跳過本輪循環！
+                if (sellingLocks.has(pos.mint_address)) continue;
+
                 const currentPrice = pricesMap[pos.mint_address];
                 if (!currentPrice) continue; 
 
@@ -590,13 +547,11 @@ function startPositionMonitor() {
 
                 if (currentPrice > pos.highest_price_sol) {
                     pos.highest_price_sol = currentPrice;
-                    await supabase.from(`active_positions_${tableSuffix}`).update({ highest_price_sol: currentPrice }).eq('mint_address', pos.mint_address);
+                    supabase.from(`active_positions_${tableSuffix}`).update({ highest_price_sol: currentPrice }).eq('mint_address', pos.mint_address).then();
                 }
 
                 const drawdownFromHigh = ((currentPrice - pos.highest_price_sol) / pos.highest_price_sol) * 100;
                 const highestPnlPct = ((pos.highest_price_sol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
-
-                const posDataForAI = { ...pos, currentPrice, pnlPct, mode: portfolio.mode };
 
                 const isBluechip = pos.strategy_type && pos.strategy_type.includes('BLUECHIP');
                 const isHalfSold = pos.strategy_type && pos.strategy_type.includes('HALF_SOLD');
@@ -608,123 +563,119 @@ function startPositionMonitor() {
                 if (isBluechip && highestPnlPct >= 5.0 && pnlPct <= 0.5) {
                     action = 'SELL';
                     reason = `🛡️ [老幣保本機制] 利潤曾達 +${highestPnlPct.toFixed(2)}% 現回落至成本線，強制結利`;
-                }
-
-                if (pnlPct <= STOP_LOSS_PCT) {
+                } else if (pnlPct <= STOP_LOSS_PCT) {
                     action = 'SELL';
                     reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
-                } 
-                else if (!isHalfSold && highestPnlPct >= 100) {
+                } else if (!isHalfSold && highestPnlPct >= 100) {
                     action = 'SELL';
                     sellFraction = 0.5;
                     reason = `🚀 翻倍回本機制 (歷史最高達 +${highestPnlPct.toFixed(2)}%，賣出 50% 鎖定成本)`;
-                }
-                else if (isHalfSold && drawdownFromHigh <= -30) {
+                } else if (isHalfSold && drawdownFromHigh <= -30) {
                     action = 'SELL';
                     reason = `💰 登月尾倉止盈 (翻倍後高位回撤 ${drawdownFromHigh.toFixed(2)}%，全數獲利了結)`;
-                }
-                else if (!isHalfSold && highestPnlPct >= 50 && drawdownFromHigh <= -15) {
+                } else if (!isHalfSold && highestPnlPct >= 50 && drawdownFromHigh <= -15) {
                     action = 'SELL';
                     reason = `💰 觸發無腦利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%，高位回撤: ${drawdownFromHigh.toFixed(2)}%)`;
                 } 
-                else {
-                    const nowMs = Date.now();
-                    const lastReviewMs = aiReviewCooldowns.get(pos.mint_address) || 0;
-                    const minsSinceLastReview = (nowMs - lastReviewMs) / 60000;
-
-                    if (minsSinceLastReview < 5) {
-                        continue; 
-                    }
-
-                    aiReviewCooldowns.set(pos.mint_address, nowMs);
-
-                    console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
-                    
-                    try {
-                        const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
-                        
-                        if (reviewResult.decision === 'RETRY_LATER') {
-                            aiReviewCooldowns.set(pos.mint_address, nowMs - (3 * 60 * 1000));
-                            continue; 
-                        }
-
-                        action = reviewResult.decision;
-                        reason = `AI 指示: ${reviewResult.reason}`;
-                        
-                        if (action === 'EXIT') action = 'SELL';
-                        
-                        if (action === 'HOLD') {
-                            console.log(`🛡️ [AI 決策] ${pos.token_symbol} 繼續持有。理由: ${reviewResult.reason}\n`);
-                        }
-                    } catch (aiErr) {
-                        console.error(`❌ [AI Reviewer] 發生錯誤:`, aiErr.message);
-                        aiReviewCooldowns.set(pos.mint_address, nowMs - (4 * 60 * 1000));
-                        continue;
-                    }
-                }
 
                 if (action === 'SELL') {
-                    const pnlIcon = pnlPct > 0 ? '🚀 止盈' : '🩸 止損';
-                    
                     if (isBluechip && !isHalfSold && pnlPct > 0 && sellFraction === 1.0) {
                         sellFraction = 0.5;
                         reason = `[老幣分批止盈] ${reason}`;
                     }
 
-                    const sellResult = await runSellPipeline(pos, currentPrice, reason, sellFraction);
-                    
-                    if (sellResult) {
-                        if (sellFraction === 0.5) {
-                            console.log(`\n======================================================`);
-                            console.log(`💳 🔴 【分批賣出成功 - ${pos.token_symbol}】 🔴 💳`);
-                            console.log(`📊 動作: 🚀 止盈 (+${pnlPct.toFixed(2)}%)`);
-                            console.log(`🤖 理由: ${reason}`);
-                            console.log(`======================================================\n`);
-                            sendTelegramAlert(`🌟 <b>翻倍鎖定利潤</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定成本，剩餘尾倉讓利潤奔跑！`);
-                        } else {
-                            console.log(`\n======================================================`);
-                            console.log(`💳 🔴 【全倉賣出成功 - ${pos.token_symbol}】 🔴 💳`);
-                            console.log(`📊 動作: ${pnlIcon} (${pnlPct.toFixed(2)}%)`);
-                            console.log(`🤖 理由: ${reason}`);
-                            console.log(`======================================================\n`);
+                    // 🛑 上鎖！阻止後續循環重複賣出
+                    sellingLocks.add(pos.mint_address);
 
-                            aiReviewCooldowns.delete(pos.mint_address);
-
-                            const isFirstTimeMeme = !isBluechip && 
-                                                    (pos.strategy_type && (pos.strategy_type.includes('MEME_SNIPE') || pos.strategy_type.includes('MEME_BLIND')));
-                            
-                            const isTrending = pos.strategy_type && pos.strategy_type.includes('TRENDING');
-
-                            if (isFirstTimeMeme) {
-                                if (pnlPct >= -20) {
-                                    // 🚀 V7.0 核心修復：防止分拆砸盤無限重置 Re-entry 的 Baseline Price 同計時器
-                                    const { data: existingWatch } = await supabase.from('reentry_watchlist').select('id').eq('mint_address', pos.mint_address).maybeSingle();
-                                    
-                                    if (!existingWatch) {
-                                        await supabase.from('reentry_watchlist').insert([{
-                                            mint_address: pos.mint_address, token_symbol: pos.token_symbol,
-                                            sold_price_sol: currentPrice, baseline_price_sol: currentPrice,
-                                            consolidation_start_time: new Date().toISOString()
-                                        }]);
-                                        console.log(`📋 已將 ${pos.token_symbol} 加入橫盤觀察名單 (30分鐘後評估接回)`);
-                                    } else {
-                                        console.log(`📋 ${pos.token_symbol} 已在觀察名單中，跳過覆蓋以保留初始計時。`);
-                                    }
-                                } else {
-                                    console.log(`💀 [Blacklist] ${pos.token_symbol} 虧損過大 (${pnlPct.toFixed(2)}%)，判處死刑，拒絕加入接回名單！`);
-                                }
-                            } else if (isTrending) {
-                                console.log(`🔥 [Trending] ${pos.token_symbol} (Top 50) 已完成歷史任務，功成身退，不作接回。`);
-                            }
+                    runSellPipeline(pos, currentPrice, reason, sellFraction).then(sellResult => {
+                        if (sellResult && sellFraction === 0.5) {
+                            sendTelegramAlert(`🌟 <b>翻倍/分批鎖定利潤</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定利潤，剩餘尾倉讓利潤奔跑！`);
                         }
-                    }
+                    }).catch(err => {
+                        console.error(`❌ [Track 1 Sell Error]`, err.message);
+                    }).finally(() => {
+                        // 🛑 解鎖！無論成功失敗都釋放
+                        sellingLocks.delete(pos.mint_address);
+                    });
                 }
             }
         } catch (err) {
-            console.error(`❌ [Position Monitor] 監控迴圈異常:`, err.message);
+            console.error(`❌ [Position Monitor] 2s 極速引擎異常:`, err.message);
+        }
+    }, 2000); 
+
+    setInterval(async () => {
+        try {
+            const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
+            if (!config || !config.is_running) return;
+
+            const { getPortfolio } = require('./portfolioService');
+            const portfolio = getPortfolio();
+            const positions = portfolio.positions;
+            
+            if (!positions || positions.length === 0) {
+                if (aiReviewCooldowns.size > 0) aiReviewCooldowns.clear();
+                healthMonitor.setStatus('AI_Overseer', '🟢 巡邏完畢 (無持倉)');
+                return;
+            }
+
+            const currentMints = new Set(positions.map(p => p.mint_address));
+            for (const mint of aiReviewCooldowns.keys()) {
+                if (!currentMints.has(mint)) aiReviewCooldowns.delete(mint);
+            }
+
+            for (const pos of positions) {
+                // 🛑 核心防禦：如果 2 秒物理 Loop 已經在賣出這隻幣，AI 巡邏直接跳過，不干涉！
+                if (sellingLocks.has(pos.mint_address)) continue;
+
+                const nowMs = Date.now();
+                const lastReviewMs = aiReviewCooldowns.get(pos.mint_address) || 0;
+                
+                if ((nowMs - lastReviewMs) / 60000 < 5) continue; 
+
+                const cachedData = priceOracleService.cache.get(pos.mint_address);
+                if (!cachedData) continue;
+                
+                const currentPrice = cachedData.priceSol ? cachedData.priceSol : (cachedData.priceUsd / cachedSolPriceUsd);
+                const pnlPct = (((currentPrice - pos.entry_price_sol) * pos.quantity) / (pos.entry_price_sol * pos.quantity)) * 100;
+
+                aiReviewCooldowns.set(pos.mint_address, nowMs);
+
+                console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
+                
+                try {
+                    const posDataForAI = { ...pos, currentPrice, pnlPct, mode: portfolio.mode };
+                    const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
+                    
+                    if (reviewResult.decision === 'RETRY_LATER') {
+                        aiReviewCooldowns.set(pos.mint_address, nowMs - (3 * 60 * 1000));
+                        continue; 
+                    }
+
+                    if (reviewResult.decision === 'EXIT' || reviewResult.decision === 'SELL') {
+                        // 🛑 上鎖！
+                        sellingLocks.add(pos.mint_address);
+
+                        runSellPipeline(pos, currentPrice, `AI 指示: ${reviewResult.reason}`, 1.0)
+                            .catch(err => console.error(`❌ [Track 2 Sell Error]`, err.message))
+                            .finally(() => {
+                                aiReviewCooldowns.delete(pos.mint_address);
+                                // 🛑 解鎖！
+                                sellingLocks.delete(pos.mint_address);
+                            });
+                    } else {
+                        console.log(`🛡️ [AI 決策] ${pos.token_symbol} 繼續持有。理由: ${reviewResult.reason}\n`);
+                    }
+                } catch (aiErr) {
+                    console.error(`❌ [AI Reviewer] 發生錯誤:`, aiErr.message);
+                    aiReviewCooldowns.set(pos.mint_address, nowMs - (4 * 60 * 1000)); 
+                }
+            }
+        } catch (err) {
+            console.error(`❌ [Position Monitor] AI 巡邏引擎異常:`, err.message);
             healthMonitor.setStatus('AI_Overseer', `🔴 監控異常: ${err.message}`);
         }
-    }, 15000); 
+    }, 15000);
 }
 
 function startCommandListener() {

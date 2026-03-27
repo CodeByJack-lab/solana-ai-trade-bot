@@ -3,15 +3,13 @@ const { Keypair, VersionedTransaction, Transaction, SystemProgram, PublicKey } =
 const { connection } = require('../config/solana');
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
-const path = require('path');
 const { healthMonitor } = require('./healthMonitor'); 
+const configEnv = require('../config/env'); // 👈 引入彈藥庫
 
 let bs58 = require('bs58');
 if (bs58.default) {
     bs58 = bs58.default;
 }
-
-require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
 // 💸 Jito 官方小費收集地址
 const JITO_TIP_ACCOUNTS = [
@@ -27,7 +25,7 @@ const JITO_TIP_ACCOUNTS = [
 
 let wallet;
 try {
-    const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
+    const rawKey = configEnv.solana.walletPrivateKey ? configEnv.solana.walletPrivateKey.trim() : null;
     if (rawKey) {
         if (rawKey.startsWith('[')) {
             const Uint8ArrayKey = Uint8Array.from(JSON.parse(rawKey));
@@ -68,12 +66,12 @@ async function pollSignatureStatus(signature, timeoutMs = 15000) {
 async function getJupiterSwapTransaction(quoteResponse) {
     try {
         if (!wallet) return null;
-        const baseUrl = (process.env.JUPITER_BASE_URL || 'https://quote-api.jup.ag').replace(/\/$/, '');
+        const baseUrl = (configEnv.external.jupiterBaseUrl || 'https://quote-api.jup.ag').replace(/\/$/, '');
         const endpoint = baseUrl.includes('quote-api') ? '/v6/swap' : '/swap/v1/swap';
         
         const config = { headers: {} };
-        if (process.env.JUPITER_API_KEY) {
-            config.headers['x-api-key'] = process.env.JUPITER_API_KEY.replace(/['"]/g, '').trim();
+        if (configEnv.external.jupiterApiKey) {
+            config.headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
         }
 
         const response = await axios.post(`${baseUrl}${endpoint}`, {
@@ -162,7 +160,6 @@ async function executeLiveSwapUAT(quoteResponse, action) {
         console.log(`🔗 追蹤連結: https://solscan.io/tx/${txid}`);
         console.log(`⏳ 等待區塊鏈確認 (最大等候 15 秒)...`);
 
-        // 🚀 核心修復：使用自定義 Polling 代替原生 confirmTransaction，防止線程假死
         await pollSignatureStatus(txid, 15000); 
         
         console.log(`🎉 [Live Trade] ${action} 交易已在鏈上確認！`);

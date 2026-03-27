@@ -1,21 +1,18 @@
 // src/services/portfolioService.js
 const { supabase } = require('../config/supabase'); 
 const { connection } = require('../config/solana');
-const { PublicKey, Keypair } = require('@solana/web3.js'); // 🚀 加入 Keypair
-const path = require('path');
+const { PublicKey, Keypair } = require('@solana/web3.js'); 
 const { healthMonitor } = require('./healthMonitor');
+const configEnv = require('../config/env'); // 👈 引入彈藥庫
 
 let bs58 = require('bs58');
 if (bs58.default) {
     bs58 = bs58.default;
 }
 
-require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
-
-// 🚀 FIX 1: 直接由 Private Key 推算 Public Key，免除 .env 填漏風險
 let walletPublicKey = null;
 try {
-    const rawKey = process.env.SOLANA_PRIVATE_KEY ? process.env.SOLANA_PRIVATE_KEY.trim() : null;
+    const rawKey = configEnv.solana.walletPrivateKey ? configEnv.solana.walletPrivateKey.trim() : null;
     if (rawKey) {
         if (rawKey.startsWith('[')) {
             walletPublicKey = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey;
@@ -36,7 +33,6 @@ let my_portfolio = {
     last_sync: null
 };
 
-// 🚀 三軍資金鎖設定 (2:4:4 比例)
 let globalMaxPositions = 10;
 
 async function updateSystemStatus(msg) {
@@ -64,14 +60,12 @@ async function initPortfolio() {
 
         const tableName = my_portfolio.mode === 'PAPER' ? 'active_positions_paper' : 'active_positions_live';
 
-        // 🚀 FIX 2: 無論 LIVE 定 PAPER，都在後台默默更新一次真錢餘額畀 Dashboard 睇！
         if (walletPublicKey) {
             try {
                 const lamports = await connection.getBalance(walletPublicKey);
                 const liveSol = lamports / 1e9;
                 await supabase.from('system_config').update({ live_wallet_balance: liveSol }).eq('id', 1);
                 
-                // 如果真正打緊真軍，先將內部 cash_sol 指向真錢
                 if (my_portfolio.mode === 'LIVE') {
                     my_portfolio.cash_sol = liveSol;
                     my_portfolio.reference_capital = liveSol;
@@ -81,7 +75,6 @@ async function initPortfolio() {
             }
         }
 
-        // 如果係模擬模式，內部運作資金用返模擬數字
         if (my_portfolio.mode === 'PAPER') {
             my_portfolio.reference_capital = config?.reference_capital || 10;
             my_portfolio.cash_sol = config?.simulated_balance || 10;
@@ -113,7 +106,6 @@ async function initPortfolio() {
 }
 
 async function syncLiveBalanceToDB() {
-    // 🚀 FIX 3: 定時同步亦都不受 PAPER 模式限制，確保 Dashboard 一直見到真錢跳動
     if (walletPublicKey) {
         try {
             const lamports = await connection.getBalance(walletPublicKey);
@@ -128,37 +120,26 @@ async function syncLiveBalanceToDB() {
 
 function getPortfolio() { return my_portfolio; }
 
-// ==========================================
-// 🛡️ V5.5 核心：資金與倉位絕對鎖 (The Money Gate)
-// ==========================================
-
-// ==========================================
-// 🛡️ V6.0 核心：三軍資金與倉位絕對鎖 (The Money Gate 2:4:4)
-// ==========================================
-
 function getPositionLimits() {
-    const maxBluechip = Math.floor(globalMaxPositions * 0.2); // 20%
-    const maxTrending = Math.floor(globalMaxPositions * 0.4); // 40%
-    const maxMeme = globalMaxPositions - maxBluechip - maxTrending; // 剩餘歸 Meme (約 40%)
+    const maxBluechip = Math.floor(globalMaxPositions * 0.2); 
+    const maxTrending = Math.floor(globalMaxPositions * 0.4); 
+    const maxMeme = globalMaxPositions - maxBluechip - maxTrending; 
     return { maxMeme, maxTrending, maxBluechip };
 }
 
 function getMemeCount() {
-    // 🚀 只計算純 Meme 策略 (Snipe 或 Blind)
     return my_portfolio.positions.filter(p => 
         p.strategy_type && (p.strategy_type.includes('MEME_SNIPE') || p.strategy_type.includes('MEME_BLIND'))
     ).length;
 }
 
 function getTrendingCount() {
-    // 🚀 新增：只計算 Top 50 追擊策略
     return my_portfolio.positions.filter(p => 
         p.strategy_type && p.strategy_type.includes('TRENDING')
     ).length;
 }
 
 function getBlueChipCount() {
-    // 只計算老幣抄底策略
     return my_portfolio.positions.filter(p => 
         p.strategy_type && p.strategy_type.includes('BLUECHIP')
     ).length;
@@ -189,10 +170,9 @@ module.exports = {
     syncLiveBalanceToDB, 
     updateSystemStatus,
     getMemeCount,
-    getTrendingCount, // 🚀 新增導出
+    getTrendingCount, 
     getBlueChipCount,
     getPositionLimits,
-    // 🛡️ 買入准入檢查 (供其他 Service 調用)
     canBuyMeme: () => getMemeCount() < getPositionLimits().maxMeme,
     canBuyTrending: () => getTrendingCount() < getPositionLimits().maxTrending,
     canBuyBluechip: () => getBlueChipCount() < getPositionLimits().maxBluechip

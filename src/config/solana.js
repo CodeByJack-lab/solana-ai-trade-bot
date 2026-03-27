@@ -1,16 +1,13 @@
 // src/config/solana.js
 const { Connection } = require('@solana/web3.js');
-const path = require('path');
-
-// 🛡️ 強制覆蓋：讀取 .env
-require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
+const configEnv = require('./env'); // 👈 引入中央彈藥庫
 
 // ==========================================
 // 🚀 Tier 1 & 2: 用戶專屬 VIP 節點
 // ==========================================
-const alchemyUrl = process.env.ALCHEMY_RPC_URL;
-const heliusUrl = process.env.HELIUS_RPC_URL;
-const heliusUrl2 = process.env.HELIUS_RPC_URL_2; 
+const alchemyUrl = configEnv.rpc.alchemy.url;
+const heliusUrl = configEnv.rpc.helius1.url;
+const heliusUrl2 = configEnv.rpc.helius2.url; 
 
 // ==========================================
 // 🌍 Tier 3: 終極免費公共節點池 (無需 API Key)
@@ -38,12 +35,11 @@ console.log(`\n🔌 [System] 初始化 Solana 多核連線 (具備極速超時�
 console.log(`🎯 [RPC 主力] ${selectedPrimaryUrl.replace(/\?api-key=.*/, '?api-key=***')}`);
 console.log(`🛡️ [RPC 備援] ${selectedFallbackUrl.replace(/\?api-key=.*/, '?api-key=***')}`);
 
-// 🚀 核心升級：加入 maxRetries: 0，廢除 Solana Web3.js 愚蠢的死等機制，實現毫秒級無縫切換！
 const connectionConfig = { commitment: 'confirmed', maxRetries: 0 };
 
 const primaryConnection = new Connection(selectedPrimaryUrl, connectionConfig);
 const fallbackConnection = new Connection(selectedFallbackUrl, connectionConfig);
-const publicConnection = new Connection(selectedPublicUrl, connectionConfig); // Tier 3 終極水喉
+const publicConnection = new Connection(selectedPublicUrl, connectionConfig);
 
 const withTimeout = (promise, ms, operationName) => {
     let timeoutId;
@@ -79,7 +75,6 @@ const connection = new Proxy(primaryConnection, {
                     }
                 }
 
-                // ⚡ 其他普通查詢 (getAccountInfo 等)，嚴格執行 2 秒死亡倒數！
                 try {
                     return await withTimeout(origMethod.apply(target, args), 2000, propKey);
                 } catch (err) {
@@ -90,7 +85,6 @@ const connection = new Proxy(primaryConnection, {
                         const fallbackMethod = fallbackConnection[propKey];
                         return await fallbackMethod.apply(fallbackConnection, args);
                     } catch (err2) {
-                        // 🌍 雙節點都死/429，瞬間駁入免費公共池！
                         console.warn(`⚠️ 雙節點皆觸發 429/超時，瞬間駁入免 Key 公共節點 (dRPC/Ankr)...`);
                         const publicMethod = publicConnection[propKey];
                         return await publicMethod.apply(publicConnection, args);
