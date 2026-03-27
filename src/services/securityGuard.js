@@ -1,212 +1,159 @@
-// src/services/priceOracleService.js
+// src/services/securityGuard.js
 const axios = require('axios');
+const { PublicKey } = require('@solana/web3.js');
+const { connection } = require('../config/solana');
+const { supabase } = require('../config/supabase');
 const { healthMonitor } = require('./healthMonitor');
+const { priceOracleService } = require('./priceOracleService'); // 👈 [融合] 引入 V7.0 預言機
 
-/**
- * 🫀 系統心臟：Price Oracle Service (V7.0 異步批次版)
- * 負責統籌全系統的所有價格與流動性查詢，消滅 429 Error
- */
-class PriceOracleService {
-    constructor() {
-        this.cache = new Map();             // 緩存所有代幣的完整 Profile
-        this.requestQueue = new Set();      // 普通排隊區 (10秒班車，供新幣與海選使用)
-        this.portfolioMints = new Set();    // VIP 專線區 (2秒心跳，供實盤止損使用)
-        
-        this.isProcessingBatch = false;
-        this.isProcessingVip = false;
+const securityGuard = {
+    // 🚀 嚴格 Base58 Payload 洗白
+    sanitizeAddress(address) {
+        if (!address) return null;
+        const clean = address.toString().trim().replace(/[\n\r\t\s]/g, '');
+        if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(clean)) return null;
+        return clean;
+    },
 
-        // 啟動雙引擎
-        this._startBatchProcessing();
-        this._startVipMonitoring();
-        
-        console.log('🫀 [Price Oracle] 雙引擎報價中心已啟動 (10s Batch / 2s VIP)');
-    }
-
-    /**
-     * 📝 更新 VIP 監控名單 (由 Trade Engine 買賣後呼叫)
-     */
-    setPortfolioMints(mintsArray) {
-        this.portfolioMints = new Set(mintsArray);
-    }
-
-    /**
-     * 📌 異步獲取單一代幣完整 Profile (供 Security Guard 異步漏斗使用)
-     */
-    async getProfileAsync(mint) {
-        // 呼叫 getPrices 會自動將 mint 加入排隊區，並「卡住」等待班車返回
-        const pricesMap = await this.getPrices([mint]);
-        const data = pricesMap[mint];
-        
-        if (!data || !data.priceUsd) return null;
-
-        return {
-            symbol: data.symbol || 'UNKNOWN',
-            name: data.name || 'UNKNOWN',
-            liquidity: data.liquidity || 0,
-            fdv: data.fdv || 0,
-            volume5m: data.volume5m || 0,
-            buys5m: data.buys5m || 0,
-            sells5m: data.sells5m || 0,
-            socials: data.socials || "無"
-        };
-    }
-
-    /**
-     * 🛒 批次查詢價格 (會自動判斷讀取 Cache 還是加入 10 秒等待隊列)
-     */
-    async getPrices(mintsArray) {
-        if (!mintsArray || mintsArray.length === 0) return {};
-
-        const unresolvedMints = [];
-        const result = {};
-        const now = Date.now();
-
-        // 1. 先查 Cache (如果 15 秒內更新過，當作新鮮數據直接用)
-        for (const mint of mintsArray) {
-            const cachedData = this.cache.get(mint);
-            if (cachedData && (now - cachedData.lastUpdated) < 15000) {
-                result[mint] = cachedData;
-            } else {
-                this.requestQueue.add(mint); // 塞入大巴排隊
-                unresolvedMints.push(mint);
-            }
+    isGarbageToken(name, symbol) {
+        const target = `${name} ${symbol}`.toLowerCase();
+        const badPatterns = [
+            /\.com/i, /\.io/i, /\.org/i, /\.xyz/i, /t\.me\//i,         
+            /test\s*token/i, /testnet/i, /presale/i, /airdrop/i,         
+            /claim/i, /free/i, /scam/i, /fake/i, /honeypot/i
+        ];
+        for (const pattern of badPatterns) {
+            if (pattern.test(target)) return { isGarbage: true, match: pattern.toString() };
         }
+        return { isGarbage: false };
+    },
 
-        // 2. 如果有幣未查到，喺度「異步死等」班車返嚟 (最多等 12 秒)
-        if (unresolvedMints.length > 0) {
-            let attempts = 0;
-            while (attempts < 60) { // 60 次 * 200ms = 12 秒
-                await new Promise(r => setTimeout(r, 200));
-                
-                let allResolved = true;
-                for (const mint of unresolvedMints) {
-                    const checkCache = this.cache.get(mint);
-                    if (checkCache && (Date.now() - checkCache.lastUpdated) < 15000) {
-                        result[mint] = checkCache;
-                    } else {
-                        allResolved = false;
-                    }
-                }
-                
-                if (allResolved) break; // 班車返嚟啦！全部都有數據！
-                attempts++;
-            }
-        }
-
-        return result;
-    }
-
-    /**
-     * 🚂 軌道一：10 秒大巴 (處理 Webhook / 海選的巨量請求)
-     */
-    _startBatchProcessing() {
-        setInterval(async () => {
-            if (this.isProcessingBatch || this.requestQueue.size === 0) return;
-            this.isProcessingBatch = true;
-
-            try {
-                // 1. 獲取所有排隊中的地址，並立刻清空月台
-                const allMints = Array.from(this.requestQueue);
-                this.requestQueue.clear(); 
-
-                // 2. 將地址斬件，每 30 個一卡車 (DexScreener 限制)
-                for (let i = 0; i < allMints.length; i += 30) {
-                    const chunk = allMints.slice(i, i + 30);
-                    await this._fetchDexScreener(chunk);
-                    
-                    // 如果仲有下一卡車，稍微停 500ms，防止瞬間 429
-                    if (i + 30 < allMints.length) {
-                        await new Promise(r => setTimeout(r, 500));
-                    }
-                }
-            } catch (error) {
-                console.error('❌ [Oracle 10s Batch] 獲取失敗:', error.message);
-            } finally {
-                this.isProcessingBatch = false;
-            }
-        }, 10000); 
-    }
-
-    /**
-     * 🏎️ 軌道二：2 秒高鐵 (專門服侍 VIP 持倉，確保極速止損)
-     */
-    _startVipMonitoring() {
-        setInterval(async () => {
-            if (this.isProcessingVip || this.portfolioMints.size === 0) return;
-            this.isProcessingVip = true;
-
-            try {
-                const mintsToFetch = Array.from(this.portfolioMints).slice(0, 30);
-                await this._fetchDexScreener(mintsToFetch);
-            } catch (error) {
-                // 背景靜默處理，唔洗狂噴 Error
-            } finally {
-                this.isProcessingVip = false;
-            }
-        }, 2000);
-    }
-
-    /**
-     * 📡 底層打雜：向 DexScreener 請求並解析豐富數據 (Rich Profile)
-     */
-    async _fetchDexScreener(mintsArray) {
-        if (mintsArray.length === 0) return;
-        
+    async checkAll(mintAddress, poolType = 'NURSERY') {
         try {
-            const url = `https://api.dexscreener.com/latest/dex/tokens/${mintsArray.join(',')}`;
-            const response = await axios.get(url, { timeout: 5000 });
-            const pairs = response.data?.pairs || [];
+            healthMonitor.setStatus('Security_Guard', '🟢 運作中');
 
-            // 因為一隻幣可能有多個 Pool，我哋要揀流動性最高嗰個
-            const pairsByMint = {};
-            for (const pair of pairs) {
-                if (pair.chainId !== 'solana') continue;
-                const mint = pair.baseToken?.address;
-                if (!mint) continue;
-                
-                if (!pairsByMint[mint] || (pair.liquidity?.usd || 0) > (pairsByMint[mint].liquidity?.usd || 0)) {
-                    pairsByMint[mint] = pair;
+            const cleanMint = this.sanitizeAddress(mintAddress);
+            if (!cleanMint) return { isSafe: false, reason: '🛑 無效的 Base58 地址格式' };
+
+            // 🚀 V7.1: 保留 RPC 帳戶驗證防線
+            try {
+                const accountInfo = await connection.getAccountInfo(new PublicKey(cleanMint));
+                if (!accountInfo) {
+                    return { isSafe: false, isPurgatory: true, reason: '⏳ 鏈上查無帳戶 (等待廣播中)' };
                 }
+            } catch (rpcErr) {
+                return { isSafe: false, isPurgatory: true, reason: `⏳ RPC連線異常: ${rpcErr.message}` };
             }
 
-            const now = Date.now();
-            for (const mint of mintsArray) {
-                const pair = pairsByMint[mint];
-                if (pair) {
-                    // 🚀 V7.0：完美注入所有 Metadata，等 Security Guard 同 AI 軍師有數據用！
-                    const socials = pair.info?.socials || [];
-                    this.cache.set(mint, {
-                        priceUsd: parseFloat(pair.priceUsd) || 0,
-                        priceSol: parseFloat(pair.priceNative) || 0,
-                        liquidity: pair.liquidity?.usd || 0,
-                        fdv: pair.fdv || 0,
-                        volume5m: pair.volume?.m5 || 0,
-                        buys5m: pair.txns?.m5?.buys || 0,
-                        sells5m: pair.txns?.m5?.sells || 0,
-                        symbol: pair.baseToken?.symbol || 'UNKNOWN',
-                        name: pair.baseToken?.name || 'UNKNOWN',
-                        socials: socials.length > 0 ? `有 (${socials.map(s => s.type).join('/')})` : '無',
-                        lastUpdated: now
-                    });
-                } else {
-                    // 如果 DexScreener 查無此幣 (404/未發車)，仍要 Update 時間，防止 queue 無限死等
-                    const existing = this.cache.get(mint) || {};
-                    this.cache.set(mint, {
-                        ...existing,
-                        priceUsd: 0,
-                        priceSol: 0,
-                        lastUpdated: now
-                    });
-                }
+            // 讀取 AI 參數
+            const targetParamId = poolType === 'TRENDING' ? 3 : (poolType === 'BLUECHIP' ? 1 : 2);
+            const { data: params, error: dbErr } = await supabase.from('ai_strategy_params').select('*').eq('id', targetParamId).single();
+            if (dbErr) throw new Error(`無法讀取參數 ID ${targetParamId}`);
+
+            const limits = {
+                minLiq: params.min_liquidity || 4000,
+                minVol: params.min_vol_5m || 500,
+                minRatio: parseFloat(params.min_liq_fdv_ratio || 0.01)
+            };
+
+            // 🚀 V7.1: 完美融合！由原本 axios 改用 Oracle 查價，徹底防禦 429！
+            let marketData = await priceOracleService.getProfileAsync(cleanMint);
+
+            if (!marketData) {
+                return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
             }
-            healthMonitor.setStatus('Price_Oracle', `🟢 運作中 (Cache: ${this.cache.size})`);
-        } catch (error) {
-            console.warn(`⚠️ [Oracle API Error] DexScreener 請求超時或被拒: ${error.message}`);
-            healthMonitor.setStatus('Price_Oracle', `🟡 網路波動`);
+
+            // 垃圾名攔截
+            const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
+            if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
+
+            // 盲狙特權
+            const isBlindSnipe = (marketData.liquidity < 1000 && marketData.volume5m === 0);
+
+            if (!isBlindSnipe) {
+                // 流動性與 80% 緩刑機制
+                if (marketData.liquidity < limits.minLiq) {
+                    if (poolType === 'TRENDING') return { isSafe: false, reason: `📉 流動性未達熱門標準 ($${marketData.liquidity.toFixed(0)} < $${limits.minLiq})` };
+                    
+                    const purgatoryThreshold = limits.minLiq * 0.8;
+                    if (marketData.liquidity >= purgatoryThreshold) {
+                        return { isSafe: false, isPurgatory: true, reason: `⏳ 流動性緩刑 ($${marketData.liquidity.toFixed(0)} < $${limits.minLiq})` };
+                    }
+                    return { isSafe: false, reason: `📉 流動性太窮 ($${marketData.liquidity.toFixed(0)} < $${limits.minLiq})` };
+                }
+
+                if (marketData.volume5m < limits.minVol) return { isSafe: false, reason: `📉 5分量死水 ($${marketData.volume5m.toFixed(0)} < $${limits.minVol})` };
+
+                const currentRatio = marketData.fdv > 0 ? (marketData.liquidity / marketData.fdv) : 0;
+                if (currentRatio < limits.minRatio) return { isSafe: false, reason: `📉 泡沫極大 (比例 ${(currentRatio * 100).toFixed(2)}%)` };
+            }
+
+            // 🚀 V7.1: 保留 RugCheck 防線！
+            const rugResult = await this.checkRugPull(cleanMint);
+            if (!rugResult.isSafe) return rugResult;
+
+            return {
+                isSafe: true,
+                isBlindSnipe: isBlindSnipe,
+                marketData: marketData,
+                reason: '✅ 物理與合約防線全數通過'
+            };
+
+        } catch (err) {
+            console.error(`❌ [Security] Guard 異常:`, err.message);
+            healthMonitor.setStatus('Security_Guard', `🔴 異常: ${err.message}`);
+            return { isSafe: false, isPurgatory: true, reason: '🛑 系統探測異常' };
+        }
+    },
+
+    // 🛡️ 檢查 RugPull (保留 V6.0 優良傳統)
+    async checkRugPull(mintAddress) {
+        try {
+            const url = `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`;
+            const response = await axios.get(url, {
+                timeout: 7000,
+                headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
+            });
+
+            if (!response.data) throw new Error("RugCheck 無回應");
+
+            const report = response.data;
+            const score = report.score || 0;
+            if (score > 5000) return { isSafe: false, reason: `🛑 RugCheck 危險分數過高 (${score}分)` };
+
+            const risks = report.risks || [];
+            const hasMintRisk = risks.some(r => r.name === "Mint Authority still active" || r.value === "Minting enabled");
+            const hasFreezeRisk = risks.some(r => r.name === "Freeze Authority still active");
+            const hasLPRisk = risks.some(r => r.name.toLowerCase().includes("liquidity not locked") || r.name.toLowerCase().includes("unlocked"));
+
+            if (hasMintRisk) return { isSafe: false, reason: "🛑 未放棄 Mint 權限" };
+            if (hasFreezeRisk) return { isSafe: false, reason: "🛑 未放棄 Freeze 權限" };
+            if (hasLPRisk) return { isSafe: false, reason: "🛑 LP 池未鎖定 (高危撤資)" };
+
+            return { isSafe: true };
+        } catch (err) {
+            return await this.fallbackNativeCheck(mintAddress);
+        }
+    },
+
+    // 🛡️ 原生 RPC 權限備援檢查
+    async fallbackNativeCheck(mintAddress) {
+        try {
+            const pubKey = new PublicKey(mintAddress);
+            const accInfo = await connection.getParsedAccountInfo(pubKey);
+            if (!accInfo.value) return { isSafe: false, reason: "🛑 找不到代幣帳戶" };
+
+            const info = accInfo.value.data?.parsed?.info;
+            if (!info) return { isSafe: false, reason: "🛑 無法解析代幣結構" };
+
+            if (info.mintAuthority !== null && info.mintAuthority !== undefined) return { isSafe: false, reason: "🛑 未放棄 Mint 權限" };
+            if (info.freezeAuthority !== null && info.freezeAuthority !== undefined) return { isSafe: false, reason: "🛑 未放棄 Freeze 權限" };
+
+            return { isSafe: true };
+        } catch (err) {
+            return { isSafe: false, reason: `🛑 原生 RPC 連線異常` };
         }
     }
-}
+};
 
-// 導出單例 (Singleton)
-const priceOracleService = new PriceOracleService();
-module.exports = { priceOracleService };
+module.exports = { securityGuard };
