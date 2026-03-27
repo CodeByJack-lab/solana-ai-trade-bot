@@ -23,6 +23,10 @@ const { priceOracleService } = require('./priceOracleService');
 
 const app = express();
 app.use(express.json());
+// 應付 Railway Healthcheck
+app.get('/', (req, res) => {
+    res.status(200).send('🟢 SOL_Trade V7.0 系統正常運行中');
+});
 
 // 🚀 [V7.0] 轉用中央彈藥庫
 const HELIUS_API_KEY = configEnv.rpc.helius1.apiKey;           

@@ -1,74 +1,158 @@
-// src/services/healthMonitor.js
-const { sendAdminAlert } = require('./services/telegramService');
+// src/index.js - V7.0 Protocol-level Diagnosis
+const configEnv = require('./config/env'); 
+const { supabase } = require('./config/supabase'); 
+const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
+const { startMarketMonitor } = require('./services/monitorService'); 
+const { getSolPriceInHKD } = require('./services/priceService'); 
 
-class HealthMonitor {
-    constructor() {
-        this.statuses = new Map();
-        this.aiLatencies = []; // 儲存最近 50 次 AI 延遲
-        this.apiUsage = { requests: 0, errors429: 0 };
-        this.oracleQueueSize = 0;
-    }
+const { macroMonitorService } = require('./services/macroMonitorService'); 
+const { blueChipJob } = require('./jobs/blueChipJob');                     
+const { retrospectiveJob } = require('./jobs/retrospectiveJob');           
+const { healthMonitor } = require('./services/healthMonitor');             
 
-    // 1. 基本組件狀態
-    setStatus(component, status) {
-        this.statuses.set(component, status);
-    }
+const { graveyardJob } = require('./jobs/graveyardJob');                   
+const { janitorJob } = require('./jobs/janitorJob');   
 
-    // 2. 紀錄 AI 延遲 (毫秒)
-    recordAiLatency(latencyMs) {
-        this.aiLatencies.push(latencyMs);
-        if (this.aiLatencies.length > 50) this.aiLatencies.shift(); // 防 RAM 爆
-    }
+const { trendingMonitorService } = require('./services/trendingMonitorService');
+const { trendingJob } = require('./jobs/trendingJob');
 
-    // 3. 紀錄 API 請求次數
-    recordApiRequest() {
-        this.apiUsage.requests++;
-    }
+// 👇 [V7.0] 引入 Price Oracle
+const { priceOracleService } = require('./services/priceOracleService');
 
-    // 4. 🚨 觸發 429 警告並發送 Telegram
-    async report429Error(provider, keyIndex) {
-        this.apiUsage.errors429++;
-        const msg = `🚨 <b>[API 限流警告]</b>\n🤖 供應商: ${provider}\n🔑 Key 索引: 第 ${keyIndex + 1} 把 Key\n⚠️ 狀態: 觸發 429 Too Many Requests，系統已自動切換備用 Key！`;
+async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
+    try {
+        const currentCache = getPortfolio();
+        const solHkdPrice = await getSolPriceInHKD();
         
-        console.log(`\n======================================================`);
-        console.log(`🔥 [警告] 觸發 429 限流！(${provider} - Key ${keyIndex + 1})`);
-        console.log(`======================================================\n`);
-        
-        try {
-            await sendAdminAlert(msg);
-        } catch (e) {
-            console.error("❌ 無法發送 429 Telegram 警告:", e.message);
+        let config = newData;
+        if (!config) {
+            const { data } = await supabase.from('system_config').select('*').eq('id', 1).single();
+            config = data;
         }
-    }
+        if (!config) return;
 
-    // 5. 更新 Oracle 排隊人數
-    setOracleQueueSize(size) {
-        this.oracleQueueSize = size;
-    }
-
-    // 6. 產出完美排版的 Dashboard
-    getHealthReport() {
-        let report = '';
+        const isPaper = config.trade_mode === 'PAPER';
+        const modeText = isPaper ? '📝 模擬盤' : '🔥 實盤';
+        const statusIcon = config.is_running ? '🟢 監控中' : '🛑 已暫停';
         
-        // 上半部：各組件狀態
-        for (const [component, status] of this.statuses.entries()) {
-            // 用 padEnd 令到冒號對齊，強迫症福音
-            report += `  🔹 ${component.padEnd(20, ' ')}: ${status}\n`;
+        const investedSol = currentCache.positions.reduce((sum, pos) => sum + ((pos.quantity || 0) * (pos.entry_price_sol || 0)), 0);
+        const totalCapitalSol = currentCache.cash_sol + investedSol;
+        const totalCapitalHkd = totalCapitalSol * solHkdPrice;
+        
+        if (isFromLoop) {
+            console.log(`\n========================================`);
+            console.log(`📊 [實時戰報] ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD | 現金: ${currentCache.cash_sol.toFixed(4)} SOL`);
+            console.log(`持倉數: ${currentCache.positions.length} 隻`);
+            console.log(`--- 🩺 系統健康看板 ---`);
+            console.log(healthMonitor.getHealthReport()); 
+            console.log(`========================================`);
         }
-
-        // 計算平均延遲 (秒)
-        const avgLatency = this.aiLatencies.length > 0 
-            ? (this.aiLatencies.reduce((a, b) => a + b, 0) / this.aiLatencies.length / 1000).toFixed(2) 
-            : '0.00';
-
-        // 下半部：高級效能指標
-        report += `  ----------------------------------------------------\n`;
-        report += `  📈 [效能指標] AI 總請求: ${this.apiUsage.requests.toString().padEnd(6, ' ')} | 平均延遲: ${avgLatency}s\n`;
-        report += `  ⏳ [資源狀態] Oracle排隊: ${this.oracleQueueSize.toString().padEnd(5, ' ')} | 429 阻截: ${this.apiUsage.errors429} 次`;
         
-        return report;
+        await updateSystemStatus(`${statusIcon} | ${modeText} | 總資產: $${totalCapitalHkd.toFixed(2)} HKD`);
+    } catch (e) {
+        console.error("⚠️ 狀態更新失敗:", e.message);
     }
 }
 
-const healthMonitor = new HealthMonitor();
-module.exports = { healthMonitor };
+async function startApp() {
+    console.log("======================================================");
+    console.log("🚀 SOL_Trade V7.0 協議級防彈版啟動...");
+    console.log("======================================================");
+
+    // 🚀 [核心修復] 第一時間 Bind Port，滿足 Railway Healthcheck
+    startMarketMonitor(); 
+
+    let isFirstLoad = true; 
+
+    supabase.channel('system_config_monitor')
+        .on(
+            'postgres_changes',
+            { event: 'UPDATE', schema: 'public', table: 'system_config', filter: 'id=eq.1' },
+            async (payload) => {
+                const newData = payload.new;
+                
+                if (global.tradeMode !== newData.trade_mode) {
+                    console.log(`\n🔄 [系統指令] 偵測到交易模式切換 (${global.tradeMode} ➡️ ${newData.trade_mode})`);
+                    console.log(`🧹 正在清洗大腦記憶體，重新載入 ${newData.trade_mode} 專屬數據庫...`);
+                    const newPortfolio = await initPortfolio(); 
+                    
+                    if (newPortfolio && newPortfolio.positions) {
+                        priceOracleService.setPortfolioMints(newPortfolio.positions.map(p => p.mint_address));
+                    }
+                }
+
+                const portfolio = getPortfolio();
+                if (portfolio) {
+                    if (newData.trade_mode === 'PAPER') {
+                        if (Math.abs(portfolio.cash_sol - newData.simulated_balance) > 0.0001) {
+                            portfolio.cash_sol = newData.simulated_balance;
+                            portfolio.reference_capital = newData.reference_capital;
+                        }
+                    } else if (newData.trade_mode === 'LIVE') {
+                        if (Math.abs(portfolio.cash_sol - newData.live_wallet_balance) > 0.0001) {
+                            portfolio.cash_sol = newData.live_wallet_balance;
+                            portfolio.reference_capital = newData.live_wallet_balance;
+                        }
+                    }
+                }
+
+                if (global.isRunning === newData.is_running && global.tradeMode === newData.trade_mode) return;
+
+                global.isRunning = newData.is_running;
+                global.tradeMode = newData.trade_mode;
+
+                if (!isFirstLoad) {
+                    console.log(`\n🔔 [遠端指令] 狀態: ${newData.is_running ? '🟢 運行中' : '🔴 已暫停'} | 模式: ${newData.trade_mode}`);
+                    await forceUpdateStatusAndPrint(newData, false); 
+                }
+                isFirstLoad = false;
+            }
+        )
+        .subscribe();
+
+    const portfolio = await initPortfolio();
+    if (!portfolio) {
+        process.exit(1);
+    }
+    
+    global.isRunning = true;
+    global.tradeMode = portfolio.mode;
+
+    // 將現有持倉加入 Oracle 2秒 VIP 專線
+    const currentMints = portfolio.positions.map(p => p.mint_address);
+    if (currentMints.length > 0) {
+        priceOracleService.setPortfolioMints(currentMints);
+        console.log(`✅ [Oracle] 已將 ${currentMints.length} 隻幣登記至 2 秒極速心跳線`);
+    }
+
+    macroMonitorService.start(); 
+    blueChipJob.start();         
+    retrospectiveJob.start();    
+    janitorJob.start();    
+    
+    if (trendingMonitorService && typeof trendingMonitorService.start === 'function') {
+        trendingMonitorService.start();
+    }
+    if (trendingJob && typeof trendingJob.start === 'function') {
+        trendingJob.start();      
+    }
+    if (graveyardJob && typeof graveyardJob.start === 'function') {
+        graveyardJob.start();    
+    }
+
+    async function backgroundReportLoop() {
+        if (global.isRunning === false) {
+            console.log("💤 系統暫停中...");
+        } else {
+            await syncLiveBalanceToDB();
+            await forceUpdateStatusAndPrint(null, true);
+        }
+        setTimeout(backgroundReportLoop, 30 * 60 * 1000); 
+    }
+
+    backgroundReportLoop();
+}
+
+startApp().catch(err => {
+    console.error("❌ 系統啟動發生致命錯誤:", err.message);
+});
