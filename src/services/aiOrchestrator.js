@@ -97,7 +97,7 @@ class AIOrchestrator {
             // 🛡️ 8 秒死亡線
             let timeoutId;
             const timeoutPromise = new Promise((_, reject) => {
-                timeoutId = setTimeout(() => reject(new Error(`[GEMINI] 8秒死亡線超時，強行斬斷`)), 8000);
+                timeoutId = setTimeout(() => reject(new Error(`[GEMINI] 12秒死亡線超時，強行斬斷`)), 12000);
             });
 
             try {
@@ -128,7 +128,7 @@ class AIOrchestrator {
             // Groq 或 Mistral 呼叫
             const cfg = this.apiConfig[provider];
             const source = axios.CancelToken.source();
-            const timeoutId = setTimeout(() => source.cancel(`[${provider}] 8秒死亡線超時，強行斬斷`), 8000);
+            const timeoutId = setTimeout(() => source.cancel(`[${provider}] 12秒死亡線超時，強行斬斷`), 12000);
 
             try {
                 const res = await axios.post(cfg.url, {
