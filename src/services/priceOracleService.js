@@ -130,6 +130,12 @@ class PriceOracleService {
                     }
                     Object.assign(data, chunkData);
                 } catch (apiErr) {
+                    // 🚀 【核心修改：靜默處理 404】
+                    if (apiErr.response && apiErr.response.status === 404) {
+                        // 既然找不到，就保持靜默，等下次發車再試
+                        continue; 
+                    }
+                    // 其他錯誤先拋出
                     throw new Error(`${currentEngineName} ${this._translateAxiosError(apiErr)}`);
                 }
 
@@ -185,6 +191,16 @@ class PriceOracleService {
                 }
             }
         } catch (e) {
+            // 🚀 【核心修改：靜默處理 404】
+            // 如果是 404，代表 Jupiter 仲未 Index 到呢隻新幣，唔好噴 Log 嚇自己
+            if (e.response && e.response.status === 404) return;
+        
+            // 如果是 429，提示一聲就好，唔好當成大錯
+            if (e.response && e.response.status === 429) {
+                console.warn("⚠️ [Oracle VIP專線] Jupiter 觸發 429 限流，建議放慢監控頻率");
+                return;
+            }
+        
             console.warn(`⚠️ [Oracle VIP專線] Jupiter 報價異常: ${this._translateAxiosError(e)}`);
         }
     }

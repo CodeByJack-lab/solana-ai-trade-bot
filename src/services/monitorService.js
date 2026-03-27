@@ -469,7 +469,7 @@ function startDatabaseNurseryMonitor() {
         } finally {
             isNurseryRunning = false;
         }
-    }, 3000); 
+    }, 30000); 
 }
 
 function startWatchlistMonitor() {
@@ -535,7 +535,7 @@ function startWatchlistMonitor() {
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] 智能極速雙軌持倉監控啟動 (2s物理止損 + 15s大腦巡邏)...');
+    console.log('👁️ [Radar] 智能極速雙軌持倉監控啟動 (5s物理止損 + 15s大腦巡邏)...');
     
     let cachedSolPriceUsd = 150; 
     const sellingLocks = new Set(); // 👈 互斥鎖已就位
@@ -644,7 +644,7 @@ function startPositionMonitor() {
         } catch (err) {
             console.error(`❌ [Position Monitor] 2s 極速引擎異常:`, err.message);
         }
-    }, 2000); 
+    }, 5000); 
 
     setInterval(async () => {
         try {
