@@ -5,7 +5,7 @@ const { healthMonitor } = require('./healthMonitor');
 
 /**
  * 🫀 系統心臟：Price Oracle Service (價格預言機)
- * [V7.4 降頻防護版] - 減緩 API 請求頻率，防止 429 Too Many Requests
+ * [V7.5 降頻防護 + SOL 雙保險版] - 減緩 API 請求，防 429 塞車，防止 SOL 計錯價。
  */
 class PriceOracleService {
     constructor() {
@@ -32,17 +32,33 @@ class PriceOracleService {
     }
 
     /**
-     * 更新全局 SOL 價格
+     * 🚀 雙重保險：更新全局 SOL 價格
+     * 確保即使 API 只提供 USD 價，系統亦能準確換算回 SOL 價供止損計算
      */
     async _updateSolPrice() {
         try {
+            // 首選：Jupiter API
             const url = 'https://api.jup.ag/price/v2?ids=So11111111111111111111111111111111111111112';
-            const res = await axios.get(url, { timeout: 5000 });
+            const res = await axios.get(url, { timeout: 3000 });
             if (res.data?.data?.['So11111111111111111111111111111111111111112']) {
                 this.solPriceUsd = parseFloat(res.data.data['So11111111111111111111111111111111111111112'].price);
+                return; // 成功就直接離開
             }
         } catch (e) {
-            // 靜默失敗
+            // Jupiter 失敗，靜默轉用後備
+        }
+
+        try {
+            // 🚀 後備救命機制：如果 Jupiter 塞車，轉用 DexScreener 查 WSOL 價
+            const url2 = 'https://api.dexscreener.com/latest/dex/tokens/So11111111111111111111111111111111111111112';
+            const res2 = await axios.get(url2, { timeout: 3000 });
+            if (res2.data?.pairs && res2.data.pairs.length > 0) {
+                // 攞流動性最大嘅 SOL 池價錢
+                res2.data.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+                this.solPriceUsd = parseFloat(res2.data.pairs[0].priceUsd);
+            }
+        } catch(e) {
+            console.warn(`⚠️ [Oracle] 無法更新 SOL 價格，維持舊有緩存: $${this.solPriceUsd}`);
         }
     }
 
