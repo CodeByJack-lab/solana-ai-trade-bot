@@ -28,7 +28,7 @@ const aiService = {
             return content;
         } catch (e) {
             console.error(`❌ [AIService] 獲取 Prompt 失敗: ${e.message}`);
-            return this._getFallbackPrompt(promptId, data);
+            return aiService._getFallbackPrompt(promptId, data);
         }
     },
 
