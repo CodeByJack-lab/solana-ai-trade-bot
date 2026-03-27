@@ -3,7 +3,7 @@ const express = require('express');
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const crypto = require('crypto');
-const configEnv = require('../config/env'); // 👈 [V7.0] 引入中央彈藥庫
+const configEnv = require('../config/env'); 
 
 let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;
@@ -17,18 +17,15 @@ const { analyzeReentry, reviewActivePosition } = require('./aiService');
 const { retrospectiveJob } = require('../jobs/retrospectiveJob');
 const { aiOrchestrator } = require('./aiOrchestrator');
 
-// 👇👇👇 [V7.0 新增] 引入 Price Oracle 
 const { priceOracleService } = require('./priceOracleService');
-// 👆👆👆
 
 const app = express();
 app.use(express.json());
-// 應付 Railway Healthcheck
+
 app.get('/', (req, res) => {
-    res.status(200).send('🟢 SOL_Trade V7.0 系統正常運行中');
+    res.status(200).send('🟢 SOL_Trade V7.2 系統正常運行中');
 });
 
-// 🚀 [V7.0] 轉用中央彈藥庫
 const HELIUS_API_KEY = configEnv.rpc.helius1.apiKey;           
 const WEBHOOK_ID = configEnv.rpc.helius1.webhookId;
 const HELIUS_API_KEY_2 = configEnv.rpc.helius2.apiKey;       
@@ -41,14 +38,11 @@ const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 const SYSTEM_PROGRAM_ID = "11111111111111111111111111111111";
 const SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112";
 
-const botWallet = configEnv.solana.walletPublicKey; // 👈 [V7.0] 轉用中央彈藥庫
+const botWallet = configEnv.solana.walletPublicKey; 
 
-// 🚀 全新數據追蹤器：按來源及 Type 分類
 let detailedStats = {};
 let webhooksThisMinute = 0;
 let lastAiCount = 0;
-
-// 🚀 本地防洪開關
 let isNurseryPoolFull = false; 
 
 function initStatKey(key) {
@@ -57,7 +51,6 @@ function initStatKey(key) {
     }
 }
 
-// 🚀 V7.0 升級：嚴格 Base58 洗白，防 400 Bad Request
 function sanitizeAddress(address) {
     if (!address) return null;
     const clean = address.toString().trim().replace(/[\n\r\t\s]/g, '');
@@ -65,7 +58,6 @@ function sanitizeAddress(address) {
     return clean;
 }
 
-// 🚀 [新增] 定期檢查數據庫魚池容量，更新本地狀態
 async function refreshPoolStatus() {
     try {
         const { count, error } = await supabase
@@ -258,9 +250,6 @@ app.post('/webhook/helius', async (req, res) => {
     }
 });
 
-// ==========================================
-// 🌐 [Master AI 控制中心] - HTML 介面
-// ==========================================
 app.get('/force-evolution', (req, res) => {
     res.status(200).send(`
         <!DOCTYPE html>
@@ -293,12 +282,10 @@ app.get('/force-evolution', (req, res) => {
     `);
 });
 
-// 3. 真正執行啟動嘅 POST 路由
 app.post('/force-evolution', (req, res) => {
     console.log('\n👑 [Admin] 管理員已透過手動介面觸發 Master AI 進化！');
     
     try {
-        // 執行進化程序（唔需要 await，等佢背景行）
         retrospectiveJob.runEvolutionWithRetry(1).catch(e => {
             console.error("❌ 背景進化失敗:", e.message);
         });
@@ -389,7 +376,7 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
 
 let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
-    console.log('🐟 [Nursery Radar] 全 DB 依賴過濾系統已啟動 (404 緩刑防頂死支援)');
+    console.log('🐟 [Nursery Radar] 全 DB 依濾系統已啟動 (404 緩刑防頂死支援)');
     
     setInterval(async () => {
         if (isNurseryRunning) return;
@@ -535,7 +522,7 @@ function startPositionMonitor() {
     console.log('👁️ [Radar] 智能極速雙軌持倉監控啟動 (5s物理止損 + 15s大腦巡邏)...');
     
     let cachedSolPriceUsd = 150; 
-    const sellingLocks = new Set(); // 👈 互斥鎖已就位
+    const sellingLocks = new Set(); 
 
     setInterval(async () => {
         try {
@@ -573,7 +560,6 @@ function startPositionMonitor() {
             const STOP_LOSS_PCT = parseFloat(config.stop_loss_pct || -10);
 
             for (const pos of positions) {
-                // 🛑 核心防禦：如果這隻幣已經在執行賣出，直接跳過本輪循環！
                 if (sellingLocks.has(pos.mint_address)) continue;
 
                 const currentPrice = pricesMap[pos.mint_address];
@@ -623,7 +609,6 @@ function startPositionMonitor() {
                         reason = `[老幣分批止盈] ${reason}`;
                     }
 
-                    // 🛑 上鎖！阻止後續循環重複賣出
                     sellingLocks.add(pos.mint_address);
 
                     runSellPipeline(pos, currentPrice, reason, sellFraction).then(sellResult => {
@@ -633,7 +618,6 @@ function startPositionMonitor() {
                     }).catch(err => {
                         console.error(`❌ [Track 1 Sell Error]`, err.message);
                     }).finally(() => {
-                        // 🛑 解鎖！無論成功失敗都釋放
                         sellingLocks.delete(pos.mint_address);
                     });
                 }
@@ -664,7 +648,6 @@ function startPositionMonitor() {
             }
 
             for (const pos of positions) {
-                // 🛑 核心防禦：如果 2 秒物理 Loop 已經在賣出這隻幣，AI 巡邏直接跳過，不干涉！
                 if (sellingLocks.has(pos.mint_address)) continue;
 
                 const nowMs = Date.now();
@@ -686,20 +669,25 @@ function startPositionMonitor() {
                     const posDataForAI = { ...pos, currentPrice, pnlPct, mode: portfolio.mode };
                     const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
                     
+                    // 🚀 [V7.2 新增] 實時寫入 AI 評語到資料庫
+                    const tableName = portfolio.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
+                    await supabase
+                        .from(tableName)
+                        .update({ last_review_comment: reviewResult.reason }) // 👈 對位寫入
+                        .eq('mint_address', pos.mint_address);
+
                     if (reviewResult.decision === 'RETRY_LATER') {
                         aiReviewCooldowns.set(pos.mint_address, nowMs - (3 * 60 * 1000));
                         continue; 
                     }
 
                     if (reviewResult.decision === 'EXIT' || reviewResult.decision === 'SELL') {
-                        // 🛑 上鎖！
                         sellingLocks.add(pos.mint_address);
 
                         runSellPipeline(pos, currentPrice, `AI 指示: ${reviewResult.reason}`, 1.0)
                             .catch(err => console.error(`❌ [Track 2 Sell Error]`, err.message))
                             .finally(() => {
                                 aiReviewCooldowns.delete(pos.mint_address);
-                                // 🛑 解鎖！
                                 sellingLocks.delete(pos.mint_address);
                             });
                     } else {
@@ -727,7 +715,6 @@ function startCommandListener() {
             for (const cmd of commands) {
                 console.log(`📥 [Command] 收到管理員指令: ${cmd.command_type} (${cmd.mint_address || 'All'})`);
 
-                // 🚀 1. 處理全倉平倉 (支援 SELL_ALL 及 FORCE_SELL_ALL)
                 if (cmd.command_type === 'FORCE_SELL_ALL' || cmd.command_type === 'SELL_ALL') {
                     await supabase.from('system_config').update({ is_running: false, status_msg: '大盤暴跌自動避險中' }).eq('id', 1);
                     sendAdminAlert(`🚨 <b>大盤雪崩，拔線逃生</b>\n管理員已按下紅色按鈕，全線強平清倉！`);
@@ -739,7 +726,6 @@ function startCommandListener() {
                         await new Promise(r => setTimeout(r, 1500)); 
                     }
                 } 
-                // 🚀 2. 處理單一平倉 (Dashboard 傳來的 SELL_SINGLE)
                 else if (cmd.command_type === 'SELL_SINGLE' && cmd.mint_address) {
                     const { getPortfolio } = require('./portfolioService');
                     const pos = getPortfolio().positions.find(p => p.mint_address === cmd.mint_address);
@@ -748,13 +734,11 @@ function startCommandListener() {
                         const { priceOracleService } = require('./priceOracleService');
                         const cachedData = priceOracleService.cache.get(pos.mint_address);
                         
-                        // 嘗試獲取最新價格，如果無就用返買入價做 Reference
                         let currentPrice = pos.entry_price_sol;
                         if (cachedData) {
                             if (cachedData.priceSol) {
                                 currentPrice = cachedData.priceSol;
                             } else if (cachedData.priceUsd) {
-                                // 粗略轉換，因為手動市價平倉唔需要極度精準嘅估值
                                 currentPrice = cachedData.priceUsd / 150; 
                             }
                         }
@@ -765,7 +749,6 @@ function startCommandListener() {
                         console.log(`⚠️ [Command] 找不到對應持倉，可能已被 AI 賣出: ${cmd.mint_address}`);
                     }
                 }
-                // 🚀 3. 處理暫停與恢復買入
                 else if (cmd.command_type === 'PAUSE_BUY') {
                     await supabase.from('system_config').update({ is_running: false, status_msg: '已暫停新開倉' }).eq('id', 1);
                     sendAdminAlert(`⏸️ <b>系統已暫停買入</b>\n持倉監控會繼續運作，但不會買入新幣。`);
@@ -775,13 +758,12 @@ function startCommandListener() {
                     sendAdminAlert(`▶️ <b>系統已恢復正常</b>\n雷達已重新啟動。`);
                 }
 
-                // 執行完畢，刪除該指令
                 await supabase.from('command_queue').delete().eq('id', cmd.id);
             }
         } catch (err) {
             console.error(`❌ [Command Error]`, err.message);
         }
-    }, 5000); // 每 5 秒檢查一次 Dashboard 指令
+    }, 5000); 
 }
 
 function startOneMinuteMetricsAlert() {
@@ -804,7 +786,6 @@ function startOneMinuteMetricsAlert() {
     }, 60000); 
 }
 
-// 🚀 [V7.2] 錯峰啟動機制：防開機瞬間 RPC 429 崩潰
 function startMarketMonitor() {
     app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
         console.log('🔄 [System] 系統啟動，準備載入雙 Webhook 模組...');
@@ -813,27 +794,22 @@ function startMarketMonitor() {
 
         console.log('⏳ [Boot Sequence] 啟動錯峰點火機制，每隔 2 秒喚醒一個雷達 (防 RPC 429 洪峰)...');
 
-        // 第 2 秒：喚醒持倉監控 (最重要，先保命)
         setTimeout(() => { 
             startPositionMonitor(); 
         }, 2000);
 
-        // 第 4 秒：喚醒魚池雷達
         setTimeout(() => { 
             startDatabaseNurseryMonitor(); 
         }, 4000);
 
-        // 第 6 秒：喚醒接回雷達
         setTimeout(() => { 
             startWatchlistMonitor(); 
         }, 6000);
 
-        // 第 8 秒：喚醒指令接收器
         setTimeout(() => { 
             startCommandListener(); 
         }, 8000);
 
-        // 第 10 秒：喚醒統計模組
         setTimeout(() => { 
             startWebhookStatsMonitor(); 
             startOneMinuteMetricsAlert();

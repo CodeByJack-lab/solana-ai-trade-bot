@@ -32,23 +32,30 @@ const aiService = {
         }
     },
 
-    /**
-     * 👁️ 持倉巡邏 (Overseer) - 對應舊版 reviewActivePosition
+/**
+     * 👁️ 持倉巡邏 (Overseer) - 物理死線與 AI 故障自癒
      */
     async reviewActivePosition(mintAddress, posData) {
         console.log(`\n👁️‍🗨️ [Overseer] 開始巡邏持倉: ${posData.token_symbol || mintAddress.substring(0,6)}`);
 
         try {
-            // 1. 獲取大盤災難指數 (極重要，決定 AI 斬倉容忍度)
-            let currentNewsScore = 0;
-            const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
-            if (config) currentNewsScore = config.latest_news_score || 0;
+            // 🚀 1. 先攞 DB 嘅最新設定 (包含 stop_loss_pct)
+            const { data: config } = await supabase.from('system_config').select('latest_news_score, stop_loss_pct').eq('id', 1).single();
+            const currentNewsScore = config?.latest_news_score || 0;
+            const dbStopLoss = parseFloat(config?.stop_loss_pct || -20); // 👈 攞你 set 嘅 -20
 
-            // 2. 判斷使用 Meme 監軍還是老幣監軍
+            // 🛡️ 2. 物理級「硬止損」前置防線：
+            // 無論 AI 有無反應，只要 PNL 跌過呢條死線，直接回傳 EXIT
+            if (posData.pnlPct <= dbStopLoss) {
+                return { 
+                    decision: 'EXIT', 
+                    reason: `🚨 觸發物理硬止損 (${dbStopLoss}% 熔斷)：當前虧損 ${posData.pnlPct.toFixed(2)}%` 
+                };
+            }
+
             const isBluechip = posData.strategy_type && posData.strategy_type.includes('BLUECHIP');
             const promptId = isBluechip ? 'reviewer_bluechip' : 'reviewer_overseer';
 
-            // 3. 嚴格對齊 Supabase 的 Placeholders
             const promptData = {
                 token_symbol: posData.token_symbol || 'UNKNOWN',
                 pnl_pct: posData.pnlPct ? posData.pnlPct.toFixed(2) : '0.00',
@@ -56,23 +63,36 @@ const aiService = {
                 latest_news_score: currentNewsScore
             };
 
-            const promptText = await aiService._getPromptFromDB(promptId, promptData);
+            const promptText = await this._getPromptFromDB(promptId, promptData);
 
-            // 4. 🚀 經 Orchestrator 派單，主力用 GEMINI
+            // 🚀 正常情況：經 Orchestrator 派單
             const result = await aiOrchestrator.executeTask('OVERSEER', 'GEMINI', promptText);
 
             const cleanDecision = (result.decision || result.verdict || '').trim().toUpperCase();
-            console.log(`🤖 監軍判決 (${isBluechip ? '老幣' : 'Meme'}): ${cleanDecision} | 理由: ${result.reason}`);
+            console.log(`🤖 監軍判決: ${cleanDecision} | 理由: ${result.reason}`);
 
-            // 5. 確保回傳標準化格式畀 Monitor (EXIT / HOLD)
-            if (cleanDecision.includes('SELL') || cleanDecision.includes('EXIT') || cleanDecision.includes('TAKE_PROFIT')) {
+            if (cleanDecision.includes('SELL') || cleanDecision.includes('EXIT')) {
                 return { decision: 'EXIT', reason: result.reason };
             }
             return { decision: 'HOLD', reason: result.reason };
 
         } catch (error) {
             console.error(`❌ [AI Service] 持倉審查失敗:`, error.message);
-            return { decision: "HOLD", reason: "AI 服務暫時無回應，防禦性持有" };
+            
+            // 🚀 3. AI 冧咗時嘅「保底撤退」邏輯
+            // 重新攞多次 Config 確保拎到最新 stop_loss_pct
+            const { data: configRetry } = await supabase.from('system_config').select('stop_loss_pct').eq('id', 1).single();
+            const emergencyLimit = parseFloat(configRetry?.stop_loss_pct || -20);
+
+            // 如果 AI 壞咗，而 PNL 已經低過（或接近）止損線
+            if (posData.pnlPct <= emergencyLimit) {
+                return { 
+                    decision: "EXIT", 
+                    reason: `🛠️ AI 離線自癒：PNL (${posData.pnlPct.toFixed(2)}%) 已觸發資料庫止損死線 (${emergencyLimit}%)，強制撤退` 
+                };
+            }
+            
+            return { decision: "HOLD", reason: "AI 服務暫時無回應，PNL 尚在安全區，暫且持有" };
         }
     },
 
