@@ -4,13 +4,13 @@ const path = require('path');
 const configEnv = require('../config/env');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-// 📈 交易戰報 Bot (Main)
+// 📈 交易戰報 Bot (Main) -> 對應 TELEGRAM_CHANNEL_ID
 const TRADE_BOT_TOKEN = configEnv.telegram.mainBotToken;
-const TRADE_CHAT_ID = configEnv.telegram.chatId;
+const TRADE_CHAT_ID = configEnv.telegram.channelId; // 👈 修正：改為 channelId
 
-// ⚙️ 系統管理員 Bot (Admin)
+// ⚙️ 系統管理員 Bot (Admin) -> 對應 TELEGRAM_CHAT_ID
 const ADMIN_BOT_TOKEN = configEnv.telegram.adminBotToken;
-const ADMIN_CHAT_ID = configEnv.telegram.channelId;
+const ADMIN_CHAT_ID = configEnv.telegram.chatId; // 👈 修正：改為 chatId
 
 /**
  * 🚀 安全清洗函數：防止 AI 輸出的 < 或 > 破壞 HTML 看板結構
