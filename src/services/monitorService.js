@@ -261,32 +261,65 @@ app.post('/webhook/helius', async (req, res) => {
 // ==========================================
 // 🌐 [API 路由] 手動觸發 AI 檢討程序 (射後不理版)
 // ==========================================
-app.get('/force-evolution', (req, res) => { 
-    console.log('\n========================================');
-    console.log('👑 [Admin] 管理員已手動強制喚醒 Master AI！');
-    console.log('========================================\n');
+// ==========================================
+// 🌐 [Master AI 控制中心] - HTML 介面
+// ==========================================
+app.get('/force-evolution', (req, res) => {
+    res.status(200).send(`
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Master AI 控制中心</title>
+            <style>
+                body { font-family: sans-serif; background: #0f172a; color: white; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+                .card { background: #1e293b; padding: 2.5rem; border-radius: 1.5rem; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5); text-align: center; max-width: 450px; border: 1px solid #334155; }
+                h1 { color: #38bdf8; margin-bottom: 1rem; font-size: 1.5rem; }
+                p { color: #94a3b8; margin-bottom: 2rem; line-height: 1.6; }
+                .btn { background: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%); color: white; border: none; padding: 1rem 2rem; font-size: 1.1rem; border-radius: 0.75rem; cursor: pointer; transition: all 0.2s; width: 100%; font-weight: 700; text-transform: uppercase; }
+                .btn:hover { transform: scale(1.02); filter: brightness(1.1); box-shadow: 0 0 20px rgba(14,165,233,0.4); }
+                .status-badge { display: inline-block; padding: 0.25rem 0.75rem; background: #064e3b; color: #34d399; border-radius: 1rem; font-size: 0.75rem; margin-bottom: 1rem; font-weight: bold; }
+            </style>
+        </head>
+        <body>
+            <div class="card">
+                <div class="status-badge">PROTOCOL V7.2 READY</div>
+                <h1>🧠 Master AI 控制中心</h1>
+                <p>啟動後，Master AI 將強制掃描過去 12 小時戰報，執行「深度敗因分析」並自動修正 AI 戰鬥腳本與系統參數。</p>
+                <form action="/force-evolution" method="POST">
+                    <button type="submit" class="btn">🔥 立即執行手動進化</button>
+                </form>
+            </div>
+        </body>
+        </html>
+    `);
+});
+
+// 3. 真正執行啟動嘅 POST 路由
+app.post('/force-evolution', (req, res) => {
+    console.log('\n👑 [Admin] 管理員已透過手動介面觸發 Master AI 進化！');
     
     try {
-        const { retrospectiveJob } = require('../jobs/retrospectiveJob');
-        
-        // 🚀 關鍵：無 await！等佢自己喺背景慢慢行 (Fire-and-forget)
+        // 執行進化程序（唔需要 await，等佢背景行）
         retrospectiveJob.runEvolutionWithRetry(1).catch(e => {
-            console.error("❌ 手動觸發進化失敗:", e.message);
+            console.error("❌ 背景進化失敗:", e.message);
         });
 
-        // ⚡ 0.1 秒極速回覆瀏覽器！
         res.status(200).send(`
-            <div style="font-family: sans-serif; text-align: center; padding: 50px;">
-                <h1 style="color: #4CAF50;">🚀 Master AI 已被強制喚醒！</h1>
-                <p style="font-size: 18px;">系統正準備進行自我進化或空倉分析...</p>
-                <p style="color: #666;">請返回 Railway / Terminal 查看詳細的 Console Log 戰報，或稍後查收 Email 報告。</p>
-                <hr style="width: 200px; margin: 30px auto;">
-                <p style="font-size: 14px; color: #999;">Status: Processing (Background Task Started)</p>
-            </div>
+            <!DOCTYPE html>
+            <html>
+            <head><meta charset="UTF-8"></head>
+            <body style="background: #0f172a; color: white; font-family: sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh;">
+                <div style="text-align: center; border: 1px solid #22c55e; padding: 3rem; border-radius: 1rem; background: #1e293b;">
+                    <h1 style="color: #22c55e;">🚀 進化指令已發出！</h1>
+                    <p>Master AI 正在處理中。請留意 Email 報告與 Telegram 戰報推送。</p>
+                    <a href="/force-evolution" style="color: #38bdf8; text-decoration: none;">← 返回</a>
+                </div>
+            </body>
+            </html>
         `);
-        
     } catch (e) {
-        console.error("❌ Route 發生錯誤:", e.message);
         res.status(500).send('<h1>❌ 啟動失敗</h1>');
     }
 });
