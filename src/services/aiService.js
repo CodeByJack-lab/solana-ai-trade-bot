@@ -17,7 +17,7 @@ const aiService = {
 
             if (error || !promptRecord) {
                 console.warn(`⚠️ [AIService] 搵唔到 Prompt: ${promptId}，使用緊急備用預設詞...`);
-                return this._getFallbackPrompt(promptId, data);
+                return aiService._getFallbackPrompt(promptId, data);
             }
 
             let content = promptRecord.content;
@@ -56,7 +56,7 @@ const aiService = {
                 latest_news_score: currentNewsScore
             };
 
-            const promptText = await this._getPromptFromDB(promptId, promptData);
+            const promptText = await aiService._getPromptFromDB(promptId, promptData);
 
             // 4. 🚀 經 Orchestrator 派單，主力用 GEMINI
             const result = await aiOrchestrator.executeTask('OVERSEER', 'GEMINI', promptText);
@@ -94,7 +94,7 @@ const aiService = {
                 latest_news_score: currentNewsScore
             };
 
-            const promptText = await this._getPromptFromDB('reentry_analyst', promptData);
+            const promptText = await aiService._getPromptFromDB('reentry_analyst', promptData);
 
             // 接回分析需要高智商，主將用 GROQ，後備用 GEMINI
             const result = await aiOrchestrator.executeTask('ANALYST', 'GROQ', promptText);
