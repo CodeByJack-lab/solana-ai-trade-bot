@@ -25,7 +25,7 @@ app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
-    res.status(200).send('🟢 SOL_Trade V7.2 系統正常運行中');
+    res.status(200).send('🟢 SOL_Trade V7.4 系統正常運行中 (降頻防禦版)');
 });
 
 const HELIUS_API_KEY = configEnv.rpc.helius1.apiKey;           
@@ -272,7 +272,7 @@ app.get('/force-evolution', (req, res) => {
         </head>
         <body>
             <div class="card">
-                <div class="status-badge">PROTOCOL V7.2 READY</div>
+                <div class="status-badge">PROTOCOL V7.4 READY</div>
                 <h1>🧠 Master AI 控制中心</h1>
                 <p>啟動後，Master AI 將強制掃描過去 12 小時戰報，執行「深度敗因分析」並自動修正 AI 戰鬥腳本與系統參數。</p>
                 <form action="/force-evolution" method="POST">
@@ -521,7 +521,7 @@ function startWatchlistMonitor() {
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] 智能極速雙軌持倉監控啟動 (2s物理止損 + 15s大腦巡邏)...');
+    console.log('👁️ [Radar] 智能降頻雙軌持倉監控啟動 (10s物理止損 + 30s大腦巡邏)...');
     
     let cachedSolPriceUsd = 150; 
     const sellingLocks = new Set(); 
@@ -534,6 +534,7 @@ function startPositionMonitor() {
         } catch(e) {}
     }, 60000);
 
+    // 🚀 物理止損軌道 (由 2秒 降頻至 10秒)
     setInterval(async () => {
         try {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -546,8 +547,11 @@ function startPositionMonitor() {
             if (!positions || positions.length === 0) return;
 
             const mints = positions.map(p => p.mint_address);
-            let pricesMap = {};
+            
+            // 🚀 關鍵修復：通知 Oracle 呢啲係持倉，要用快車查價！
+            priceOracleService.setPortfolioMints(mints);
 
+            let pricesMap = {};
             for (const mint of mints) {
                 const cachedData = priceOracleService.cache.get(mint);
                 if (cachedData) {
@@ -565,14 +569,18 @@ function startPositionMonitor() {
                 if (sellingLocks.has(pos.mint_address)) continue;
 
                 const currentPrice = pricesMap[pos.mint_address];
-                if (!currentPrice) continue; 
+                
+                // 🚀 防呆機制：如果 API 塞車搞到讀唔到價 / 變咗 0 蚊，跳過本次審查，防止 -100% 誤斬！
+                if (!currentPrice || currentPrice <= 0) {
+                    continue; 
+                }
 
                 const pnlSol = (currentPrice - pos.entry_price_sol) * pos.quantity;
                 const pnlPct = (pnlSol / (pos.entry_price_sol * pos.quantity)) * 100;
                 
                 const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
 
-                // 🚀 [V7.3 改進] 修正最高價寫入：加入 50 倍常理過濾，防止 API 髒數據令 ATH 飛天
+                // 更新最高價 (加入 50 倍過濾防污數據)
                 if (currentPrice > pos.highest_price_sol) {
                     const priceRatio = currentPrice / (pos.highest_price_sol || pos.entry_price_sol);
                     if (priceRatio < 50) {
@@ -581,39 +589,34 @@ function startPositionMonitor() {
                             .update({ highest_price_sol: currentPrice })
                             .eq('mint_address', pos.mint_address)
                             .then();
-                    } else {
-                        console.warn(`⚠️ [Price Defense] 偵測到異常跳價！拒絕更新 ATH: ${pos.token_symbol} (${currentPrice} SOL)`);
                     }
                 }
 
                 const drawdownFromHigh = ((currentPrice - pos.highest_price_sol) / pos.highest_price_sol) * 100;
                 const highestPnlPct = ((pos.highest_price_sol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
-
                 const isHalfSold = pos.strategy_type && pos.strategy_type.includes('HALF_SOLD');
 
                 let action = 'HOLD';
                 let reason = '';
                 let sellFraction = 1.0; 
 
-                // 🚀 [V7.2 改進] 三幣大一統策略
-                
-                // 1. 物理硬止損 (最高優先級)
+                // 物理硬止損
                 if (pnlPct <= STOP_LOSS_PCT) {
                     action = 'SELL';
                     reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
                 } 
-                // 2. 移動止盈：賺過 50% 後，從最高位回撤 30% 即全走
+                // 移動止盈
                 else if (highestPnlPct >= 50 && drawdownFromHigh <= -30) {
                     action = 'SELL';
                     reason = `💰 觸發統一移動止盈 (曾賺 +${highestPnlPct.toFixed(2)}%，現回撤 ${drawdownFromHigh.toFixed(2)}% 全走)`;
                 }
-                // 3. 翻倍保本：歷史最高達 95% 以上則賣出一半鎖定成本 (保留保險機制)
+                // 翻倍保本
                 else if (!isHalfSold && highestPnlPct >= 95) { 
                     action = 'SELL';
                     sellFraction = 0.5;
                     reason = `🚀 觸發翻倍回本 (歷史最高: +${highestPnlPct.toFixed(2)}%)，先賣 50% 鎖本`;
                 }
-                // 4. 極速插水保險：高位瞬間回撤 40% (疑似 Rug) 則強制撤退
+                // 極速插水保險
                 else if (drawdownFromHigh <= -40) {
                     action = 'SELL';
                     reason = `🚨 偵測到斷崖式崩盤 (高位回撤 ${drawdownFromHigh.toFixed(2)}%)，緊急撤退`;
@@ -621,7 +624,6 @@ function startPositionMonitor() {
 
                 if (action === 'SELL') {
                     sellingLocks.add(pos.mint_address);
-
                     runSellPipeline(pos, currentPrice, reason, sellFraction).then(sellResult => {
                         if (sellResult && sellFraction === 0.5) {
                             sendTelegramAlert(`🌟 <b>翻倍/分批鎖定利潤</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定利潤，剩餘尾倉讓利潤奔跑！`);
@@ -634,10 +636,11 @@ function startPositionMonitor() {
                 }
             }
         } catch (err) {
-            console.error(`❌ [Position Monitor] 2s 極速引擎異常:`, err.message);
+            console.error(`❌ [Position Monitor] 物理引擎異常:`, err.message);
         }
-    }, 2000); 
+    }, 10000); // 🚀 降頻：每 10 秒行一次
 
+    // 🚀 AI 巡邏軌道 (由 15秒 降頻至 30秒)
     setInterval(async () => {
         try {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -649,7 +652,6 @@ function startPositionMonitor() {
             
             if (!positions || positions.length === 0) {
                 if (aiReviewCooldowns.size > 0) aiReviewCooldowns.clear();
-                healthMonitor.setStatus('AI_Overseer', '🟢 巡邏完畢 (無持倉)');
                 return;
             }
 
@@ -664,12 +666,13 @@ function startPositionMonitor() {
                 const nowMs = Date.now();
                 const lastReviewMs = aiReviewCooldowns.get(pos.mint_address) || 0;
                 
-                if ((nowMs - lastReviewMs) / 60000 < 5) continue; 
+                // AI 巡邏間隔
+                if ((nowMs - lastReviewMs) / 60000 < 2) continue; 
 
                 const cachedData = priceOracleService.cache.get(pos.mint_address);
-                if (!cachedData) continue;
+                if (!cachedData || !cachedData.priceSol || cachedData.priceSol <= 0) continue; // 🚀 避開死價
                 
-                const currentPrice = cachedData.priceSol ? cachedData.priceSol : (cachedData.priceUsd / cachedSolPriceUsd);
+                const currentPrice = cachedData.priceSol;
                 const pnlPct = (((currentPrice - pos.entry_price_sol) * pos.quantity) / (pos.entry_price_sol * pos.quantity)) * 100;
 
                 aiReviewCooldowns.set(pos.mint_address, nowMs);
@@ -710,9 +713,8 @@ function startPositionMonitor() {
             }
         } catch (err) {
             console.error(`❌ [Position Monitor] AI 巡邏引擎異常:`, err.message);
-            healthMonitor.setStatus('AI_Overseer', `🔴 監控異常: ${err.message}`);
         }
-    }, 15000);
+    }, 30000); // 🚀 降頻：每 30 秒行一次
 }
 
 function startCommandListener() {
