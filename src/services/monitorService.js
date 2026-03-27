@@ -259,9 +259,6 @@ app.post('/webhook/helius', async (req, res) => {
 });
 
 // ==========================================
-// 🌐 [API 路由] 手動觸發 AI 檢討程序 (射後不理版)
-// ==========================================
-// ==========================================
 // 🌐 [Master AI 控制中心] - HTML 介面
 // ==========================================
 app.get('/force-evolution', (req, res) => {
@@ -642,7 +639,7 @@ function startPositionMonitor() {
                 }
             }
         } catch (err) {
-            console.error(`❌ [Position Monitor] 2s 極速引擎異常:`, err.message);
+            console.error(`❌ [Position Monitor] 5s 極速引擎異常:`, err.message);
         }
     }, 5000); 
 
@@ -758,50 +755,61 @@ function startCommandListener() {
     }, 5000);
 }
 
-/**
- * ⏱️ 1 分鐘高頻數據追蹤 (僅 Console Log)
- * 目的：在不打擾管理員的情況下，確保系統每分鐘都有心跳紀錄
- */
 function startOneMinuteMetricsAlert() {
     console.log('⏱️ [Metrics] 1 分鐘極速雷達已啟動 (純 Log 模式)...');
     
     setInterval(() => {
-        // 1. 計算 AI 請求增量 (利用 aiOrchestrator 內置計數器)
         const currentAiCount = aiOrchestrator.requestCount || 0;
         const aiThisMinute = currentAiCount - lastAiCount;
         lastAiCount = currentAiCount;
 
-        // 2. 獲取 Webhook 觸發量並歸零
         const currentWebhooks = webhooksThisMinute;
         webhooksThisMinute = 0; 
 
-        // 3. 獲取 Oracle 當前壓力
         const currentOracleQueue = healthMonitor.oracleQueueSize || 0;
 
-        // 4. 🚀 輸出至 Console Log (後台監控用)
         const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
         
         console.log(`[${timeStr}] 📊 Minute Heartbeat -> AI Call: ${aiThisMinute} | Webhook: ${currentWebhooks} | Oracle Queue: ${currentOracleQueue}`);
-
-        // 如果你發現 Webhook 突然爆升到 100+，你可以喺呢度加 logic 提醒自己，
-        // 但目前照你要求，呢度係絕對安靜。
         
-    }, 60000); // 👈 修正為 60000 (1 分鐘)
+    }, 60000); 
 }
-// 👆👆👆
 
+// 🚀 [V7.2] 錯峰啟動機制：防開機瞬間 RPC 429 崩潰
 function startMarketMonitor() {
     app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
         console.log('🔄 [System] 系統啟動，準備載入雙 Webhook 模組...');
         await toggleHeliusWebhook(true);
         healthMonitor.setStatus('Trade_Engine', '🟢 正常待命');
 
-        startDatabaseNurseryMonitor(); 
-        startWatchlistMonitor(); 
-        startPositionMonitor();
-        startCommandListener();
-        startWebhookStatsMonitor(); 
-        startOneMinuteMetricsAlert(); // 👈 [新增] 點火啟動 1 分鐘雷達
+        console.log('⏳ [Boot Sequence] 啟動錯峰點火機制，每隔 2 秒喚醒一個雷達 (防 RPC 429 洪峰)...');
+
+        // 第 2 秒：喚醒持倉監控 (最重要，先保命)
+        setTimeout(() => { 
+            startPositionMonitor(); 
+        }, 2000);
+
+        // 第 4 秒：喚醒魚池雷達
+        setTimeout(() => { 
+            startDatabaseNurseryMonitor(); 
+        }, 4000);
+
+        // 第 6 秒：喚醒接回雷達
+        setTimeout(() => { 
+            startWatchlistMonitor(); 
+        }, 6000);
+
+        // 第 8 秒：喚醒指令接收器
+        setTimeout(() => { 
+            startCommandListener(); 
+        }, 8000);
+
+        // 第 10 秒：喚醒統計模組
+        setTimeout(() => { 
+            startWebhookStatsMonitor(); 
+            startOneMinuteMetricsAlert();
+            console.log('✅ [Boot Sequence] 所有 Web/監控 雷達錯峰點火完畢！系統進入平穩巡航狀態。');
+        }, 10000);
     });
 }
 

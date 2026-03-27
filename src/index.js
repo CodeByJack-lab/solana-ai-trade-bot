@@ -16,8 +16,9 @@ const { janitorJob } = require('./jobs/janitorJob');
 const { trendingMonitorService } = require('./services/trendingMonitorService');
 const { trendingJob } = require('./jobs/trendingJob');
 
-// 👇 [V7.0] 引入 Price Oracle
+// 👇 [V7.0] 引入 Price Oracle 與 Macro Job
 const { priceOracleService } = require('./services/priceOracleService');
+const { macroJob } = require('./jobs/macroJob');
 
 async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
     try {
@@ -125,20 +126,19 @@ async function startApp() {
         console.log(`✅ [Oracle] 已將 ${currentMints.length} 隻幣登記至 2 秒極速心跳線`);
     }
 
-    macroMonitorService.start(); 
-    blueChipJob.start();         
-    retrospectiveJob.start();    
-    janitorJob.start();    
+    // ==========================================
+    // Phase 5: 啟動各路背景雷達與排程 (🚀 錯峰啟動版)
+    // ==========================================
+    console.log("⚙️ [Boot] 正在錯峰喚醒背景雷達與排程任務...");
     
-    if (trendingMonitorService && typeof trendingMonitorService.start === 'function') {
-        trendingMonitorService.start();
-    }
-    if (trendingJob && typeof trendingJob.start === 'function') {
-        trendingJob.start();      
-    }
-    if (graveyardJob && typeof graveyardJob.start === 'function') {
-        graveyardJob.start();    
-    }
+    setTimeout(() => { macroMonitorService.start(); }, 12000);  // 12s: 大盤即時預警
+    setTimeout(() => { macroJob.start(); }, 14000);             // 14s: 恐懼貪婪指數
+    setTimeout(() => { trendingMonitorService.start(); }, 16000); // 16s: Gecko 爬蟲
+    setTimeout(() => { trendingJob.start(); }, 18000);          // 18s: 熱門幣追擊
+    setTimeout(() => { blueChipJob.start(); }, 20000);          // 20s: 老幣抄底
+    setTimeout(() => { janitorJob.start(); }, 22000);           // 22s: 清道夫
+    setTimeout(() => { graveyardJob.start(); }, 24000);         // 24s: 墓地火化
+    setTimeout(() => { retrospectiveJob.start(); }, 26000);     // 26s: 大腦進化
 
     async function backgroundReportLoop() {
         if (global.isRunning === false) {
