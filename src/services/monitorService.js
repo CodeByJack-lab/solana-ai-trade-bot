@@ -725,19 +725,47 @@ function startCommandListener() {
             if (!commands || commands.length === 0) return;
 
             for (const cmd of commands) {
-                console.log(`📥 [Command] 收到管理員指令: ${cmd.command_type} (${cmd.mint_address})`);
+                console.log(`📥 [Command] 收到管理員指令: ${cmd.command_type} (${cmd.mint_address || 'All'})`);
 
-                if (cmd.command_type === 'FORCE_SELL_ALL') {
+                // 🚀 1. 處理全倉平倉 (支援 SELL_ALL 及 FORCE_SELL_ALL)
+                if (cmd.command_type === 'FORCE_SELL_ALL' || cmd.command_type === 'SELL_ALL') {
                     await supabase.from('system_config').update({ is_running: false, status_msg: '大盤暴跌自動避險中' }).eq('id', 1);
                     sendAdminAlert(`🚨 <b>大盤雪崩，拔線逃生</b>\n管理員已按下紅色按鈕，全線強平清倉！`);
 
                     const { getPortfolio } = require('./portfolioService');
                     const positions = getPortfolio().positions;
                     for (const pos of positions) {
-                        await runSellPipeline(pos, pos.highest_price_sol, "🚨 緊急拔線，無腦市價市平倉", 1.0);
+                        await runSellPipeline(pos, pos.highest_price_sol, "🚨 緊急拔線，無腦市價平倉", 1.0);
                         await new Promise(r => setTimeout(r, 1500)); 
                     }
                 } 
+                // 🚀 2. 處理單一平倉 (Dashboard 傳來的 SELL_SINGLE)
+                else if (cmd.command_type === 'SELL_SINGLE' && cmd.mint_address) {
+                    const { getPortfolio } = require('./portfolioService');
+                    const pos = getPortfolio().positions.find(p => p.mint_address === cmd.mint_address);
+                    
+                    if (pos) {
+                        const { priceOracleService } = require('./priceOracleService');
+                        const cachedData = priceOracleService.cache.get(pos.mint_address);
+                        
+                        // 嘗試獲取最新價格，如果無就用返買入價做 Reference
+                        let currentPrice = pos.entry_price_sol;
+                        if (cachedData) {
+                            if (cachedData.priceSol) {
+                                currentPrice = cachedData.priceSol;
+                            } else if (cachedData.priceUsd) {
+                                // 粗略轉換，因為手動市價平倉唔需要極度精準嘅估值
+                                currentPrice = cachedData.priceUsd / 150; 
+                            }
+                        }
+                        
+                        console.log(`👨‍💻 [Command] 執行手動斬倉: ${pos.token_symbol}`);
+                        await runSellPipeline(pos, currentPrice, "👨‍💻 管理員手動市價平倉", 1.0);
+                    } else {
+                        console.log(`⚠️ [Command] 找不到對應持倉，可能已被 AI 賣出: ${cmd.mint_address}`);
+                    }
+                }
+                // 🚀 3. 處理暫停與恢復買入
                 else if (cmd.command_type === 'PAUSE_BUY') {
                     await supabase.from('system_config').update({ is_running: false, status_msg: '已暫停新開倉' }).eq('id', 1);
                     sendAdminAlert(`⏸️ <b>系統已暫停買入</b>\n持倉監控會繼續運作，但不會買入新幣。`);
@@ -747,12 +775,13 @@ function startCommandListener() {
                     sendAdminAlert(`▶️ <b>系統已恢復正常</b>\n雷達已重新啟動。`);
                 }
 
+                // 執行完畢，刪除該指令
                 await supabase.from('command_queue').delete().eq('id', cmd.id);
             }
         } catch (err) {
             console.error(`❌ [Command Error]`, err.message);
         }
-    }, 5000);
+    }, 5000); // 每 5 秒檢查一次 Dashboard 指令
 }
 
 function startOneMinuteMetricsAlert() {

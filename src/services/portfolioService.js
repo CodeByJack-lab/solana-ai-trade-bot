@@ -121,9 +121,9 @@ async function syncLiveBalanceToDB() {
 function getPortfolio() { return my_portfolio; }
 
 function getPositionLimits() {
-    const maxBluechip = Math.floor(globalMaxPositions * 0.2); 
-    const maxTrending = Math.floor(globalMaxPositions * 0.4); 
-    const maxMeme = globalMaxPositions - maxBluechip - maxTrending; 
+    const maxBluechip = Math.floor(globalMaxPositions * 0.2); // 10 * 0.2 = 2 (老幣)
+    const maxTrending = Math.floor(globalMaxPositions * 0.6); // 10 * 0.6 = 6 (Top60) 👈 改呢度
+    const maxMeme = globalMaxPositions - maxBluechip - maxTrending; // 10 - 2 - 6 = 2 (新幣)
     return { maxMeme, maxTrending, maxBluechip };
 }
 

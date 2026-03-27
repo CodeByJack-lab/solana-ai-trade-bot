@@ -1,25 +1,43 @@
 const axios = require('axios');
-require('dotenv').config();
+const path = require('path');
+require('dotenv').config({ path: path.resolve(__dirname, '.env') });
 
-async function getRealModelIds() {
+// 👈 喺度改返你想用嚟 Check 嗰條 Key 嘅變數名 (例如 GEMINI_API_KEY_1)
+const KEY_NAME = 'GEMINI_API_KEY_1'; 
+
+async function listModels() {
+    const apiKey = process.env[KEY_NAME];
+    
+    if (!apiKey) {
+        console.error(`❌ 錯誤：喺 .env 搵唔到 ${KEY_NAME}，請檢查 File 是否存在。`);
+        return;
+    }
+
     try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${process.env.GEMINI_API_KEY}`;
+        // 使用 v1beta 接口獲取最完整的清單
+        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
         const response = await axios.get(url);
         
-        console.log("🔍 [照妖鏡] 你的 API Key 支援的真實 Model ID：\n");
+        console.log(`\n=== 🔍 [${KEY_NAME}] 可用的 Model ID 清單 ===\n`);
         
-        response.data.models.forEach(m => {
-            // 我哋只過濾出你有興趣嘅 Gemini 3 同 Gemma 模型
-            if (m.displayName.includes('3') || m.displayName.includes('Gemma 3')) {
-                // 將 'models/' 前綴切走，剩低嘅就係寫 Code 要用嘅代號
-                const realId = m.name.replace('models/', '');
-                console.log(`👉 顯示名稱: ${m.displayName.padEnd(25)} | 💻 真正 API 代號: ${realId}`);
+        const models = response.data.models || [];
+        
+        models.forEach(m => {
+            const realId = m.name.replace('models/', '');
+            
+            // 只列出支援 generateContent 嘅模型（即係可以用落你隻 Bot 嘅大腦）
+            if (m.supportedGenerationMethods.includes('generateContent')) {
+                console.log(`👉 代碼: ${realId.padEnd(35)} | 名稱: ${m.displayName}`);
             }
         });
-        console.log("\n✅ 檢查完畢！請將上面嘅【真正 API 代號】放入 aiService.js！");
+
+        console.log("\n✅ 掃描完畢！請將上面【代碼】一欄嘅文字（例如 gemini-1.5-flash）");
+        console.log("放入 Supabase 的 ai_roles 表格中對應的 model_1 或 model_2。");
+
     } catch (error) {
-        console.error("❌ 查詢失敗:", error.message);
+        const errorMsg = error.response?.data?.error?.message || error.message;
+        console.error(`❌ 查詢失敗: ${errorMsg}`);
     }
 }
 
-getRealModelIds();
+listModels();
