@@ -32,11 +32,33 @@ const retrospectiveJob = {
                 const HURDLE_RATE = 5.0; 
 
                 if (avgPnlPct >= HURDLE_RATE) {
-                    const msg = `過去 12 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (已跨越 ${HURDLE_RATE}% 及格線)。\n🛡️ 系統處於「實質印鈔狀態」，禁止 AI 擅改參數！`;
+                    const msg = `過去 12 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (已跨越 ${HURDLE_RATE}% 及格線)。🛡️ 系統處於「實質印鈔狀態」，禁止 AI 擅改參數！`;
                     console.log(`✅ [Evolution] ${msg}`);
-                    healthMonitor.setStatus('AI_Evolution', '🟢 利潤達標，休眠中');
-                    sendAdminAlert(`🌞 <b>[進化防禦機制觸發]</b>\n${msg}`);
-                    return; 
+                    
+                    // 🚀 關鍵改動：唔好 return，改為建立一個「唯讀分析報告」
+                    const report = {
+                        analysis: `【實質印鈔戰報】\n當前系統表現極佳（Avg PNL: ${avgPnlPct.toFixed(2)}%）。根據防禦協議，Master AI 已停止對核心參數與 Prompt 進行任何實質修改。建議繼續觀察。`,
+                        recommended_params: null,
+                        target_prompt_id: null,
+                        new_prompt_content: null,
+                        prompt_feedback: "防禦機制生效，略過修改。"
+                    };
+
+                    const boardComment = "🛡️ 系統自動觸發防禦機制，提案修改已凍結";
+                    
+                    // 1. 寫入 DB 留紀錄
+                    await supabase.from('daily_audit_reports').insert([{
+                        analysis_content: report.analysis,
+                        param_changes: { status: "PROTECTED", avg_pnl: avgPnlPct },
+                        prompt_changes: { feedback: "SAFE_MODE", log: "印鈔中，不作改動" }
+                    }]);
+
+                    // 2. 🚀 直接寄 Email 報喜！
+                    await emailService.sendEvolutionReport(report, boardComment, "無變動 (利潤達標)", "無修正 (防禦中)");
+
+                    sendAdminAlert(`🌞 <b>[戰報模式]</b>\n${msg}\n📧 <b>戰報已寄出，請查收！</b>`);
+                    healthMonitor.setStatus('AI_Evolution', '🟢 印鈔防禦中 (已寄戰報)');
+                    return; // 呢度先至真正完結
                 }
 
                 badTrades = allTrades.filter(t => t.realized_pnl_pct < 0).sort((a, b) => a.realized_pnl_pct - b.realized_pnl_pct).slice(0, 3);

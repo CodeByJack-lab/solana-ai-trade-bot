@@ -63,7 +63,7 @@ const aiService = {
                 latest_news_score: currentNewsScore
             };
 
-            const promptText = await this._getPromptFromDB(promptId, promptData);
+            const promptText = await aiService._getPromptFromDB(promptId, promptData);
 
             // 🚀 正常情況：經 Orchestrator 派單
             const result = await aiOrchestrator.executeTask('OVERSEER', 'GEMINI', promptText);

@@ -74,34 +74,31 @@ async function sendAdminAlert(message) {
 let lastErrorState = "";
 
 function checkSystemHealth() {
-    // 👈 [核心修復] 動態載入，打破循環依賴
     const { healthMonitor } = require('./healthMonitor'); 
-    
     const report = healthMonitor.getHealthReport();
-    const hasError = report.includes('🔴') || report.includes('🟡');
     
-    if (hasError) {
-        const lines = report.split('\n');
-        let currentErrors = lines.filter(l => l.includes('🔴') || l.includes('🟡')).join('\n');
-        
-        if (currentErrors !== lastErrorState) {
-            const cleanReport = safeHTML(report);
-            const alertMsg = `🚨 <b>【系統故障警告】偵測到模組異常！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
-            sendAdminAlert(alertMsg);
-            lastErrorState = currentErrors; 
-        }
-    } else {
-        if (lastErrorState !== "") {
-            const cleanReport = safeHTML(report);
-            const recoveryMsg = `✅ <b>【系統恢復正常】所有模組已解除警報！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
-            sendAdminAlert(recoveryMsg);
-            lastErrorState = ""; 
-        }
+    // 1. 提取所有錯誤行 (🔴 或 🟡)
+    const lines = report.split('\n');
+    const currentErrors = lines.filter(l => l.includes('🔴') || l.includes('🟡')).join('\n');
+    
+    // 🚀 核心邏輯：只有當「錯誤內容」同上次唔同，先至發警報
+    if (currentErrors !== "" && currentErrors !== lastErrorState) {
+        const cleanReport = safeHTML(report);
+        const alertMsg = `🚨 <b>【系統故障警告】偵測到新異常！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
+        sendAdminAlert(alertMsg);
+        lastErrorState = currentErrors; // 儲存當前錯誤狀態
+    } 
+    // 🚀 核心邏輯：如果之前有錯，依家全綠 (恢復正常)，send 一次通知
+    else if (currentErrors === "" && lastErrorState !== "") {
+        const cleanReport = safeHTML(report);
+        const recoveryMsg = `✅ <b>【系統恢復正常】所有模組已解除警報！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
+        sendAdminAlert(recoveryMsg);
+        lastErrorState = ""; // 清空狀態
     }
 }
 
-// 每 10 分鐘巡邏一次健康看板
-setInterval(checkSystemHealth, 10 * 60 * 1000);
+// 每 1 分鐘巡邏一次健康看板
+setInterval(checkSystemHealth, 1 * 60 * 1000);
 
 /**
  * 📋 傳送簡潔版參數快照

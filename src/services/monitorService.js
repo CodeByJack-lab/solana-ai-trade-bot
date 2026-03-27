@@ -521,7 +521,7 @@ function startWatchlistMonitor() {
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] 智能極速雙軌持倉監控啟動 (5s物理止損 + 15s大腦巡邏)...');
+    console.log('👁️ [Radar] 智能極速雙軌持倉監控啟動 (2s物理止損 + 15s大腦巡邏)...');
     
     let cachedSolPriceUsd = 150; 
     const sellingLocks = new Set(); 
@@ -580,37 +580,37 @@ function startPositionMonitor() {
                 const drawdownFromHigh = ((currentPrice - pos.highest_price_sol) / pos.highest_price_sol) * 100;
                 const highestPnlPct = ((pos.highest_price_sol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
 
-                const isBluechip = pos.strategy_type && pos.strategy_type.includes('BLUECHIP');
                 const isHalfSold = pos.strategy_type && pos.strategy_type.includes('HALF_SOLD');
 
                 let action = 'HOLD';
                 let reason = '';
                 let sellFraction = 1.0; 
 
-                if (isBluechip && highestPnlPct >= 5.0 && pnlPct <= 0.5) {
-                    action = 'SELL';
-                    reason = `🛡️ [老幣保本機制] 利潤曾達 +${highestPnlPct.toFixed(2)}% 現回落至成本線，強制結利`;
-                } else if (pnlPct <= STOP_LOSS_PCT) {
+                // 🚀 [V7.2 改進] 三幣大一統策略
+                
+                // 1. 物理硬止損 (最高優先級)
+                if (pnlPct <= STOP_LOSS_PCT) {
                     action = 'SELL';
                     reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
-                } else if (!isHalfSold && highestPnlPct >= 100) {
+                } 
+                // 2. 移動止盈：賺過 50% 後，從最高位回撤 30% 即全走
+                else if (highestPnlPct >= 50 && drawdownFromHigh <= -30) {
+                    action = 'SELL';
+                    reason = `💰 觸發統一移動止盈 (曾賺 +${highestPnlPct.toFixed(2)}%，現回撤 ${drawdownFromHigh.toFixed(2)}% 全走)`;
+                }
+                // 3. 翻倍保本：歷史最高達 95% 以上則賣出一半鎖定成本 (保留保險機制)
+                else if (!isHalfSold && highestPnlPct >= 95) { 
                     action = 'SELL';
                     sellFraction = 0.5;
-                    reason = `🚀 翻倍回本機制 (歷史最高達 +${highestPnlPct.toFixed(2)}%，賣出 50% 鎖定成本)`;
-                } else if (isHalfSold && drawdownFromHigh <= -30) {
+                    reason = `🚀 觸發翻倍回本 (歷史最高: +${highestPnlPct.toFixed(2)}%)，先賣 50% 鎖本`;
+                }
+                // 4. 極速插水保險：高位瞬間回撤 40% (疑似 Rug) 則強制撤退
+                else if (drawdownFromHigh <= -40) {
                     action = 'SELL';
-                    reason = `💰 登月尾倉止盈 (翻倍後高位回撤 ${drawdownFromHigh.toFixed(2)}%，全數獲利了結)`;
-                } else if (!isHalfSold && highestPnlPct >= 50 && drawdownFromHigh <= -15) {
-                    action = 'SELL';
-                    reason = `💰 觸發無腦利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%，高位回撤: ${drawdownFromHigh.toFixed(2)}%)`;
-                } 
+                    reason = `🚨 偵測到斷崖式崩盤 (高位回撤 ${drawdownFromHigh.toFixed(2)}%)，緊急撤退`;
+                }
 
                 if (action === 'SELL') {
-                    if (isBluechip && !isHalfSold && pnlPct > 0 && sellFraction === 1.0) {
-                        sellFraction = 0.5;
-                        reason = `[老幣分批止盈] ${reason}`;
-                    }
-
                     sellingLocks.add(pos.mint_address);
 
                     runSellPipeline(pos, currentPrice, reason, sellFraction).then(sellResult => {
@@ -625,9 +625,9 @@ function startPositionMonitor() {
                 }
             }
         } catch (err) {
-            console.error(`❌ [Position Monitor] 5s 極速引擎異常:`, err.message);
+            console.error(`❌ [Position Monitor] 2s 極速引擎異常:`, err.message);
         }
-    }, 5000); 
+    }, 2000); // 🚀 物理引擎頻率提升至 2s
 
     setInterval(async () => {
         try {
@@ -671,11 +671,10 @@ function startPositionMonitor() {
                     const posDataForAI = { ...pos, currentPrice, pnlPct, mode: portfolio.mode };
                     const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
                     
-                    // 🚀 [V7.2 新增] 實時寫入 AI 評語到資料庫
                     const tableName = portfolio.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
                     await supabase
                         .from(tableName)
-                        .update({ last_review_comment: reviewResult.reason }) // 👈 對位寫入
+                        .update({ last_review_comment: reviewResult.reason }) 
                         .eq('mint_address', pos.mint_address);
 
                     if (reviewResult.decision === 'RETRY_LATER') {
@@ -769,8 +768,6 @@ function startCommandListener() {
 }
 
 function startOneMinuteMetricsAlert() {
-    console.log('⏱️ [Metrics] 1 分鐘極速雷達已啟動 (純 Log 模式)...');
-    
     setInterval(() => {
         const currentAiCount = aiOrchestrator.requestCount || 0;
         const aiThisMinute = currentAiCount - lastAiCount;
