@@ -1,9 +1,16 @@
 // src/services/emailService.js
+const dns = require('dns');
+// 🚀 關鍵：強制 DNS 優先解析 IPv4 地址，解決 Railway ENETUNREACH IPv6 報錯
+if (dns.setDefaultResultOrder) {
+    dns.setDefaultResultOrder('ipv4first');
+}
+
 const nodemailer = require('nodemailer');
-const { supabase } = require('../config/supabase'); // 引入 Supabase
+const { supabase } = require('../config/supabase'); 
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
+// 🛠️ 建立發送器
 const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
     port: 465, // 使用 SSL 
@@ -22,7 +29,7 @@ const emailService = {
         }
 
         try {
-            // 🚀 動態從 Supabase 拉取所有「生效中」的 Admin Emails
+            // 🚀 從 Supabase 拉取生效中的 Admin Emails
             const { data: admins, error } = await supabase
                 .from('admin_subscribers')
                 .select('email')
@@ -33,13 +40,12 @@ const emailService = {
                 return false;
             }
 
-            // 將 [{email: 'a@a.com'}, {email: 'b@b.com'}] 轉換成 'a@a.com, b@b.com'
             const targetEmails = admins.map(a => a.email).join(', ');
             console.log(`📧 [Email Service] 準備發送報告給: ${targetEmails}`);
 
             const dateStr = new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
             
-            // 🎨 專業 HTML 排版
+            // 🎨 HTML 排版維持原本設計
             const htmlContent = `
             <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
                 <h2 style="color: #2E86C1; border-bottom: 2px solid #2E86C1; padding-bottom: 10px;">🤖 V7.0 Master AI 全自動自我進化報告</h2>
@@ -70,7 +76,7 @@ const emailService = {
 
             const info = await transporter.sendMail({
                 from: `"Master AI 總機" <${process.env.SMTP_USER}>`,
-                to: targetEmails, // 🚀 動態群發
+                to: targetEmails, 
                 subject: `[進化報告] AI 系統自我修正戰報 - ${dateStr}`,
                 html: htmlContent
             });
