@@ -64,15 +64,23 @@ const consensusService = {
                 console.warn(`⚠️ [${hallName}] 無法獲取大盤災難指數，預設為 0`);
             }
             
+            // 👇👇👇 [修復與升級] 處理 lastComment 記憶及 vol_5m 命名對齊
+            let finalDescription = "無";
+            if (options.lastComment) {
+                finalDescription = `【歷史評語】${options.lastComment}`;
+            } else if (options.isReentry) {
+                finalDescription = "【注意：橫盤30分鐘後接回】";
+            }
+
             const promptData = {
                 token_symbol: marketData.symbol,
                 token_name: marketData.name,
                 liquidity: marketData.liquidity,
-                vol_5m: marketData.vol5m,
+                vol_5m: marketData.volume5m, // 👈 [Bug Fix] 原本寫錯咗做 vol5m，導致 undefined！
                 buy_txs: marketData.buys5m,
                 sell_txs: marketData.sells5m,
                 social_links: marketData.socials,
-                description: options.isReentry ? "【注意：橫盤30分鐘後接回】" : "無",
+                description: finalDescription, // 👈 [升級] 支援 Trending 歷史記憶對比
                 latest_news_score: currentNewsScore
             };
 
@@ -90,7 +98,6 @@ const consensusService = {
             
             const cleanScout = (scout.decision || scout.verdict || '').trim().toUpperCase();
             
-            // 🛑 【漏斗截斷 1】：先鋒話唔得，即刻斬！(修復：加入 VETO 判斷)
             if (cleanScout === 'REJECT' || cleanScout === 'VETO' || cleanScout.includes('VETO')) {
                 console.log(`🛑 [提早截斷] 先鋒否決: ${scout.reason}`);
                 return { buy: false, reason: `先鋒首輪淘汰: ${scout.reason}` };
@@ -105,7 +112,6 @@ const consensusService = {
             
             const cleanStrat = (strategist.decision || strategist.verdict || '').trim().toUpperCase();
 
-            // 🛑 【漏斗截斷 2】：軍師話唔得，即刻斬！(修復：新增軍師截斷)
             if (cleanStrat === 'REJECT' || cleanStrat === 'VETO' || cleanStrat.includes('VETO')) {
                 console.log(`🛑 [提早截斷] 軍師否決: ${strategist.reason}`);
                 return { buy: false, reason: `軍師數據淘汰: ${strategist.reason}` };
@@ -114,7 +120,6 @@ const consensusService = {
             // ==========================================
             // ⚖️ 第三關：判官 (Auditor) 行使一票否定權
             // ==========================================
-            // 📦 戰報強制打包 (修復：確保判官一定睇到先鋒同軍師嘅意見)
             const pAuditBase = await this.getPrompt(`${promptPrefix}_auditor`, promptData);
             const pAuditWrapped = `${pAuditBase}\n\n【前線戰報彙整】\n先鋒意見 (${cleanScout}): ${scout.reason}\n軍師意見 (${cleanStrat}): ${strategist.reason}\n\n請綜合以上資訊，做最終判決 (PASS 或 VETO)。你有絕對一票否定權。`;
 
@@ -125,13 +130,11 @@ const consensusService = {
 
             const cleanAudit = (auditor.decision || auditor.verdict || '').trim().toUpperCase();
 
-            // 🛑 【絕對一票否定權】：只要判官唔係話 BUY/PASS，全部當 REJECT
             if (cleanAudit === 'REJECT' || cleanAudit === 'VETO' || cleanAudit.includes('VETO')) {
                 return { buy: false, reason: `⚖️ 判官否決: ${auditor.reason}` };
             }
 
             if (cleanAudit === 'BUY' || cleanAudit === 'PASS' || cleanAudit === 'PASSED' || cleanAudit.includes('EXECUTE_BUY')) {
-                // 最終分數由判官決定，如果判官無畀分就用軍師嘅
                 const finalScore = auditor.score || strategist.score || 80;
                 return { buy: true, score: finalScore, reason: `⚖️ 終審通過: ${auditor.reason}` };
             }
@@ -160,7 +163,6 @@ const consensusService = {
                 latest_news_score: currentNewsScore 
             });
             
-            // 老幣巡邏直接用無限水喉 GEMINI 負責
             const strategist = await aiOrchestrator.executeTask('STRATEGIST_BLUECHIP', 'GEMINI', pStrat);
             
             console.log(`🧠 老幣軍師: ${strategist.decision || strategist.verdict} | 理由: ${strategist.reason}`);
