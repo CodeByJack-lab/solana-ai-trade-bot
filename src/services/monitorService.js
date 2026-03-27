@@ -572,9 +572,18 @@ function startPositionMonitor() {
                 
                 const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
 
+                // 🚀 [V7.3 改進] 修正最高價寫入：加入 50 倍常理過濾，防止 API 髒數據令 ATH 飛天
                 if (currentPrice > pos.highest_price_sol) {
-                    pos.highest_price_sol = currentPrice;
-                    supabase.from(`active_positions_${tableSuffix}`).update({ highest_price_sol: currentPrice }).eq('mint_address', pos.mint_address).then();
+                    const priceRatio = currentPrice / (pos.highest_price_sol || pos.entry_price_sol);
+                    if (priceRatio < 50) {
+                        pos.highest_price_sol = currentPrice;
+                        supabase.from(`active_positions_${tableSuffix}`)
+                            .update({ highest_price_sol: currentPrice })
+                            .eq('mint_address', pos.mint_address)
+                            .then();
+                    } else {
+                        console.warn(`⚠️ [Price Defense] 偵測到異常跳價！拒絕更新 ATH: ${pos.token_symbol} (${currentPrice} SOL)`);
+                    }
                 }
 
                 const drawdownFromHigh = ((currentPrice - pos.highest_price_sol) / pos.highest_price_sol) * 100;
@@ -627,7 +636,7 @@ function startPositionMonitor() {
         } catch (err) {
             console.error(`❌ [Position Monitor] 2s 極速引擎異常:`, err.message);
         }
-    }, 2000); // 🚀 物理引擎頻率提升至 2s
+    }, 2000); 
 
     setInterval(async () => {
         try {
