@@ -85,7 +85,7 @@ class AIOrchestrator {
     }
 
     /**
-     * 📡 底層 API 呼叫器 (含 8 秒死亡線 Hard Timeout)
+     * 📡 底層 API 呼叫器 (含 12 秒死亡線 Hard Timeout)
      */
     async _callProvider(provider, promptText) {
         const limitedPrompt = this._enforceTokenLimit(promptText);
@@ -94,10 +94,10 @@ class AIOrchestrator {
             const client = this._getNextGeminiClient();
             const model = client.getGenerativeModel({ model: this.apiConfig.GEMINI.model });
             
-            // 🛡️ 8 秒死亡線
+            // 🛡️ 12 秒死亡線
             let timeoutId;
             const timeoutPromise = new Promise((_, reject) => {
-                timeoutId = setTimeout(() => reject(new Error(`[GEMINI] 12秒死亡線超時，強行斬斷`)), 12000);
+                timeoutId = setTimeout(() => reject(new Error(`[GEMINI] ${timeoutLimit/1000}秒死亡線超時`)), timeoutLimit);
             });
 
             try {
@@ -128,7 +128,7 @@ class AIOrchestrator {
             // Groq 或 Mistral 呼叫
             const cfg = this.apiConfig[provider];
             const source = axios.CancelToken.source();
-            const timeoutId = setTimeout(() => source.cancel(`[${provider}] 12秒死亡線超時，強行斬斷`), 12000);
+            const timeoutId = setTimeout(() => source.cancel(`[${provider}] ${timeoutLimit/1000}秒死亡線超時`), timeoutLimit);
 
             try {
                 const res = await axios.post(cfg.url, {
@@ -153,19 +153,25 @@ class AIOrchestrator {
      * 主將失敗，副將無縫補位
      */
     async executeTask(role, primaryProvider, promptText) {
+        // 🎯 核心邏輯：判斷係咪 Master AI 類嘅重型任務
+        const isHeavyTask = ['MASTER_AI', 'AI_BOARD_OF_DIRECTORS'].includes(role);
+        const timeoutLimit = isHeavyTask ? 30000 : 12000; // 重型任務畀 30 秒，普通搶幣維持 12 秒
+
         try {
-            const result = await this._callProvider(primaryProvider, promptText);
+            // 🚀 呼叫時傳入 timeoutLimit
+            const result = await this._callProvider(primaryProvider, promptText, timeoutLimit);
             healthMonitor.setStatus(`AI_${role}`, `🟢 正常 (${primaryProvider})`);
             return { ...result, usedProvider: primaryProvider };
         } catch (err) {
             const fallbackProvider = this._getFallbackProvider(primaryProvider);
-            console.warn(`⚠️ [AI_${role}] ${primaryProvider} 觸發死亡線或報錯，瞬間切換至 ${fallbackProvider} 補位！`);
+            console.warn(`⚠️ [AI_${role}] ${primaryProvider} 觸發死亡線 (${timeoutLimit/1000}s)，瞬間切換至 ${fallbackProvider} 補位！`);
             healthMonitor.setStatus(`AI_${role}`, `🟡 錯峰補位 (${fallbackProvider})`);
-            
+    
             try {
-                const fallbackResult = await this._callProvider(fallbackProvider, promptText);
+                // 🚀 補位嗰陣都一樣要傳入 timeoutLimit
+                const fallbackResult = await this._callProvider(fallbackProvider, promptText, timeoutLimit);
                 return { ...fallbackResult, usedProvider: fallbackProvider };
-            } catch (fallbackErr) {
+           } catch (fallbackErr) {
                 console.error(`❌ [AI_${role}] 雙端失效！強制輸出 VETO 防禦。`);
                 healthMonitor.setStatus(`AI_${role}`, `🔴 雙端失效`);
                 return { decision: "VETO", reason: "API 雙端崩潰，系統強制防禦", score: 0 };

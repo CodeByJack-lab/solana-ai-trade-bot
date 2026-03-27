@@ -758,12 +758,15 @@ function startCommandListener() {
     }, 5000);
 }
 
-// 👇👇👇 [新增] 1分鐘高頻戰報警報器
+/**
+ * ⏱️ 1 分鐘高頻數據追蹤 (僅 Console Log)
+ * 目的：在不打擾管理員的情況下，確保系統每分鐘都有心跳紀錄
+ */
 function startOneMinuteMetricsAlert() {
-    console.log('⏱️ [Metrics] 1 分鐘高頻戰報警報器已啟動 (智能靜默模式)...');
+    console.log('⏱️ [Metrics] 1 分鐘極速雷達已啟動 (純 Log 模式)...');
     
     setInterval(() => {
-        // 1. 計算 AI 請求增量
+        // 1. 計算 AI 請求增量 (利用 aiOrchestrator 內置計數器)
         const currentAiCount = aiOrchestrator.requestCount || 0;
         const aiThisMinute = currentAiCount - lastAiCount;
         lastAiCount = currentAiCount;
@@ -772,19 +775,18 @@ function startOneMinuteMetricsAlert() {
         const currentWebhooks = webhooksThisMinute;
         webhooksThisMinute = 0; 
 
-        // 3. 獲取 Oracle 壓力
+        // 3. 獲取 Oracle 當前壓力
         const currentOracleQueue = healthMonitor.oracleQueueSize || 0;
 
-        // 🛡️ 智能靜默：有流量先轟炸 Telegram，防止 429 禁言
-        if (aiThisMinute > 0 || currentWebhooks > 0 || currentOracleQueue > 10) {
-            const msg = `⏱️ <b>[每分極速戰報]</b>\n` +
-                        `🤖 AI 總機呼叫: <code>${aiThisMinute}</code> 次\n` +
-                        `🪝 Webhook 觸發: <code>${currentWebhooks}</code> 次\n` +
-                        `🫀 Oracle 排隊: <code>${currentOracleQueue}</code> 隻幣`;
-            
-            sendAdminAlert(msg).catch(() => {});
-        }
-    }, 60000); // 60000ms = 1分鐘
+        // 4. 🚀 輸出至 Console Log (後台監控用)
+        const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
+        
+        console.log(`[${timeStr}] 📊 Minute Heartbeat -> AI Call: ${aiThisMinute} | Webhook: ${currentWebhooks} | Oracle Queue: ${currentOracleQueue}`);
+
+        // 如果你發現 Webhook 突然爆升到 100+，你可以喺呢度加 logic 提醒自己，
+        // 但目前照你要求，呢度係絕對安靜。
+        
+    }, 60000); // 👈 修正為 60000 (1 分鐘)
 }
 // 👆👆👆
 
