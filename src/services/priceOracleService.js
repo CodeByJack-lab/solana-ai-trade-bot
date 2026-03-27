@@ -5,7 +5,7 @@ const { healthMonitor } = require('./healthMonitor');
 
 /**
  * 🫀 系統心臟：Price Oracle Service (價格預言機)
- * [V7.4 降頻版] - 減緩 API 請求頻率，防止 429 Too Many Requests
+ * [V7.4 降頻防護版] - 減緩 API 請求頻率，防止 429 Too Many Requests
  */
 class PriceOracleService {
     constructor() {
@@ -60,7 +60,6 @@ class PriceOracleService {
         });
 
         this.portfolioMints = new Set(mintsArray);
-        // console.log(`✅ [Oracle] 已將 ${mintsArray.length} 隻幣登記至 10 秒極速心跳線`); // 隱藏以免洗版
     }
 
     /**
@@ -161,7 +160,7 @@ class PriceOracleService {
                     }
                     // 🚀 如果是 429，靜默不洗版
                     if (apiErr.response && apiErr.response.status === 429) {
-                        // 只在特定情況下紀錄
+                        // 靜默處理
                     } else {
                          console.warn(`⚠️ [${currentEngineName}] 批次查價失敗: ${this._translateAxiosError(apiErr)}`);
                     }
@@ -180,7 +179,7 @@ class PriceOracleService {
                 if (data[mint]) {
                     this.cache.set(mint, { ...data[mint], timestamp: now });
                 } else {
-                    // 🚀 極度重要：如果查不到新價錢，絕對不能覆寫為 0，必須保留舊有快取！
+                    // 🚀 極度重要：如果查不到新價錢，絕對不能覆寫為 0，必須保留舊有快取！防假跌！
                     const existing = this.cache.get(mint);
                     if (!existing) {
                         // 真的沒有資料才塞預設值，並且確保價格是 0 以便 monitor 識別並略過
