@@ -5,35 +5,34 @@ const { healthMonitor } = require('./healthMonitor');
 
 /**
  * 🫀 系統心臟：Price Oracle Service (價格預言機)
- * 完全基於 HTTP API (DexScreener + Jupiter)，不再依賴 RPC 節點，防止 429 塞車假死。
+ * [V7.4 降頻版] - 減緩 API 請求頻率，防止 429 Too Many Requests
  */
 class PriceOracleService {
     constructor() {
         this.cache = new Map(); // 格式: { mint: { priceUsd, priceSol, timestamp... } }
-        this.CACHE_TTL = 15000; // 15秒生命週期
+        this.CACHE_TTL = 30000; // 🚀 延長至 30秒生命週期，減少查價壓力
 
         this.batchQueue = new Set(); 
         this.isBatchProcessing = false;
         
         this.useDexNext = true; 
 
-        // 🚀 新增：全局 SOL 價格追蹤
+        // 全局 SOL 價格追蹤
         this.solPriceUsd = 150; 
 
         this.portfolioMints = new Set(); 
 
-        // 啟動定時發車機制
-        setInterval(() => this._updateSolPrice(), 60000); // 🚀 每 60 秒更新一次 SOL 價格
-        setInterval(() => this._processBatch(), 10000);  
-        setInterval(() => this._jupiterTick(), 2000);    
+        // 🚀 降頻設定：大幅減緩 API 請求
+        setInterval(() => this._updateSolPrice(), 60000); // 每 60 秒更新一次 SOL 價格
+        setInterval(() => this._processBatch(), 30000);   // 🚀 慢車：改為每 30 秒執行一次 (原本10秒)
+        setInterval(() => this._jupiterTick(), 10000);    // 🚀 快車：改為每 10 秒執行一次 (原本2秒)
 
         // 啟動時立即獲取一次 SOL 價
         this._updateSolPrice();
     }
 
     /**
-     * 🚀 新增：更新全局 SOL 價格
-     * 確保即使 API 只提供 USD 價，系統亦能準確換算回 SOL 價供止損計算
+     * 更新全局 SOL 價格
      */
     async _updateSolPrice() {
         try {
@@ -48,7 +47,7 @@ class PriceOracleService {
     }
 
     /**
-     * 📌 登記 VIP 持倉專線 (供 PortfolioService 調用)
+     * 📌 登記 VIP 持倉專線 (供 PortfolioService / MonitorService 調用)
      */
     setPortfolioMints(mintsArray) {
         if (!mintsArray || !Array.isArray(mintsArray)) return;
@@ -61,7 +60,7 @@ class PriceOracleService {
         });
 
         this.portfolioMints = new Set(mintsArray);
-        console.log(`✅ [Oracle] 已將 ${mintsArray.length} 隻幣登記至 2 秒極速心跳線`);
+        // console.log(`✅ [Oracle] 已將 ${mintsArray.length} 隻幣登記至 10 秒極速心跳線`); // 隱藏以免洗版
     }
 
     /**
@@ -106,7 +105,7 @@ class PriceOracleService {
 
         if (missing.length === 0) return results;
 
-        // 步驟 B：倉庫冇貨，等待集裝箱發車補貨
+        // 步驟 B：倉庫冇貨，等待集裝箱發車補貨 (最多等 12 秒)
         for (let i = 0; i < 24; i++) {
             await new Promise(r => setTimeout(r, 500)); 
             
@@ -128,7 +127,7 @@ class PriceOracleService {
     }
 
     /**
-     * 🚚 慢車：集裝箱發車引擎
+     * 🚚 慢車：集裝箱發車引擎 (每 30 秒執行)
      */
     async _processBatch() {
         if (healthMonitor && healthMonitor.setOracleQueueSize) {
@@ -160,11 +159,17 @@ class PriceOracleService {
                     if (apiErr.response && apiErr.response.status === 404) {
                         continue; 
                     }
-                    console.warn(`⚠️ [${currentEngineName}] 批次查價失敗: ${this._translateAxiosError(apiErr)}`);
+                    // 🚀 如果是 429，靜默不洗版
+                    if (apiErr.response && apiErr.response.status === 429) {
+                        // 只在特定情況下紀錄
+                    } else {
+                         console.warn(`⚠️ [${currentEngineName}] 批次查價失敗: ${this._translateAxiosError(apiErr)}`);
+                    }
                 }
 
                 if (i + 30 < allMints.length) {
-                    await new Promise(r => setTimeout(r, 500));
+                    // 🚀 增加請求之間的延遲，保護 API
+                    await new Promise(r => setTimeout(r, 2000));
                 }
             }
 
@@ -175,13 +180,18 @@ class PriceOracleService {
                 if (data[mint]) {
                     this.cache.set(mint, { ...data[mint], timestamp: now });
                 } else {
-                    // 如果查唔到，唔好寫入 0 蚊，否則會觸發假止損！保留舊價或者唔寫入
+                    // 🚀 極度重要：如果查不到新價錢，絕對不能覆寫為 0，必須保留舊有快取！
                     const existing = this.cache.get(mint);
                     if (!existing) {
+                        // 真的沒有資料才塞預設值，並且確保價格是 0 以便 monitor 識別並略過
                         this.cache.set(mint, { 
                             priceUsd: 0, priceSol: 0, liquidity: 0, volume5m: 0, fdv: 0, 
                             h1: 0, h24: 0, source: 'UNKNOWN', timestamp: now 
                         });
+                    } else {
+                        // 更新時間戳，讓舊資料繼續續命，避免被 TTL 清除
+                        existing.timestamp = now;
+                        this.cache.set(mint, existing);
                     }
                 }
             }
@@ -193,7 +203,7 @@ class PriceOracleService {
     }
 
     /**
-     * 🏎️ 快遞：心跳級持倉專線 (每 2 秒執行)
+     * 🏎️ 快遞：持倉專線 (每 10 秒執行一次，不再是 2 秒)
      */
     async _jupiterTick() {
         if (this.portfolioMints.size === 0) return;
@@ -207,21 +217,19 @@ class PriceOracleService {
                 if (data[mint] && data[mint].priceUsd > 0) {
                     const existing = this.cache.get(mint) || { liquidity: 0, volume5m: 0, fdv: 0, h1: 0, h24: 0 };
                     
-                    // 🚀 關鍵修復：計算 priceSol 供 Monitor 止損引擎使用
                     const priceSol = data[mint].priceUsd / this.solPriceUsd;
 
                     this.cache.set(mint, { 
                         ...existing,
                         priceUsd: data[mint].priceUsd, 
-                        priceSol: priceSol, // 必須要有 priceSol
+                        priceSol: priceSol,
                         source: 'Jupiter', 
                         timestamp: now 
                     });
                 }
             }
         } catch (e) {
-            if (e.response && e.response.status === 404) return;
-            if (e.response && e.response.status === 429) return;
+            if (e.response && (e.response.status === 404 || e.response.status === 429)) return;
             // 靜默處理其他錯誤，依靠 DexScreener 慢車補底
         }
     }
@@ -249,7 +257,7 @@ class PriceOracleService {
     async _fetchJupiter(mints) {
         // Jupiter V2 API
         const url = `https://api.jup.ag/price/v2?ids=${mints.join(',')}`;
-        const configOpts = { timeout: 2000 }; 
+        const configOpts = { timeout: 3000 };  // 放寬 timeout
         
         const res = await axios.get(url, configOpts);
         const results = {};
@@ -265,11 +273,11 @@ class PriceOracleService {
 
     async _fetchDexScreener(mints) {
         const url = `https://api.dexscreener.com/latest/dex/tokens/${mints.join(',')}`;
-        const res = await axios.get(url, { timeout: 4000 });
+        const res = await axios.get(url, { timeout: 6000 }); // 放寬 timeout
         const results = {};
         if (res.data?.pairs) {
             for (const mint of mints) {
-                // 🚀 防呆：只攞 Solana 鏈，並按流動性排序，防止攞到死水假池
+                // 防呆：只攞 Solana 鏈，並按流動性排序
                 const pairs = res.data.pairs.filter(p => p.chainId === 'solana' && p.baseToken.address === mint);
                 if (pairs.length > 0) {
                     pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
@@ -306,7 +314,7 @@ class PriceOracleService {
         const url = `https://api.geckoterminal.com/api/v2/networks/solana/tokens/multi/${mints.join(',')}`;
         const headers = { 'accept': 'application/json' };
         
-        const res = await axios.get(url, { headers, timeout: 5000 });
+        const res = await axios.get(url, { headers, timeout: 6000 }); // 放寬 timeout
         const results = {};
         if (res.data?.data) {
             for (const t of res.data.data) {
