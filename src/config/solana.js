@@ -76,7 +76,7 @@ const connection = new Proxy(primaryConnection, {
                 }
 
                 try {
-                    return await withTimeout(origMethod.apply(target, args), 2000, propKey);
+                    return await withTimeout(origMethod.apply(target, args), 5000, propKey);
                 } catch (err) {
                     console.warn(`\n⚠️ 觸發備援機制！原因: ${err.message}`);
                     console.warn(`🔄 瞬間無縫切換至備援水喉補救...`);
