@@ -20,6 +20,8 @@ const { aiOrchestrator } = require('./aiOrchestrator');
 const { priceOracleService } = require('./priceOracleService');
 
 const app = express();
+const cors = require('cors'); 
+app.use(cors());
 app.use(express.json());
 
 app.get('/', (req, res) => {
