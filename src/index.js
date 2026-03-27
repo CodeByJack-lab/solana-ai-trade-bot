@@ -1,5 +1,5 @@
 // src/services/healthMonitor.js
-const { sendAdminAlert } = require('./telegramService');
+const { sendAdminAlert } = require('./services/telegramService');
 
 class HealthMonitor {
     constructor() {
