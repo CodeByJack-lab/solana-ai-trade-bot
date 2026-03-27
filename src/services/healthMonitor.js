@@ -1,5 +1,4 @@
 // src/services/healthMonitor.js
-const { sendAdminAlert } = require('./telegramService');
 
 class HealthMonitor {
     constructor() {
@@ -30,10 +29,12 @@ class HealthMonitor {
         this.apiUsage.errors429++;
         const msg = `🚨 <b>[API 限流警告]</b>\n🤖 供應商: ${provider}\n🔑 Key 索引: 第 ${keyIndex + 1} 把 Key\n⚠️ 狀態: 觸發 429 Too Many Requests，系統已自動切換備用 Key！`;
         
-        console.log(`\n${msg.replace(/<[^>]*>?/gm, '')}`); // Terminal 顯示 (去除 HTML tag)
+        console.log(`\n${msg.replace(/<[^>]*>?/gm, '')}`); 
         
         try {
-            await sendAdminAlert(msg); // 射去 Admin Telegram
+            // 👈 [核心修復] 動態載入，打破循環依賴
+            const { sendAdminAlert } = require('./telegramService'); 
+            await sendAdminAlert(msg); 
         } catch (e) {
             console.error("❌ 無法發送 429 Telegram 警告:", e.message);
         }

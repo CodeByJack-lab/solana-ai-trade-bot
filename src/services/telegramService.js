@@ -1,7 +1,6 @@
 // src/services/telegramService.js
 const axios = require('axios');
 const path = require('path');
-const { healthMonitor } = require('./healthMonitor'); 
 const configEnv = require('../config/env');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
@@ -75,6 +74,9 @@ async function sendAdminAlert(message) {
 let lastErrorState = "";
 
 function checkSystemHealth() {
+    // 👈 [核心修復] 動態載入，打破循環依賴
+    const { healthMonitor } = require('./healthMonitor'); 
+    
     const report = healthMonitor.getHealthReport();
     const hasError = report.includes('🔴') || report.includes('🟡');
     
@@ -83,7 +85,6 @@ function checkSystemHealth() {
         let currentErrors = lines.filter(l => l.includes('🔴') || l.includes('🟡')).join('\n');
         
         if (currentErrors !== lastErrorState) {
-            // 將系統報告入面可能引發 HTML 報錯的 < > 洗白
             const cleanReport = safeHTML(report);
             const alertMsg = `🚨 <b>【系統故障警告】偵測到模組異常！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
             sendAdminAlert(alertMsg);
