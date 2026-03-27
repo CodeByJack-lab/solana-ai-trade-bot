@@ -1,6 +1,6 @@
 // src/services/priceService.js
 const { priceOracleService } = require('./priceOracleService');
-const { getUSDHKDRate } = require('./currency'); // 👈 引入實時匯率
+const { getUSDHKDRate } = require('../utils/currency');
 
 async function getSolPriceInHKD() {
     try {
