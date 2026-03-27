@@ -15,6 +15,7 @@ const { healthMonitor } = require('./healthMonitor');
 const { consensusService, getPendingMemeCount } = require('./consensusService');
 const { analyzeReentry, reviewActivePosition } = require('./aiService');
 const { retrospectiveJob } = require('../jobs/retrospectiveJob');
+const { aiOrchestrator } = require('./aiOrchestrator');
 
 // 👇👇👇 [V7.0 新增] 引入 Price Oracle 
 const { priceOracleService } = require('./priceOracleService');
@@ -40,6 +41,8 @@ const botWallet = configEnv.solana.walletPublicKey; // 👈 [V7.0] 轉用中央�
 
 // 🚀 全新數據追蹤器：按來源及 Type 分類
 let detailedStats = {};
+let webhooksThisMinute = 0;
+let lastAiCount = 0;
 
 // 🚀 本地防洪開關
 let isNurseryPoolFull = false; 
@@ -135,6 +138,8 @@ app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK'); 
 
     try {
+        webhooksThisMinute++;
+        
         const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
         if (!config || !config.is_running) return;
 
@@ -716,6 +721,36 @@ function startCommandListener() {
     }, 5000);
 }
 
+// 👇👇👇 [新增] 1分鐘高頻戰報警報器
+function startOneMinuteMetricsAlert() {
+    console.log('⏱️ [Metrics] 1 分鐘高頻戰報警報器已啟動 (智能靜默模式)...');
+    
+    setInterval(() => {
+        // 1. 計算 AI 請求增量
+        const currentAiCount = aiOrchestrator.requestCount || 0;
+        const aiThisMinute = currentAiCount - lastAiCount;
+        lastAiCount = currentAiCount;
+
+        // 2. 獲取 Webhook 觸發量並歸零
+        const currentWebhooks = webhooksThisMinute;
+        webhooksThisMinute = 0; 
+
+        // 3. 獲取 Oracle 壓力
+        const currentOracleQueue = healthMonitor.oracleQueueSize || 0;
+
+        // 🛡️ 智能靜默：有流量先轟炸 Telegram，防止 429 禁言
+        if (aiThisMinute > 0 || currentWebhooks > 0 || currentOracleQueue > 10) {
+            const msg = `⏱️ <b>[每分極速戰報]</b>\n` +
+                        `🤖 AI 總機呼叫: <code>${aiThisMinute}</code> 次\n` +
+                        `🪝 Webhook 觸發: <code>${currentWebhooks}</code> 次\n` +
+                        `🫀 Oracle 排隊: <code>${currentOracleQueue}</code> 隻幣`;
+            
+            sendAdminAlert(msg).catch(() => {});
+        }
+    }, 60000); // 60000ms = 1分鐘
+}
+// 👆👆👆
+
 function startMarketMonitor() {
     app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
         console.log('🔄 [System] 系統啟動，準備載入雙 Webhook 模組...');
@@ -727,6 +762,7 @@ function startMarketMonitor() {
         startPositionMonitor();
         startCommandListener();
         startWebhookStatsMonitor(); 
+        startOneMinuteMetricsAlert(); // 👈 [新增] 點火啟動 1 分鐘雷達
     });
 }
 
