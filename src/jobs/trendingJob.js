@@ -26,7 +26,6 @@ const trendingJob = {
 
             const tradeAmount = parseFloat(config.trending_trade_amount_sol) || 0.1;
 
-            // 🚀 撈取數據，包含 last_ai_comment
             const { data: targetToken } = await supabase
                 .from('trending_pool')
                 .select('*')
@@ -58,7 +57,6 @@ const trendingJob = {
             console.log(`🔥 [Trending] 準備突擊 Top 50 熱門幣: ${targetToken.token_symbol}`);
             console.log(`🛡️ [Security] 物理與合約防線通關！準備交由 AI 審查...`);
 
-            // 🚀 V7.2 升級：傳入歷史評語供 AI 對比
             const aiDecision = await consensusService.runMemeConsensus(
                 mintAddress, 
                 secResult.marketData, 
@@ -77,20 +75,17 @@ const trendingJob = {
                     console.log(`✅ 🟢 【買入成功 - ${secResult.marketData.symbol}】 🟢 ✅`);
                     console.log(`🤖 AI 買入理由: ${aiDecision.reason}`);
                     console.log(`======================================================\n`);
-                    // 買入成功，從池中移除
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                 }
             } else {
                 console.log(`🧠 [Trending AI Rejected] 否決: ${aiDecision.reason}`);
                 
-                // 🚀 如果 AI 決定 ONHOLD (觀望)，更新評語並保留在池中，不刪除
                 if (aiDecision.decision === 'ONHOLD' || aiDecision.reason.includes('ONHOLD')) {
                     console.log(`⏳ [Trending] AI 決定觀望，更新記憶並保留在池中...`);
                     await supabase.from('trending_pool')
                         .update({ last_ai_comment: aiDecision.reason })
                         .eq('mint_address', mintAddress);
                 } else {
-                    // 如果是 ABORT (放棄)，直接刪除
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                 }
             }
@@ -103,7 +98,8 @@ const trendingJob = {
     },
 
     start() {
-        cron.schedule('*/15 * * * * *', () => {
+        // 🚀 修正：將 15 秒改為 30 秒，減少併發請求防 429
+        cron.schedule('*/30 * * * * *', () => {
             this.runRoutine();
         });
         console.log(`🔥 [Trending Job] 熱門幣追擊隊已就位 (具備 AI 歷史記憶功能)`);
