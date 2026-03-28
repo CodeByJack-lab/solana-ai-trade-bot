@@ -51,7 +51,7 @@ async function testJupiter() {
     // 測試 2: Price API (價格參考用)
     // ==========================================
     try {
-        const priceUrl = `https://api.jup.ag/price/v2?ids=${MINT}`;
+        const priceUrl = `https://price.jup.ag/v6/price?ids=${MINT}`;
         console.log(`\n[Test 2] 測試 Price API (價格獲取)...`);
         console.log(`🔗 請求網址: ${priceUrl}`);
         

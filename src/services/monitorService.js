@@ -371,7 +371,7 @@ function startPositionMonitor() {
                 if (!config || !config.is_running) return;
                 
                 const mints = portfolio.positions.map(p => p.mint_address).join(',');
-                const { data } = await axios.get(`https://api.jup.ag/price/v2?ids=${mints}`, { timeout: 3000 }); // V2 API
+                const { data } = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 }); // V2 API
                 
                 if (data?.data) {
                     for (const pos of portfolio.positions) {
@@ -403,7 +403,7 @@ function startPositionMonitor() {
             if (trendingMints.length === 0) return;
 
             const ids = trendingMints.join(',');
-            const { data } = await axios.get(`https://api.jup.ag/price/v2?ids=${ids}`, { timeout: 3000 }); // V2 API
+            const { data } = await axios.get(`https://api.jup.https://price.jup.ag/v6/price?ids=ag/price/v2?ids=${ids}`, { timeout: 3000 }); // V2 API
             if (data && data.data) {
                 for (const mint of trendingMints) {
                     if (data.data[mint] && data.data[mint].price) {

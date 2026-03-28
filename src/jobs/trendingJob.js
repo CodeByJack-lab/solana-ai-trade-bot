@@ -42,7 +42,7 @@ const trendingJob = {
             const mints = poolTokens.map(t => t.mint_address).join(',');
             let latestPrices = {};
             try {
-                const res = await axios.get(`https://api.jup.ag/price/v2?ids=${mints}`, { timeout: 3000 });
+                const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
                 if (res.data && res.data.data) latestPrices = res.data.data;
             } catch (e) {
                 console.warn('⚠️ [Trending Job] Jupiter 批次查價失敗，暫緩本次覆診。');

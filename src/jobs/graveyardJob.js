@@ -70,7 +70,7 @@ const graveyardJob = {
             let pricesMap = {};
             try {
                 const ids = mintsToVerify.join(',');
-                const res = await axios.get(`https://api.jup.ag/price/v2?ids=${ids}`, { timeout: 5000 });
+                const res = await axios.get(`https://price.jup.ag/v6/price?ids=${ids}`, { timeout: 5000 });
                 if (res.data && res.data.data) {
                     pricesMap = res.data.data;
                 }
