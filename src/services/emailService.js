@@ -1,27 +1,19 @@
 // src/services/emailService.js
-const dns = require('dns');
-// 🚀 強制 DNS 優先解析 IPv4 地址，解決 Railway ENETUNREACH IPv6 報錯
-if (dns.setDefaultResultOrder) {
-    dns.setDefaultResultOrder('ipv4first');
-}
-
 const nodemailer = require('nodemailer');
 const { supabase } = require('../config/supabase'); 
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
 // 🛠️ 企業級穩健版 Transporter 配置
-// 改用 Port 465 (SMTPS) 通常比 587 在 Cloud 環境中更少受到防火牆阻斷
 const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
     port: 465,
-    secure: true, // Port 465 必須為 true
+    secure: true, 
     auth: {
         user: process.env.SMTP_USER,
-        // 🛡️ 自動防呆：replace(/\s+/g, '') 會幫你剷走所有空格
-        pass: (process.env.SMTP_PASS || '').replace(/\s+/g, '')
+        pass: (process.env.SMTP_PASS || '').replace(/\s+/g, '') // 自動剷走空格
     },
-    // ⚙️ 增加連線耐性，防止 Railway 網絡波動導致 Timeout
+    family: 4,                // 🚀 終極殺手鐧：強制底層 Socket 只用 IPv4，徹底避開 ENETUNREACH！
     connectionTimeout: 15000, // 15秒連線超時
     greetingTimeout: 10000,   // 10秒打招呼超時
     socketTimeout: 30000,     // 30秒傳輸超時
@@ -48,7 +40,7 @@ const emailService = {
             }
 
             const targetEmails = admins.map(a => a.email).join(', ');
-            console.log(`📧 [Email Service] 準備透過 Port 465 發送報告給: ${targetEmails}`);
+            console.log(`📧 [Email Service] 準備發送報告給: ${targetEmails}`);
 
             const dateStr = new Date().toLocaleString('zh-HK', { 
                 timeZone: 'Asia/Hong_Kong',
@@ -104,7 +96,6 @@ const emailService = {
 
         } catch (error) {
             console.error('❌ [Email Service] 致命錯誤:', error.message);
-            // 輸出更詳細的錯誤資訊方便 Debug
             if (error.code === 'ETIMEDOUT') console.error('   -> 原因: 與 Google SMTP 連線超時 (Network Timeout)');
             if (error.code === 'EAUTH') console.error('   -> 原因: 認證失敗，請檢查 SMTP_PASS 是否為最新的「應用程式密碼」');
             return false;
