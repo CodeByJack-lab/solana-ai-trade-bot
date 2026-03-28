@@ -51,6 +51,20 @@ app.use(express.json());
 
 app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.2 系統正常運行中 (0 延遲防禦版)'));
 
+// 🚀 [新增] 強制喚醒 AI 大腦 API 接線
+app.post('/force-evolution', async (req, res) => {
+    console.log('🧠 [Admin Command] 收到前端指令：強制喚醒 Master AI 進行進化！');
+    try {
+        const { retrospectiveJob } = require('../jobs/retrospectiveJob');
+        // 唔用 await，等佢自己喺背景行，即刻覆返 200 OK 畀前端，防止 Timeout
+        retrospectiveJob.runEvolutionWithRetry(1).catch(err => console.error("進化失敗:", err));
+        res.status(200).json({ success: true, message: '指令已送達，AI 正在運算中' });
+    } catch (err) {
+        console.error('❌ [Admin Command] 強制喚醒失敗:', err.message);
+        res.status(500).json({ success: false, error: err.message });
+    }
+});
+
 const HELIUS_API_KEY = configEnv.rpc.helius1.apiKey;           
 const WEBHOOK_ID = configEnv.rpc.helius1.webhookId;
 const HELIUS_API_KEY_2 = configEnv.rpc.helius2.apiKey;       

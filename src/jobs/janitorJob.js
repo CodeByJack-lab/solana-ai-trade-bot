@@ -5,6 +5,7 @@ const { supabase } = require('../config/supabase');
 const { PublicKey, Transaction, Keypair } = require('@solana/web3.js');
 const { createCloseAccountInstruction, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
 const configEnv = require('../config/env'); 
+const { healthMonitor } = require('../services/healthMonitor'); // 🛠️ [修復] 補返引入 healthMonitor
 
 let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;
