@@ -6,7 +6,7 @@ const { healthMonitor } = require('./healthMonitor');
 const { supabase } = require('../config/supabase'); 
 
 /**
- * 🧠 系統大腦總機：AI Orchestrator (終極崗位化 + 獨立 Fallback + 多金鑰分流版)
+ * 🧠 系統大腦總機：AI Orchestrator (終極崗位化 + 精準 Key 追蹤 + 自動自癒)
  */
 class AIOrchestrator {
     constructor() {
@@ -30,6 +30,7 @@ class AIOrchestrator {
                 console.log(`✅ [AI Orchestrator] 已從 DB 加載 ${data.length} 個 AI 崗位配置。`);
             }
 
+            // ⚡ Realtime Hot-Swap 監聽器
             supabase.channel('ai_roles_hot_swap')
                 .on(
                     'postgres_changes',
@@ -55,24 +56,53 @@ class AIOrchestrator {
         return 'GROQ'; 
     }
 
-    // 🚀 修復 1：加入 options 參數，特權放行 Master AI
     _enforceTokenLimit(prompt, options = {}) {
-        if (options.bypassLimit) return prompt; // 特權放行，允許長篇大論！
+        if (options.bypassLimit) return prompt; 
         return prompt + "\n\n(CRITICAL INSTRUCTION: You MUST keep your output reasoning strictly under 50 words to minimize latency. Return valid JSON only without markdown tags.)";
     }
 
     /**
-     * 📡 統一底層呼叫器
+     * 🚑 自動自癒系統：查 API 換 Model
      */
-    // 🚀 修復 2：接收 options 並傳遞給 _enforceTokenLimit
+    async _autoHealGeminiModel(roleName, currentModel, keyName, fieldToUpdate = 'model_1') {
+        try {
+            const apiKey = process.env[keyName] || this.defaultConfigs['GEMINI']?.defaultKey;
+            if (!apiKey) return;
+
+            console.log(`\n🛠️ [Auto-Heal] 嘗試為崗位 [${roleName}] 尋找最新替代模型 (使用金鑰: ${keyName})...`);
+            const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
+            const response = await axios.get(url, { timeout: 10000 });
+            
+            const models = response.data.models || [];
+            const validModels = models
+                .filter(m => m.supportedGenerationMethods.includes('generateContent'))
+                .map(m => m.name.replace('models/', ''))
+                .filter(m => m !== currentModel && m.includes('gemini') && !m.includes('vision'));
+
+            validModels.sort((a, b) => {
+                if (a.includes('flash') && !b.includes('flash')) return -1;
+                if (!a.includes('flash') && b.includes('flash')) return 1;
+                return b.localeCompare(a); 
+            });
+
+            if (validModels.length > 0) {
+                const newModel = validModels[0];
+                console.log(`🩹 [Auto-Heal] 找到替代模型: ${newModel}，更新 DB 中...`);
+                await supabase.from('ai_roles').update({ [fieldToUpdate]: newModel }).eq('role_name', roleName);
+            }
+        } catch (err) {
+            console.error(`❌ [Auto-Heal] 尋找替代模型失敗:`, err.message);
+        }
+    }
+
+    /**
+     * 📡 統一底層呼叫器 (加入詳細 Key 追蹤)
+     */
     async _callProvider(provider, promptText, timeoutLimit, specificModel, specificKeyName, options = {}) {
         const limitedPrompt = this._enforceTokenLimit(promptText, options);
-        
         const actualApiKey = process.env[specificKeyName] || this.defaultConfigs[provider]?.defaultKey;
 
-        if (!actualApiKey) {
-            throw new Error(`找不到有效金鑰變數: ${specificKeyName}`);
-        }
+        if (!actualApiKey) throw new Error(`找不到有效金鑰變數: ${specificKeyName}`);
         
         if (provider === 'GEMINI') {
             const client = new GoogleGenerativeAI(actualApiKey);
@@ -80,7 +110,7 @@ class AIOrchestrator {
             
             let timeoutId;
             const timeoutPromise = new Promise((_, reject) => {
-                timeoutId = setTimeout(() => reject(new Error(`[GEMINI] 觸發死亡線 (${timeoutLimit/1000}s)`)), timeoutLimit);
+                timeoutId = setTimeout(() => reject(new Error(`[Timeout] 觸發死亡線 (${timeoutLimit/1000}s)`)), timeoutLimit);
             });
 
             try {
@@ -99,17 +129,19 @@ class AIOrchestrator {
                 } catch (e) { throw new Error(`JSON 解析失敗: ${e.message}`); }
             } catch (error) {
                 clearTimeout(timeoutId);
+                // 🚀 將 KeyName 寫死入 Error Message，確保上層 catch 到嘅時候一定知係邊條 Key！
+                error.message = `[Key: ${specificKeyName}] ${error.message}`;
                 throw error; 
             }
         } else {
+            // GROQ / MISTRAL 邏輯保持不變...
             const url = (provider === 'GROQ') ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
             const source = axios.CancelToken.source();
-            
             let timeoutId;
             const timeoutPromise = new Promise((_, reject) => {
                 timeoutId = setTimeout(() => {
-                    source.cancel(`[${provider}] 觸發死亡線 (${timeoutLimit/1000}s)`);
-                    reject(new Error(`[${provider}] 觸發死亡線 (${timeoutLimit/1000}s)`));
+                    source.cancel(`觸發死亡線 (${timeoutLimit/1000}s)`);
+                    reject(new Error(`[Timeout] 觸發死亡線 (${timeoutLimit/1000}s)`));
                 }, timeoutLimit);
             });
 
@@ -128,13 +160,14 @@ class AIOrchestrator {
                 return JSON.parse(res.data.choices[0].message.content);
             } catch (err) {
                 clearTimeout(timeoutId);
+                err.message = `[Key: ${specificKeyName}] ${err.message}`;
                 throw err;
             }
         }
     }
 
     /**
-     * 🛡️ 三級瀑布式執行任務
+     * 🛡️ 三級瀑布式執行任務 (印出完整 Key 資訊)
      */
     async executeTask(role, legacyProvider, promptText, options = {}) {
         const isHeavyTask = ['EVOLUTION_MASTER', 'BOARD_OF_DIRECTORS', 'MASTER_AI'].includes(role);
@@ -142,36 +175,42 @@ class AIOrchestrator {
         if (options.bypassLimit) timeoutLimit = 60000;
 
         const roleCfg = this.roleConfigs[role] || {};
-        
         const primaryProv = roleCfg.provider || legacyProvider;
         const def = this.defaultConfigs[primaryProv] || this.defaultConfigs['GROQ'];
 
         const pM1 = roleCfg.model_1 || def.model;
         const pK1 = roleCfg.key_1 || def.keyName;
+        
         try {
-            // 🚀 修復 3：將 options 傳遞給 _callProvider
             const res1 = await this._callProvider(primaryProv, promptText, timeoutLimit, pM1, pK1, options);
             healthMonitor.setStatus(`AI_${role}`, `🟢 正常 (${primaryProv}_M1)`);
             return { ...res1, usedProvider: `${primaryProv}_M1` };
         } catch (err1) {
-            console.warn(`⚠️ [AI_${role}] 主將 M1 (${pM1}) 失效: ${err1.message}`);
+            // 🚀 清楚印出係邊條 Key 爆炸！
+            console.warn(`⚠️ [AI_${role}] 主將 M1 (${pM1} | 🔑 ${pK1}) 失效: ${err1.message}`);
+
+            // 如果係 Spending Cap 爆咗 (429)，多數係 Billing 停咗，換 Model 係無用嘅，我哋直接進入 M2 瀑布備援！
+            // 如果係 404 Model NotFound，先觸發 Auto-Heal 去換 Model
+            if (primaryProv === 'GEMINI' && err1.message.includes('404')) {
+                this._autoHealGeminiModel(role, pM1, pK1, 'model_1');
+            }
 
             const pM2 = roleCfg.model_2 || pM1;
             const pK2 = roleCfg.key_2 || pK1;
             try {
-                console.log(`🔄 [AI_${role}] 嘗試同廠後備: ${pM2} (Key: ${pK2})`);
+                console.log(`🔄 [AI_${role}] 嘗試同廠後備: M2 (${pM2} | 🔑 ${pK2})`);
                 const res2 = await this._callProvider(primaryProv, promptText, timeoutLimit, pM2, pK2, options);
                 healthMonitor.setStatus(`AI_${role}`, `🟡 同廠降級 (${primaryProv}_M2)`);
                 return { ...res2, usedProvider: `${primaryProv}_M2` };
             } catch (err2) {
-                console.warn(`⚠️ [AI_${role}] 後備 M2 (${pM2}) 亦失效: ${err2.message}`);
+                console.warn(`⚠️ [AI_${role}] 後備 M2 (${pM2} | 🔑 ${pK2}) 亦失效: ${err2.message}`);
 
                 const fbProv = roleCfg.fallback_provider || this._getFallbackProvider(primaryProv);
                 const fbDef = this.defaultConfigs[fbProv] || this.defaultConfigs['GROQ'];
                 const fbM = roleCfg.fallback_model || fbDef.model;
                 const fbK = roleCfg.fallback_key || fbDef.keyName;
 
-                console.warn(`🔄 [AI_${role}] 啟動最後防線，切換至跨廠補位: ${fbProv} (${fbM})`);
+                console.warn(`🔄 [AI_${role}] 啟動最後防線，切換至跨廠補位: ${fbProv} (${fbM} | 🔑 ${fbK})`);
                 try {
                     const resFB = await this._callProvider(fbProv, promptText, timeoutLimit, fbM, fbK, options);
                     healthMonitor.setStatus(`AI_${role}`, `🟠 跨廠補位 (${fbProv})`);
@@ -179,7 +218,6 @@ class AIOrchestrator {
                 } catch (errFB) {
                     console.error(`❌ [AI_${role}] 瀑布式備援全線崩潰！強制 VETO。(${errFB.message})`);
                     healthMonitor.setStatus(`AI_${role}`, `🔴 系統停擺`);
-                    // 🚀 修復 4：加上 usedProvider: "FAILED" 解決 undefined 問題
                     return { decision: "VETO", reason: "API 全線崩潰，系統強制防禦", score: 0, usedProvider: "FAILED" };
                 }
             }

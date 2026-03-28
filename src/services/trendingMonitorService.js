@@ -1,137 +1,171 @@
 // src/services/trendingMonitorService.js
-const axios = require('axios');
-const cron = require('node-cron');
+const express = require('express');
 const { supabase } = require('../config/supabase');
+const axios = require('axios');
+const { executeBuy } = require('./tradeService');
 const { healthMonitor } = require('./healthMonitor');
-// 👇👇👇 [V7.0 新增] 引入 Price Oracle 進行批次查價
-const { priceOracleService } = require('./priceOracleService');
-// 👆👆👆
-const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
+const { aiOrchestrator } = require('./aiOrchestrator');
 
-const trendingMonitorService = {
-    async scanTrending() {
-        console.log(`\n🔥 [Trending Radar] 啟動全網金狗海選掃描 (GeckoTerminal 免費版)...`);
-        healthMonitor.setStatus('Trending_Radar', '🟢 掃描中...');
+// ==========================================
+// 🧠 引入 Redis 中央緩存庫
+// ==========================================
+const configEnv = require('../config/env');
+const Redis = require('ioredis');
+const redis = new Redis(configEnv.cache.redisUrl);
+
+redis.on('error', (err) => {
+    console.error('🔴 [Redis Error] (Trending Monitor):', err.message);
+});
+
+let isTrendingMonitorRunning = false;
+
+function startTrendingMonitor() {
+    console.log('📈 [Trending Radar] 熱門幣雷達已啟動 (每 1 分鐘巡邏池內代幣)...');
+    
+    setInterval(async () => {
+        if (isTrendingMonitorRunning) return;
+        isTrendingMonitorRunning = true;
 
         try {
-            const { data: config } = await supabase.from('system_config').select('latest_news_score, is_running').eq('id', 1).single();
-            if (!config?.is_running) {
-                healthMonitor.setStatus('Trending_Radar', '🟡 系統暫停中');
-                return;
-            }
-            if (config?.latest_news_score > 70) {
-                console.log(`🛡️ [Trending Radar] 大盤災難指數過高 (${config.latest_news_score})，暫停掃描熱門 Meme 幣防禦風險。`);
-                healthMonitor.setStatus('Trending_Radar', '🟡 大盤恐慌避險中');
+            const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
+            if (!config || !config.is_running) {
+                isTrendingMonitorRunning = false;
                 return;
             }
 
-            const { data: bluechips } = await supabase.from('bluechip_pool').select('mint_address');
-            const bluechipMints = new Set(bluechips?.map(b => b.mint_address) || []);
+            const currentNewsScore = config.latest_news_score || 0;
 
-            // ==============================================================
-            // 🚀 V7.0 升級 1：飛起 Birdeye，改用 GeckoTerminal 免費榜單
-            // ==============================================================
-            let trendingMints = [];
-            try {
-                const url = `https://api.geckoterminal.com/api/v2/networks/solana/trending_pools`;
-                const response = await axios.get(url, {
-                    headers: { 'Accept': 'application/json' },
-                    timeout: 8000
-                });
+            const { data: tokens } = await supabase.from('trending_pool').select('*');
+            if (!tokens || tokens.length === 0) {
+                isTrendingMonitorRunning = false;
+                return;
+            }
 
-                if (response.data && response.data.data) {
-                    const pools = response.data.data;
-                    for (const pool of pools) {
-                        // GeckoTerminal 的 token ID 格式通常為 "solana_MINTADDRESS"
-                        const tokenId = pool.relationships?.base_token?.data?.id;
-                        if (tokenId && tokenId.includes('_')) {
-                            const mint = tokenId.split('_')[1];
-                            if (mint && mint.length >= 32 && mint !== 'So11111111111111111111111111111111111111112') {
-                                trendingMints.push(mint);
-                            }
+            const { getPortfolio } = require('./portfolioService');
+            const portfolio = getPortfolio();
+            const activePositions = portfolio.positions || [];
+
+            for (const token of tokens) {
+                const mintAddress = token.mint_address;
+
+                // 1. 檢查是否已經持有
+                const isHolding = activePositions.some(p => p.mint_address === mintAddress);
+                if (isHolding) {
+                    continue; 
+                }
+
+                // ==========================================
+                // 2. 🛡️ 智能冷卻防線：贏錢追擊，輸錢面壁 (24小時 / 7日)
+                // ==========================================
+                const { data: tradeHistory } = await supabase
+                    .from('trade_history')
+                    .select('created_at, realized_pnl_pct')
+                    .eq('token_mint', mintAddress)
+                    .eq('action', 'SELL') // 確保只睇平倉紀錄
+                    .order('created_at', { ascending: false })
+                    .limit(2);
+
+                if (tradeHistory && tradeHistory.length > 0) {
+                    const lastTrade = tradeHistory[0];
+                    const timeSinceLastTrade = Date.now() - new Date(lastTrade.created_at).getTime();
+                    const isLoss1 = lastTrade.realized_pnl_pct < 0;
+
+                    if (isLoss1) {
+                        let isLoss2 = false;
+                        if (tradeHistory.length > 1) {
+                            isLoss2 = tradeHistory[1].realized_pnl_pct < 0;
                         }
+
+                        // 連輸兩次，鎖 7 日
+                        if (isLoss2 && timeSinceLastTrade < 7 * 24 * 60 * 60 * 1000) {
+                            console.log(`🛑 [Trending] ${token.token_symbol} 連續兩次戰敗，進入 7 日深度冷卻。`);
+                            continue;
+                        } 
+                        // 輸一次，鎖 24 小時
+                        else if (!isLoss2 && timeSinceLastTrade < 24 * 60 * 60 * 1000) {
+                            console.log(`⏳ [Trending] ${token.token_symbol} 上次交易虧損，進入 24 小時冷卻。`);
+                            continue;
+                        }
+                    } else {
+                        // 上次係賺錢，無視時間，繼續追擊！
+                        console.log(`✅ [Trending] ${token.token_symbol} 上次交易獲利 (${lastTrade.realized_pnl_pct}%)，無視冷卻期，重新評估！`);
                     }
-                    console.log(`   📥 成功從 GeckoTerminal 獲取 ${trendingMints.length} 隻熱門代幣地址`);
-                }
-            } catch (err) {
-                console.error(`❌ [Trending Radar] 獲取 GeckoTerminal 數據失敗:`, err.message);
-                healthMonitor.setStatus('Trending_Radar', `🔴 獲取數據失敗`);
-                return;
-            }
-
-            if (trendingMints.length === 0) {
-                console.log(`❌ [Trending Radar] 無法解析任何熱門代幣。`);
-                return;
-            }
-
-            // ==============================================================
-            // 🚀 V7.0 升級 2：掟入 Oracle 坐 10 秒大巴，一次過獲取豐富數據
-            // ==============================================================
-            console.log(`   🚌 將 ${trendingMints.length} 隻代幣送入 Oracle 批次查價...`);
-            const pricesMap = await priceOracleService.getPrices(trendingMints);
-
-            let newAddedCount = 0;
-            let ignoredBluechipCount = 0;
-            let addedSymbols = []; 
-
-            // ==============================================================
-            // 🚀 V7.0 升級 3：死水過濾 (Dead Water Filter)
-            // ==============================================================
-            for (const mint of trendingMints) {
-                if (bluechipMints.has(mint)) {
-                    ignoredBluechipCount++;
-                    continue;
                 }
 
-                const dog = pricesMap[mint];
+                // ==========================================
+                // 3. 準備 DB Prompt 同埋 Redis 閃電記憶
+                // ==========================================
+                const { data: promptRecord } = await supabase.from('bot_prompts').select('content').eq('prompt_id', 'trending_strategist').single();
+                let promptTemplate = promptRecord ? promptRecord.content : `你是 Web3 敘事心理學家與動能分析師...`;
+
+                // 🧠 提取 Redis 記憶
+                let aiMemory = [];
+                const memoryStr = await redis.get(`ai_memory_trending_buy:${mintAddress}`);
+                if (memoryStr) {
+                    aiMemory = JSON.parse(memoryStr);
+                }
                 
-                // 1. 如果 Oracle 查無報價，或者 5分鐘成交量係 0 (死水)，直接扔！
-                if (!dog || dog.priceUsd === 0 || dog.volume5m === 0) continue;
+                let memoryText = "無歷史觀察記憶（這是首次評估）。";
+                if (aiMemory.length > 0) {
+                    memoryText = aiMemory.map((msg, idx) => `[記憶 ${idx + 1}] ${msg}`).join('\n');
+                }
+
+                let promptText = promptTemplate;
+                promptText = promptText.replace(/{{token_name}}/g, token.token_name || 'Unknown');
+                promptText = promptText.replace(/{{token_symbol}}/g, token.token_symbol || 'Unknown');
+                promptText = promptText.replace(/{{social_links}}/g, 'Twitter/Telegram Data...'); 
+                promptText = promptText.replace(/{{description}}/g, 'Trending Top 50 Token...');
+                promptText = promptText.replace(/{{latest_news_score}}/g, currentNewsScore);
+                promptText = promptText.replace(/{{ai_memory}}/g, memoryText); // 👈 注入記憶畀 AI
+
+                console.log(`\n🧠 [Trending] AI 正在評估熱門幣: ${token.token_symbol}...`);
+                const result = await aiOrchestrator.executeTask('TRENDING_STRATEGIST', 'GROQ', promptText);
+
+                const cleanDecision = (result.decision || result.verdict || '').trim().toUpperCase();
                 
-                // 2. 流動性硬指標 (熱門榜單要求流動性至少 3萬美金)
-                if (dog.liquidity < 30000) continue;
+                // ==========================================
+                // 4. 💾 將 AI 評語寫入 Redis 同 DB
+                // ==========================================
+                if (result && result.reason) {
+                    const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
+                    const newComment = `[${timeStr}] ${result.reason}`;
+                    
+                    aiMemory.push(newComment);
+                    if (aiMemory.length > 3) aiMemory.shift();
+                    
+                    // 寫入 Redis，設定 7 日過期，對抗 DB 每小時清空
+                    await redis.set(`ai_memory_trending_buy:${mintAddress}`, JSON.stringify(aiMemory), 'EX', 7 * 24 * 60 * 60);
+                    
+                    // 同步最新評語去 DB 俾 Dashboard 睇
+                    await supabase.from('trending_pool').update({ last_ai_comment: result.reason }).eq('mint_address', mintAddress);
+                }
 
-                // 寫入數據庫 (Trending Pool)
-                await supabase.from('trending_pool').upsert([{
-                    mint_address: mint,
-                    token_symbol: dog.symbol,
-                    token_name: dog.name,
-                    liquidity: dog.liquidity,
-                    volume_24h: dog.volume5m * 288, // 粗略估算 24h 量，供舊版 DB 相容
-                    price_change_24h: 0, // Oracle 暫未緩存此欄位，給預設值
-                    created_at: new Date().toISOString()
-                }], { onConflict: 'mint_address' });
-                
-                newAddedCount++;
-                addedSymbols.push(dog.symbol);
+                if (cleanDecision === 'PASS' || cleanDecision.includes('BUY')) {
+                    console.log(`✅ [Trending] AI 批准買入 ${token.token_symbol}!`);
+                    
+                    // 5. 交給 Security Guard 進行最後防線檢查
+                    const { securityGuard } = require('./securityGuard');
+                    const secResult = await securityGuard.checkAll(mintAddress);
+
+                    if (secResult.isSafe) {
+                        console.log(`🛡️ [Security] ${token.token_symbol} 安全通關，準備開倉...`);
+                        await executeBuy(mintAddress, token.token_symbol, 'TRENDING_MOMENTUM', result.score || 85, result.reason, config.trending_trade_amount_sol || 0.1);
+                        break; 
+                    } else {
+                        console.log(`❌ [Security] ${token.token_symbol} 被保安攔截: ${secResult.reason}`);
+                    }
+                } else {
+                    console.log(`📉 [Trending] AI 拒絕買入 ${token.token_symbol}: ${result.reason}`);
+                }
+
+                await new Promise(r => setTimeout(r, 2000));
             }
-
-            console.log(`✅ [Trending Radar] 掃描與過濾完畢！共分析 ${trendingMints.length} 隻熱門幣。`);
-            console.log(`   - 成功過濾並入池: ${newAddedCount} 隻潛力幣 (無死水)`);
-            
-            if (addedSymbols.length > 0) {
-                console.log(`   🏷️ 入池清單: ${addedSymbols.join(', ')}`);
-            }
-
-            if (ignoredBluechipCount > 0) {
-                console.log(`   - 已跳過 ${ignoredBluechipCount} 隻老幣 (交由 Bluechip 部門處理)`);
-            }
-
-            healthMonitor.setStatus('Trending_Radar', '🟢 待機中 (每30分鐘掃描)');
-
-        } catch (error) {
-            console.error(`❌ [Trending Radar] 掃描主迴圈失敗:`, error.message);
-            healthMonitor.setStatus('Trending_Radar', `🔴 異常: ${error.message}`);
+        } catch (err) {
+            console.error(`❌ [Trending Monitor Error]`, err.message);
+        } finally {
+            isTrendingMonitorRunning = false;
         }
-    },
+    }, 60000); 
+}
 
-    start() {
-        cron.schedule('*/30 * * * *', () => {
-            this.scanTrending();
-        });
-        console.log(`🔥 [Trending Radar] GeckoTerminal 海選雷達已啟動 (每 30 分鐘運作)...`);
-    }
-};
-
-module.exports = { trendingMonitorService };
+module.exports = { startTrendingMonitor };

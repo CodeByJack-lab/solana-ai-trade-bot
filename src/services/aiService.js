@@ -32,8 +32,8 @@ const aiService = {
         }
     },
 
-/**
-     * 👁️ 持倉巡邏 (Overseer) - 物理死線與 AI 故障自癒
+    /**
+     * 👁️ 持倉巡邏 (Overseer) - 物理死線與 AI 故障自癒 + 🧠 閃電記憶系統
      */
     async reviewActivePosition(mintAddress, posData) {
         console.log(`\n👁️‍🗨️ [Overseer] 開始巡邏持倉: ${posData.token_symbol || mintAddress.substring(0,6)}`);
@@ -53,14 +53,33 @@ const aiService = {
                 };
             }
 
-            const isBluechip = posData.strategy_type && posData.strategy_type.includes('BLUECHIP');
-            const promptId = isBluechip ? 'reviewer_bluechip' : 'reviewer_overseer';
+            // ==========================================
+            // 🎯 智能分流：根據策略種類選擇對應的大腦
+            // ==========================================
+            let promptId = 'reviewer_overseer'; // 預設 Meme (土狗)
+            if (posData.strategy_type && posData.strategy_type.includes('BLUECHIP')) {
+                promptId = 'reviewer_bluechip'; // 老幣
+            } else if (posData.strategy_type && posData.strategy_type.includes('TRENDING')) {
+                promptId = 'reviewer_trending'; // 熱門趨勢幣 (寬容洗盤)
+            }
 
+            // ==========================================
+            // 🧠 解包 Redis 傳過來嘅 3 段歷史記憶
+            // ==========================================
+            let memoryText = "無歷史記憶（這是首次巡邏）。";
+            if (posData.previous_ai_thoughts && posData.previous_ai_thoughts.length > 0) {
+                // 將 Array 變成清晰嘅文字列表，等 AI 容易閱讀
+                memoryText = posData.previous_ai_thoughts.map((msg, idx) => `[歷史記憶 ${idx + 1}] ${msg}`).join('\n');
+            }
+
+            // 🎯 餵畀 Prompt 嘅變數
             const promptData = {
                 token_symbol: posData.token_symbol || 'UNKNOWN',
                 pnl_pct: posData.pnlPct ? posData.pnlPct.toFixed(2) : '0.00',
                 ai_reason: posData.ai_reason || '未知',
-                latest_news_score: currentNewsScore
+                latest_news_score: currentNewsScore,
+                stop_loss_limit: dbStopLoss,  
+                ai_memory: memoryText         
             };
 
             const promptText = await aiService._getPromptFromDB(promptId, promptData);
@@ -69,7 +88,7 @@ const aiService = {
             const result = await aiOrchestrator.executeTask('OVERSEER', 'GEMINI', promptText);
 
             const cleanDecision = (result.decision || result.verdict || '').trim().toUpperCase();
-            console.log(`🤖 監軍判決: ${cleanDecision} | 理由: ${result.reason}`);
+            console.log(`🤖 監軍判決 (${promptId}): ${cleanDecision} | 理由: ${result.reason}`);
 
             if (cleanDecision.includes('SELL') || cleanDecision.includes('EXIT')) {
                 return { decision: 'EXIT', reason: result.reason };
@@ -96,43 +115,46 @@ const aiService = {
         }
     },
 
-    /**
-     * 🦅 接回機制 (Re-entry Analyst)
+/**
+     * 🦅 接回機制 (Re-entry Analyst) - 已升級 Redis 閃電記憶
      */
-    async analyzeReentry(mintAddress, tokenSymbol, baselinePriceSol) {
-        console.log(`\n🦅 [Analyst] 評估接回潛力: ${tokenSymbol}`);
+async analyzeReentry(mintAddress, tokenSymbol, baselinePriceSol, aiMemoryText) { // 👈 加咗 aiMemoryText 參數
+    console.log(`\n🦅 [Analyst] 評估接回潛力: ${tokenSymbol}`);
 
-        try {
-            let currentNewsScore = 0;
-            const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
-            if (config) currentNewsScore = config.latest_news_score || 0;
+    try {
+        let currentNewsScore = 0;
+        const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
+        if (config) currentNewsScore = config.latest_news_score || 0;
 
-            // 嚴格對齊 reentry_analyst 的 Placeholders
-            const promptData = {
-                token_symbol: tokenSymbol,
-                baseline_price: baselinePriceSol,
-                latest_news_score: currentNewsScore
-            };
+        // 嚴格對齊 reentry_analyst / bluechip_strategist 的 Placeholders
+        const promptData = {
+            token_symbol: tokenSymbol,
+            baseline_price: baselinePriceSol,
+            latest_news_score: currentNewsScore,
+            ai_memory: aiMemoryText || "無歷史觀察記憶（這是首次評估）。" // 👈 注入記憶
+        };
 
-            const promptText = await aiService._getPromptFromDB('reentry_analyst', promptData);
+        // 注意：確保你 DB 用緊嘅 Prompt ID 係正確嘅（如果係老幣抄底，可能係 bluechip_strategist 或 reentry_analyst）
+        // 呢度我照用你原本嘅 'reentry_analyst'
+        const promptText = await aiService._getPromptFromDB('reentry_analyst', promptData);
 
-            // 接回分析需要高智商，主將用 GROQ，後備用 GEMINI
-            const result = await aiOrchestrator.executeTask('ANALYST', 'GROQ', promptText);
+        // 接回分析需要高智商，主將用 GROQ，後備用 GEMINI
+        const result = await aiOrchestrator.executeTask('ANALYST', 'GROQ', promptText);
 
-            const cleanDecision = (result.decision || result.verdict || '').trim().toUpperCase();
-            console.log(`🤖 分析師判決: ${cleanDecision} | 理由: ${result.reason}`);
+        const cleanDecision = (result.decision || result.verdict || '').trim().toUpperCase();
+        console.log(`🤖 分析師判決: ${cleanDecision} | 理由: ${result.reason}`);
 
-            if (cleanDecision.includes('BUY') || cleanDecision.includes('REENTRY')) {
-                return { decision: 'BUY', score: result.score || 80, reason: result.reason };
-            }
-
-            return { decision: 'SKIP', reason: result.reason };
-
-        } catch (error) {
-            console.error(`❌ [AI Service] 橫盤接回分析失敗:`, error.message);
-            return { decision: "SKIP", reason: "AI 服務異常，放棄接回" };
+        if (cleanDecision.includes('BUY') || cleanDecision.includes('REENTRY') || cleanDecision === 'EXECUTE_BUY') {
+            return { decision: 'BUY', score: result.score || 80, reason: result.reason };
         }
-    },
+
+        return { decision: 'SKIP', reason: result.reason };
+
+    } catch (error) {
+        console.error(`❌ [AI Service] 橫盤接回分析失敗:`, error.message);
+        return { decision: "SKIP", reason: "AI 服務異常，放棄接回" };
+    }
+},
 
     /**
      * 🚨 緊急備用 Prompt
@@ -144,6 +166,9 @@ const aiService = {
         if (promptId === 'reviewer_bluechip') {
             return `You are a bluechip analyst. Token: ${data.token_symbol}, PNL: ${data.pnl_pct}%. Output {"decision": "HOLD", "reason": "Fallback hold for bluechip"}.`;
         }
+        if (promptId === 'reviewer_trending') {
+            return `You are a trend trader. Token: ${data.token_symbol}, PNL: ${data.pnl_pct}%. Trend tokens have high volatility. Output {"decision": "HOLD", "reason": "Fallback hold for trending token"}.`;
+        }
         if (promptId === 'reentry_analyst') {
             return `Evaluate reentry for ${data.token_symbol}. Output {"decision": "SKIP", "reason": "Fallback skip"}.`;
         }
@@ -151,5 +176,4 @@ const aiService = {
     }
 };
 
-// 直接 Export 方法，確保 Monitor Destructuring 時唔會報錯
 module.exports = aiService;

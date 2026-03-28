@@ -31,18 +31,29 @@ const config = {
         serviceRoleKey: getEnv('SUPABASE_SERVICE_ROLE_KEY'),
     },
 
-    // 3. AI 大腦 (多 Key 陣列模式)
-    ai: {
-        geminiKeys: [
-            getEnv('GEMINI_API_KEY_1', true),
-            getEnv('GEMINI_API_KEY_2', false), // 第二、三條設為非強制，方便擴充
-            getEnv('GEMINI_API_KEY_3', false)
-        ].filter(Boolean),
-        groqKey: getEnv('GROQ_API_KEY'),
-        mistralKey: getEnv('MISTRAL_API_KEY'),
+    // 🌟 3. 高速緩存與大腦記憶 (Redis)
+    cache: {
+        redisUrl: process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || getEnv('REDIS_URL', true),
     },
 
-    // 4. 警報與通知 (Telegram)
+    // 4. AI 大腦 (終極白嫖陣型：1 Gemini, 3 Groq, 3 Mistral)
+    ai: {
+        geminiKeys: [
+            getEnv('GEMINI_API_KEY_1', true)
+        ].filter(Boolean),
+        groqKeys: [
+            getEnv('GROQ_API_KEY_1', false),
+            getEnv('GROQ_API_KEY_2', false),
+            getEnv('GROQ_API_KEY_3', false)
+        ].filter(Boolean),
+        mistralKeys: [
+            getEnv('MISTRAL_API_KEY_1', false),
+            getEnv('MISTRAL_API_KEY_2', false),
+            getEnv('MISTRAL_API_KEY_3', false)
+        ].filter(Boolean),
+    },
+
+    // 5. 警報與通知 (Telegram)
     telegram: {
         mainBotToken: getEnv('TELEGRAM_BOT_TOKEN'),
         adminBotToken: getEnv('TELEGRAM_ADMIN_BOT_TOKEN') || process.env.TELEGRAM_BOT_TOKEN,
@@ -50,30 +61,27 @@ const config = {
         channelId: getEnv('TELEGRAM_CHANNEL_ID'),
     },
 
-    // 5. 外部數據與報價 (Oracle 基建)
+    // 6. 外部數據與報價 (Oracle 基建)
     external: {
         exchangeRateApi: getEnv('EXCHANGE_RATE_API_URL', false) || 'https://api.exchangerate-api.com/v4/latest/USD',
         jupiterApiKey: getEnv('JUPITER_API_KEY', false),
         jupiterBaseUrl: getEnv('JUPITER_BASE_URL', false) || 'https://price.jup.ag/v6',
-        birdeyeApiKey: getEnv('BIRDEYE_API_KEY', false), // 之後會逐步棄用
+        birdeyeApiKey: getEnv('BIRDEYE_API_KEY', false), 
         coingeckoApiKey: getEnv('COINGECKO_API_KEY', false),
     },
 
-    // 6. RPC 負載平衡與 Webhooks
+    // 7. RPC 負載平衡與 Webhooks
     rpc: {
-        // Helius 1 (Raydium 專線)
         helius1: {
             apiKey: getEnv('HELIUS_API_KEY'),
             webhookId: getEnv('HELIUS_WEBHOOK_ID'),
             url: getEnv('HELIUS_RPC_URL'),
         },
-        // Helius 2 (Pump.fun 專線)
         helius2: {
             apiKey: getEnv('HELIUS_API_KEY_2', false),
             webhookId: getEnv('HELIUS_WEBHOOK_ID_2', false),
             url: getEnv('HELIUS_RPC_URL_2', false),
         },
-        // Alchemy (會計與備援)
         alchemy: {
             authToken: getEnv('ALCHEMY_AUTH_TOKEN'),
             webhookId: getEnv('ALCHEMY_WEBHOOK_ID'),
@@ -81,7 +89,7 @@ const config = {
         }
     },
 
-    // 7. Email SMTP 設定
+    // 8. Email SMTP 設定
     email: {
         smtpUser: getEnv('SMTP_USER', false),
         smtpPass: getEnv('SMTP_PASS', false)

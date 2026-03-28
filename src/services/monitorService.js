@@ -16,8 +16,22 @@ const { consensusService, getPendingMemeCount } = require('./consensusService');
 const { analyzeReentry, reviewActivePosition } = require('./aiService');
 const { retrospectiveJob } = require('../jobs/retrospectiveJob');
 const { aiOrchestrator } = require('./aiOrchestrator');
-
 const { priceOracleService } = require('./priceOracleService');
+
+// ==========================================
+// 🧠 1. 初始化 Redis 中央緩存庫
+// ==========================================
+const Redis = require('ioredis');
+const redis = new Redis(configEnv.cache.redisUrl);
+
+redis.on('connect', () => {
+    console.log('🟢 [Redis] 成功連接至 Railway 內部緩存庫！');
+});
+
+redis.on('error', (err) => {
+    console.error('🔴 [Redis Error] 連線失敗:', err.message);
+});
+// ==========================================
 
 const app = express();
 const cors = require('cors'); 
@@ -496,8 +510,35 @@ function startWatchlistMonitor() {
                     console.log(`⏳ [Watchlist] ${item.token_symbol} 已橫盤 30 分鐘，啟動 Re-entry 審查...`);
                     const { data: config } = await supabase.from('system_config').select('trade_amount_sol').eq('id', 1).single();
                     
-                    const decisionObj = await analyzeReentry(item.mint_address, item.token_symbol, baseline);
+                    // ==========================================
+                    // 🧠 準備 Redis 閃電記憶 (老幣抄底專用)
+                    // ==========================================
+                    let aiMemory = [];
+                    const memoryStr = await redis.get(`ai_memory_reentry:${item.mint_address}`);
+                    if (memoryStr) aiMemory = JSON.parse(memoryStr);
                     
+                    let memoryText = "無歷史觀察記憶（這是首次評估）。";
+                    if (aiMemory.length > 0) {
+                        memoryText = aiMemory.map((msg, idx) => `[記憶 ${idx + 1}] ${msg}`).join('\n');
+                    }
+
+                    // 呼叫 Analyst 並傳入記憶
+                    const decisionObj = await analyzeReentry(item.mint_address, item.token_symbol, baseline, memoryText);
+                    
+                    // ==========================================
+                    // 💾 將 AI 評語寫入 Redis (保留 7 日)
+                    // ==========================================
+                    if (decisionObj && decisionObj.reason) {
+                        const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
+                        const newComment = `[${timeStr}] ${decisionObj.reason}`;
+                        
+                        aiMemory.push(newComment);
+                        if (aiMemory.length > 3) aiMemory.shift();
+                        
+                        // 寫入 Redis，設定 7 日過期
+                        await redis.set(`ai_memory_reentry:${item.mint_address}`, JSON.stringify(aiMemory), 'EX', 7 * 24 * 60 * 60);
+                    }
+
                     if (decisionObj.decision === 'BUY') {
                         const buyResult = await executeBuy(item.mint_address, item.token_symbol, 'MEME_REENTRY', decisionObj.score || 95, decisionObj.reason, config.trade_amount_sol);
                         if (buyResult !== false) {
@@ -506,6 +547,9 @@ function startWatchlistMonitor() {
                             console.log(`📍 策略: MEME_REENTRY`);
                             console.log(`🤖 AI 買入理由: ${decisionObj.reason}`);
                             console.log(`======================================================\n`);
+                            
+                            // 買入成功先至喺 Watchlist 刪除
+                            await supabase.from('reentry_watchlist').delete().eq('id', item.id);
                         }
                     } else {
                         console.log(`🧠 [Reentry Rejected] 否決: ${decisionObj.reason}`);
@@ -680,14 +724,43 @@ function startPositionMonitor() {
                 console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
                 
                 try {
-                    const posDataForAI = { ...pos, currentPrice, pnlPct, mode: portfolio.mode };
+                    // ==========================================
+                    // 🧠 1. 從 Redis 讀取 AI 過去 3 次嘅記憶
+                    // ==========================================
+                    let aiMemory = [];
+                    const memoryStr = await redis.get(`ai_memory:${pos.mint_address}`);
+                    if (memoryStr) {
+                        aiMemory = JSON.parse(memoryStr);
+                    }
+
+                    // 🤖 2. 將記憶傳畀 AI 參考
+                    const posDataForAI = { 
+                        ...pos, 
+                        currentPrice, 
+                        pnlPct, 
+                        mode: portfolio.mode,
+                        previous_ai_thoughts: aiMemory // 👈 畀 AI 知自己之前講過咩
+                    };
+
                     const reviewResult = await reviewActivePosition(pos.mint_address, posDataForAI);
                     
-                    const tableName = portfolio.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
-                    await supabase
-                        .from(tableName)
-                        .update({ last_review_comment: reviewResult.reason }) 
-                        .eq('mint_address', pos.mint_address);
+                    // ==========================================
+                    // 📝 3. 處理 AI 評語並存入 Redis (取代直接寫入 DB)
+                    // ==========================================
+                    if (reviewResult && reviewResult.reason) {
+                        const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
+                        const newComment = `[${timeStr}] ${reviewResult.reason}`;
+
+                        aiMemory.push(newComment);
+                        if (aiMemory.length > 3) aiMemory.shift(); 
+
+                        // 💾 將最新記憶寫返入 Redis (設定 24 小時自動過期)
+                        await redis.set(`ai_memory:${pos.mint_address}`, JSON.stringify(aiMemory), 'EX', 86400);
+
+                        // ⏳ 將要展示嘅字串，放入 Redis 待寫入區 (等清潔工搞)
+                        const combinedComments = aiMemory.join(' | '); 
+                        await redis.set(`ai_pending_db:${pos.mint_address}`, combinedComments, 'EX', 86400);
+                    }
 
                     if (reviewResult.decision === 'RETRY_LATER') {
                         aiReviewCooldowns.set(pos.mint_address, nowMs - (3 * 60 * 1000));
@@ -715,6 +788,51 @@ function startPositionMonitor() {
             console.error(`❌ [Position Monitor] AI 巡邏引擎異常:`, err.message);
         }
     }, 30000); // 🚀 降頻：每 30 秒行一次
+
+    // ==========================================
+    // 🧹 [DB 同步工] 每 5 分鐘將 Redis 待寫入區嘅 AI 評語一次過同步至 Supabase
+    // ==========================================
+    setInterval(async () => {
+        try {
+            // 1. 搵出邊啲幣有新評語需要同步 (靠 pending 標記)
+            const keys = await redis.keys('ai_pending_db:*');
+            if (keys.length === 0) return;
+
+            console.log(`\n💾 [DB Sync] 準備將 ${keys.length} 隻幣嘅 AI 評語同步至 Supabase...`);
+            
+            const { getPortfolio } = require('./portfolioService');
+            const portfolio = getPortfolio();
+            if (!portfolio || !portfolio.mode) return;
+
+            const tableName = portfolio.mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
+
+            for (const key of keys) {
+                const mint = key.split(':')[1];
+                
+                // 🎯 核心改動：直接去 ai_memory 攞完整 Array，淨係抽最新嗰句
+                const memoryData = await redis.get(`ai_memory:${mint}`);
+
+                if (memoryData) {
+                    const memoryArray = JSON.parse(memoryData);
+                    
+                    // 淨係抽 Array 入面最新嗰一句 (最尾嗰個)
+                    const latestComment = memoryArray[memoryArray.length - 1];
+
+                    // 寫入 Supabase 嘅 last_review_comment 欄位
+                    await supabase
+                        .from(tableName)
+                        .update({ last_review_comment: latestComment })
+                        .eq('mint_address', mint);
+                    
+                    // ✅ 更新成功後，清走 pending 標記
+                    await redis.del(key);
+                }
+            }
+            console.log(`✅ [DB Sync] AI 最新評語同步完成！\n`);
+        } catch (err) {
+            console.error(`❌ [DB Sync] 同步失敗:`, err.message);
+        }
+    }, 5 * 60 * 1000);
 }
 
 function startCommandListener() {
@@ -755,7 +873,7 @@ function startCommandListener() {
                             }
                         }
                         
-                        console.log(`👨‍💻 [Command] 執行手動斬倉: ${pos.token_symbol}`);
+                        console.log(`👨‍💻 [Command] 執行手推斬倉: ${pos.token_symbol}`);
                         await runSellPipeline(pos, currentPrice, "👨‍💻 管理員手動市價平倉", 1.0);
                     } else {
                         console.log(`⚠️ [Command] 找不到對應持倉，可能已被 AI 賣出: ${cmd.mint_address}`);
