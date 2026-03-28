@@ -161,6 +161,7 @@ const janitorJob = {
             console.log(`\n✅ [Janitor] 每日清晨 4:00 巡邏作業全數完成！`);
         });
         console.log('🧹 [Janitor] 清道夫排程已啟動 (每天凌晨 4:00 巡邏 0餘額帳戶 及 保溫箱)');
+        healthMonitor.setStatus('Janitor_Service', '🟢 待命 (04:00)');
     }
 };
 

@@ -272,6 +272,7 @@ const retrospectiveJob = {
             this.runEvolutionWithRetry(1); 
         }, { scheduled: true, timezone: "Asia/Hong_Kong" });
         console.log(`🤖 [Evolution] 雙軌審查進化排程已啟動 (通用參數與常規報告版)...`);
+        healthMonitor.setStatus('AI_Evolution', '🟢 已就位 (9AM/PM)');
     }
 };
 

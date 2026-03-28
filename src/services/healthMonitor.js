@@ -3,28 +3,42 @@
 class HealthMonitor {
     constructor() {
         this.statuses = new Map();
-        this.aiLatencies = []; // 儲存最近 50 次 AI 延遲
+        this.aiLatencies = []; 
         this.apiUsage = { requests: 0, errors429: 0 };
         this.oracleQueueSize = 0;
+        
+        // 🚀 V8.2 預設清單，確保看板唔會漏嘢
+        this.initStatuses();
     }
 
-    // 1. 基本組件狀態
+    initStatuses() {
+        const components = [
+            'Live_Engine',      // 實盤引擎
+            'Supabase_DB',      // 數據庫連線
+            'Portfolio_Cache',  // 記憶體對齊
+            'Meme_Radar',       // Helius 撈魚
+            'Wallet_Radar',     // Alchemy 錢包監控
+            'Trade_Engine',     // 交易執行器
+            'Macro_Radar',      // 🌊 宏觀避險 (漏咗呢個)
+            'AI_Evolution',     // 🧠 自我進化 (漏咗呢個)
+            'Janitor_Service'   // 🧹 自動回收 (漏咗呢個)
+        ];
+        components.forEach(c => this.statuses.set(c, '🟡 待命中'));
+    }
+
     setStatus(component, status) {
         this.statuses.set(component, status);
     }
 
-    // 2. 紀錄 AI 延遲 (毫秒)
     recordAiLatency(latencyMs) {
         this.aiLatencies.push(latencyMs);
-        if (this.aiLatencies.length > 50) this.aiLatencies.shift(); // 防 RAM 爆
+        if (this.aiLatencies.length > 50) this.aiLatencies.shift();
     }
 
-    // 3. 紀錄 API 請求次數
     recordApiRequest() {
         this.apiUsage.requests++;
     }
 
-    // 4. 🚨 觸發 429 警告並發送 Telegram
     async report429Error(provider, keyIndex) {
         this.apiUsage.errors429++;
         const msg = `🚨 <b>[API 限流警告]</b>\n🤖 供應商: ${provider}\n🔑 Key 索引: 第 ${keyIndex + 1} 把 Key\n⚠️ 狀態: 觸發 429 Too Many Requests，系統已自動切換備用 Key！`;
@@ -34,7 +48,6 @@ class HealthMonitor {
         console.log(`======================================================\n`);
         
         try {
-            // 👈 [核心修復] 動態載入，只有喺觸發時先 require，完美避開循環依賴！
             const { sendAdminAlert } = require('./telegramService');
             await sendAdminAlert(msg);
         } catch (e) {
@@ -42,27 +55,25 @@ class HealthMonitor {
         }
     }
 
-    // 5. 更新 Oracle 排隊人數
     setOracleQueueSize(size) {
         this.oracleQueueSize = size;
     }
 
-    // 6. 產出完美排版的 Dashboard (保留咗大佬你嘅 padEnd 心血！)
     getHealthReport() {
         let report = '';
         
-        // 上半部：各組件狀態
-        for (const [component, status] of this.statuses.entries()) {
-            // 用 padEnd 令到冒號對齊，強迫症福音
+        // 將狀態排序，重要嘅排先 (實盤 > 數據庫 > 雷達)
+        const sortedKeys = Array.from(this.statuses.keys()).sort();
+
+        for (const component of sortedKeys) {
+            const status = this.statuses.get(component);
             report += `  🔹 ${component.padEnd(20, ' ')}: ${status}\n`;
         }
 
-        // 計算平均延遲 (秒)
         const avgLatency = this.aiLatencies.length > 0 
             ? (this.aiLatencies.reduce((a, b) => a + b, 0) / this.aiLatencies.length / 1000).toFixed(2) 
             : '0.00';
 
-        // 下半部：高級效能指標
         report += `  ----------------------------------------------------\n`;
         report += `  📈 [效能指標] AI 總請求: ${this.apiUsage.requests.toString().padEnd(6, ' ')} | 平均延遲: ${avgLatency}s\n`;
         report += `  ⏳ [資源狀態] Oracle排隊: ${this.oracleQueueSize.toString().padEnd(5, ' ')} | 429 阻截: ${this.apiUsage.errors429} 次`;
