@@ -4,30 +4,22 @@ const path = require('path');
 const configEnv = require('../config/env');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-// 📈 交易戰報 Bot (Main) -> 對應 TELEGRAM_CHANNEL_ID
+// 📈 交易戰報 Bot (Main)
 const TRADE_BOT_TOKEN = configEnv.telegram.mainBotToken;
-const TRADE_CHAT_ID = configEnv.telegram.channelId; // 👈 修正：改為 channelId
+const TRADE_CHAT_ID = configEnv.telegram.channelId;
 
-// ⚙️ 系統管理員 Bot (Admin) -> 對應 TELEGRAM_CHAT_ID
+// ⚙️ 系統管理員 Bot (Admin)
 const ADMIN_BOT_TOKEN = configEnv.telegram.adminBotToken;
-const ADMIN_CHAT_ID = configEnv.telegram.chatId; // 👈 修正：改為 chatId
+const ADMIN_CHAT_ID = configEnv.telegram.chatId;
 
-/**
- * 🚀 安全清洗函數：防止 AI 輸出的 < 或 > 破壞 HTML 看板結構
- */
 function safeHTML(text) {
     if (!text) return "";
     return text.toString().replace(/</g, '＜').replace(/>/g, '＞');
 }
 
-/**
- * 🚀 底層發送邏輯 (防 HTML 衝突 + 4000 字元超長截斷裝甲)
- */
 async function _send(message, token, chatId) {
     if (!token || !chatId) return;
 
-    // 🛡️ V7.2 核心修復：Telegram 訊息有 4096 字元限制，AI 報告通常會超標！
-    // 強制喺 4000 字元截斷，防止 400 Bad Request 導致靜默失敗
     let finalMessage = message;
     if (finalMessage.length > 4000) {
         finalMessage = finalMessage.substring(0, 4000) + "\n\n... ✂️ (報告過長，已由系統自動截斷)";
@@ -42,11 +34,8 @@ async function _send(message, token, chatId) {
         });
     } catch (err) {
         const errMsg = err.response?.data?.description || err.message || "";
-        
-        // 🛡️ 如果 AI 吐出的內容帶有奇怪的 HTML tags 導致 parse error，觸發降級為純文字
         if (errMsg.includes('parse entities') || errMsg.includes('HTML')) {
             try {
-                // 抹除所有 HTML 標籤後重新發送
                 const plainText = finalMessage.replace(/<[^>]+>/g, '');
                 await axios.post(url, { chat_id: chatId, text: plainText });
             } catch (fallbackErr) {
@@ -69,40 +58,53 @@ async function sendAdminAlert(message) {
 }
 
 // ==========================================
-// 🛡️ 健康看板巡邏系統
+// 🛡️ 健康看板 1 分鐘延遲防 Spam 系統
 // ==========================================
 let lastErrorState = "";
+let errorStartTime = 0;
+let hasAlertedError = false;
 
 function checkSystemHealth() {
     const { healthMonitor } = require('./healthMonitor'); 
     const report = healthMonitor.getHealthReport();
     
-    // 1. 提取所有錯誤行 (🔴 或 🟡)
     const lines = report.split('\n');
     const currentErrors = lines.filter(l => l.includes('🔴') || l.includes('🟡')).join('\n');
     
-    // 🚀 核心邏輯：只有當「錯誤內容」同上次唔同，先至發警報
-    if (currentErrors !== "" && currentErrors !== lastErrorState) {
-        const cleanReport = safeHTML(report);
-        const alertMsg = `🚨 <b>【系統故障警告】偵測到新異常！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
-        sendAdminAlert(alertMsg);
-        lastErrorState = currentErrors; // 儲存當前錯誤狀態
-    } 
-    // 🚀 核心邏輯：如果之前有錯，依家全綠 (恢復正常)，send 一次通知
-    else if (currentErrors === "" && lastErrorState !== "") {
-        const cleanReport = safeHTML(report);
-        const recoveryMsg = `✅ <b>【系統恢復正常】所有模組已解除警報！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
-        sendAdminAlert(recoveryMsg);
-        lastErrorState = ""; // 清空狀態
+    if (currentErrors !== "") {
+        // 有錯誤發生
+        if (currentErrors !== lastErrorState) {
+            // 新的錯誤，開始計時，不立即報警
+            lastErrorState = currentErrors;
+            errorStartTime = Date.now();
+            hasAlertedError = false;
+        } else if (!hasAlertedError && (Date.now() - errorStartTime > 60000)) {
+            // 🚀 [新增] 相同錯誤持續超過 1 分鐘 -> 發送警報！
+            const cleanReport = safeHTML(report);
+            const alertMsg = `🚨 <b>【系統故障警告】偵測到持續 1 分鐘以上的異常！</b>\n請即刻檢查伺服器狀態！\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
+            sendAdminAlert(alertMsg);
+            hasAlertedError = true; // 標記已發送，防止每 20 秒洗版
+        }
+    } else {
+        // 恢復全綠
+        if (lastErrorState !== "") {
+            if (hasAlertedError) {
+                // 🚀 [新增] 如果之前有報警，依家好返，先至 send 恢復通知
+                const cleanReport = safeHTML(report);
+                const recoveryMsg = `✅ <b>【系統恢復正常】所有模組已穩定超過 1 分鐘！解除警報！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
+                sendAdminAlert(recoveryMsg);
+            }
+            // 清空狀態
+            lastErrorState = "";
+            errorStartTime = 0;
+            hasAlertedError = false;
+        }
     }
 }
 
-// 每 1 分鐘巡邏一次健康看板
-setInterval(checkSystemHealth, 1 * 60 * 1000);
+// 🚀 [新增] 每 20 秒 Check，滿足 60 秒條件先 Send
+setInterval(checkSystemHealth, 20 * 1000);
 
-/**
- * 📋 傳送簡潔版參數快照
- */
 async function sendParamSnapshot() {
     const { supabase } = require('../config/supabase');
     try {

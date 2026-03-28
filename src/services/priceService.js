@@ -1,19 +1,18 @@
 // src/services/priceService.js
-const { priceOracleService } = require('./priceOracleService');
+const axios = require('axios');
 const { getUSDHKDRate } = require('../utils/currency');
 
 async function getSolPriceInHKD() {
     try {
         const SOL_MINT = "So11111111111111111111111111111111111111112";
         
-        // 🚀 V7.0 升級：直接由中央預言機 (Oracle) 攞價，0 額外 API 消耗！
-        const pricesMap = await priceOracleService.getPrices([SOL_MINT]);
-        const tokenData = pricesMap[SOL_MINT];
+        // 🚀 V8.2 輕量化：直接問 Jupiter V2 攞 SOL 美金價 (每分鐘先 call 一次)
+        const res = await axios.get(`https://api.jup.ag/price/v2?ids=${SOL_MINT}`, { timeout: 3000 });
         
-        if (tokenData && tokenData.priceUsd) {
-            // 🚀 V7.0 升級：使用真實匯率，精準計算資產
+        if (res.data?.data?.[SOL_MINT]?.price) {
+            const priceUsd = parseFloat(res.data.data[SOL_MINT].price);
             const hkdRate = await getUSDHKDRate(); 
-            return parseFloat(tokenData.priceUsd) * hkdRate; 
+            return priceUsd * hkdRate; 
         }
         
         return 1150; // 保底價

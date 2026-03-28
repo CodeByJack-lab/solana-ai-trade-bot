@@ -1,4 +1,4 @@
-// src/index.js - V7.0 Protocol-level Diagnosis
+// src/index.js - V8.2 Protocol-level Diagnosis
 const configEnv = require('./config/env'); 
 const { supabase } = require('./config/supabase'); 
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
@@ -6,7 +6,6 @@ const { startMarketMonitor } = require('./services/monitorService');
 const { getSolPriceInHKD } = require('./services/priceService'); 
 
 const { macroMonitorService } = require('./services/macroMonitorService'); 
-const { blueChipJob } = require('./jobs/blueChipJob');                     
 const { retrospectiveJob } = require('./jobs/retrospectiveJob');           
 const { healthMonitor } = require('./services/healthMonitor');             
 
@@ -16,9 +15,9 @@ const { janitorJob } = require('./jobs/janitorJob');
 const { trendingMonitorService } = require('./services/trendingMonitorService');
 const { trendingJob } = require('./jobs/trendingJob');
 
-// 👇 [V7.0] 引入 Price Oracle 與 Macro Job
-const { priceOracleService } = require('./services/priceOracleService');
+// 👇 [V8.2] 引入 Macro Job 與 RAM Prompt Manager
 const { macroJob } = require('./jobs/macroJob');
+const { promptManager } = require('./services/promptManager');
 
 async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
     try {
@@ -57,8 +56,11 @@ async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
 
 async function startApp() {
     console.log("======================================================");
-    console.log("🚀 SOL_Trade V7.0 協議級防彈版啟動...");
+    console.log("🚀 SOL_Trade V8.2 雙核防彈版啟動...");
     console.log("======================================================");
+
+    // 🚀 [V8.2] 第一時間載入 AI RAM 劇本
+    await promptManager.init();
 
     // 🚀 [核心修復] 第一時間 Bind Port，滿足 Railway Healthcheck
     startMarketMonitor(); 
@@ -75,11 +77,7 @@ async function startApp() {
                 if (global.tradeMode !== newData.trade_mode) {
                     console.log(`\n🔄 [系統指令] 偵測到交易模式切換 (${global.tradeMode} ➡️ ${newData.trade_mode})`);
                     console.log(`🧹 正在清洗大腦記憶體，重新載入 ${newData.trade_mode} 專屬數據庫...`);
-                    const newPortfolio = await initPortfolio(); 
-                    
-                    if (newPortfolio && newPortfolio.positions) {
-                        priceOracleService.setPortfolioMints(newPortfolio.positions.map(p => p.mint_address));
-                    }
+                    await initPortfolio(); 
                 }
 
                 const portfolio = getPortfolio();
@@ -119,13 +117,6 @@ async function startApp() {
     global.isRunning = true;
     global.tradeMode = portfolio.mode;
 
-    // 將現有持倉加入 Oracle 2秒 VIP 專線
-    const currentMints = portfolio.positions.map(p => p.mint_address);
-    if (currentMints.length > 0) {
-        priceOracleService.setPortfolioMints(currentMints);
-        console.log(`✅ [Oracle] 已將 ${currentMints.length} 隻幣登記至 2 秒極速心跳線`);
-    }
-
     // ==========================================
     // Phase 5: 啟動各路背景雷達與排程 (🚀 錯峰啟動版)
     // ==========================================
@@ -135,10 +126,9 @@ async function startApp() {
     setTimeout(() => { macroJob.start(); }, 14000);             // 14s: 恐懼貪婪指數
     setTimeout(() => { trendingMonitorService.start(); }, 16000); // 16s: Gecko 爬蟲
     setTimeout(() => { trendingJob.start(); }, 18000);          // 18s: 熱門幣追擊
-    setTimeout(() => { blueChipJob.start(); }, 20000);          // 20s: 老幣抄底
-    setTimeout(() => { janitorJob.start(); }, 22000);           // 22s: 清道夫
-    setTimeout(() => { graveyardJob.start(); }, 24000);         // 24s: 墓地火化
-    setTimeout(() => { retrospectiveJob.start(); }, 26000);     // 26s: 大腦進化
+    setTimeout(() => { janitorJob.start(); }, 20000);           // 20s: 清道夫
+    setTimeout(() => { graveyardJob.start(); }, 22000);         // 22s: 墓地火化
+    setTimeout(() => { retrospectiveJob.start(); }, 24000);     // 24s: 大腦進化
 
     async function backgroundReportLoop() {
         if (global.isRunning === false) {

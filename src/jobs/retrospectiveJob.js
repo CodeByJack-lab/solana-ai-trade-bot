@@ -5,7 +5,8 @@ const { sendAdminAlert } = require('../services/telegramService');
 const { healthMonitor } = require('../services/healthMonitor');
 const { aiOrchestrator } = require('../services/aiOrchestrator');
 const { emailService } = require('../services/emailService'); 
-const configEnv = require('../config/env'); // 👈 [V7.0] 統一使用中央配置
+const configEnv = require('../config/env');
+const { promptManager } = require('../services/promptManager'); // 👈 [V8.2] 引入 RAM 劇本緩存
 
 const retrospectiveJob = {
     async runEvolutionWithRetry(attempt = 1) {
@@ -35,7 +36,6 @@ const retrospectiveJob = {
                     const msg = `過去 12 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (已跨越 ${HURDLE_RATE}% 及格線)。🛡️ 系統處於「實質印鈔狀態」，禁止 AI 擅改參數！`;
                     console.log(`✅ [Evolution] ${msg}`);
                     
-                    // 🚀 關鍵改動：唔好 return，改為建立一個「唯讀分析報告」
                     const report = {
                         analysis: `【實質印鈔戰報】\n當前系統表現極佳（Avg PNL: ${avgPnlPct.toFixed(2)}%）。根據防禦協議，Master AI 已停止對核心參數與 Prompt 進行任何實質修改。建議繼續觀察。`,
                         recommended_params: null,
@@ -46,19 +46,17 @@ const retrospectiveJob = {
 
                     const boardComment = "🛡️ 系統自動觸發防禦機制，提案修改已凍結";
                     
-                    // 1. 寫入 DB 留紀錄
                     await supabase.from('daily_audit_reports').insert([{
                         analysis_content: report.analysis,
                         param_changes: { status: "PROTECTED", avg_pnl: avgPnlPct },
                         prompt_changes: { feedback: "SAFE_MODE", log: "印鈔中，不作改動" }
                     }]);
 
-                    // 2. 🚀 直接寄 Email 報喜！
                     await emailService.sendEvolutionReport(report, boardComment, "無變動 (利潤達標)", "無修正 (防禦中)");
 
                     sendAdminAlert(`🌞 <b>[戰報模式]</b>\n${msg}\n📧 <b>戰報已寄出，請查收！</b>`);
                     healthMonitor.setStatus('AI_Evolution', '🟢 印鈔防禦中 (已寄戰報)');
-                    return; // 呢度先至真正完結
+                    return; 
                 }
 
                 badTrades = allTrades.filter(t => t.realized_pnl_pct < 0).sort((a, b) => a.realized_pnl_pct - b.realized_pnl_pct).slice(0, 3);
@@ -123,22 +121,20 @@ const retrospectiveJob = {
                 promptText += `\n\n【特別狀況指示】\n過去 12 小時系統完全沒有觸發任何交易。這可能是因為大盤災難指數過高觸發了防禦機制，或者目前的參數門檻過於嚴格。\n請簡單分析當前的宏觀大盤氣氛與現有參數設置，評估目前的「空倉策略」是否合理。你可以選擇維持現狀，或者稍微微調參數以增加出手機會。`;
             }
 
-            const { data: currentPrompts } = await supabase.from('bot_prompts').select('*');
-            if (currentPrompts) {
-                let contextStr = "\n\n【當前系統使用的 AI 劇本 (僅提供有包含該策略好壞單的部門供你修改)】\n";
-                if (!hasTrades || hasMemeTrade || hasTrendingTrade) {
-                    const overseer = currentPrompts.find(p => p.prompt_id === 'reviewer_overseer');
-                    if (overseer) contextStr += `\n目標ID: reviewer_overseer (Meme/Trending 監軍)\n內容: ${overseer.content}\n`;
-                }
-                if (!hasTrades || hasBluechipTrade) {
-                    const bluechip = currentPrompts.find(p => p.prompt_id === 'reviewer_bluechip');
-                    if (bluechip) contextStr += `\n目標ID: reviewer_bluechip (老幣監軍)\n內容: ${bluechip.content}\n`;
-                }
-                promptText += contextStr;
+            // 🚀 [V8.2] 移除資料庫讀取，直接從 RAM 提取當前運作中的 Prompt 畀 Master AI 參考
+            let contextStr = "\n\n【當前系統使用的 AI 劇本 (僅提供有包含該策略好壞單的部門供你修改)】\n";
+            
+            if (!hasTrades || hasMemeTrade) {
+                const overseer = promptManager.cache.get('reviewer_overseer');
+                if (overseer) contextStr += `\n目標ID: reviewer_overseer (Meme 監軍)\n內容: ${overseer}\n`;
             }
+            if (!hasTrades || hasTrendingTrade) {
+                const trendingOverseer = promptManager.cache.get('reviewer_trending');
+                if (trendingOverseer) contextStr += `\n目標ID: reviewer_trending (熱門波段監軍)\n內容: ${trendingOverseer}\n`;
+            }
+            promptText += contextStr;
 
             console.log(`🧠 [Evolution] 正在交由 AI Orchestrator 呼叫 Master AI (GEMINI) 撰寫進化/例行報告...`);
-            // 🚀 傳入 bypassLimit: true，給足 60 秒思考時間
             let report = await aiOrchestrator.executeTask('EVOLUTION_MASTER', 'GEMINI', promptText, { bypassLimit: true });
             
             if (!report || !report.analysis) {
@@ -163,7 +159,6 @@ const retrospectiveJob = {
 請只回傳 JSON: {"decision": "PASS" 或 "VETO", "reason": "50字內的審查意見"}`;
 
                 try {
-                    // 🚀 董事會也算重型任務，給 45 秒
                     const boardDecision = await aiOrchestrator.executeTask('BOARD_OF_DIRECTORS', 'GROQ', auditorPrompt);
                     
                     if (boardDecision.decision === 'VETO') {
@@ -233,7 +228,6 @@ const retrospectiveJob = {
                 }
             }
 
-            // 🚀 確保 prompt_changes 永遠是乾淨的 JSONB Object
             const finalPromptChanges = { 
                 feedback: report.prompt_feedback || "無", 
                 log: promptUpdateLog 

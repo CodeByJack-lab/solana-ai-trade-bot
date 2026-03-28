@@ -4,7 +4,15 @@ const { PublicKey } = require('@solana/web3.js');
 const { connection } = require('../config/solana');
 const { supabase } = require('../config/supabase');
 const { healthMonitor } = require('./healthMonitor');
-const { priceOracleService } = require('./priceOracleService'); // 👈 [融合] 引入 V7.0 預言機
+
+// 🛡️ 偽裝 Header
+const BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': 'application/json'
+};
+
+// ⏳ V8.2 新增：全局 API 節流鎖 (確保 DexScreener 請求最少相隔 1 秒)
+let lastDexRequestTime = 0;
 
 const securityGuard = {
     // 🚀 嚴格 Base58 Payload 洗白
@@ -28,6 +36,55 @@ const securityGuard = {
         return { isGarbage: false };
     },
 
+    // 🚀 V8.2 新增：直連 DexScreener (配備自動排隊系統)
+    async getProfileFromDexScreener(mint) {
+        try {
+            // 🛑 絕對節流防線：強制每槍相隔最少 1000ms
+            const now = Date.now();
+            const timeSinceLast = now - lastDexRequestTime;
+            if (timeSinceLast < 1000) {
+                const waitTime = 1000 - timeSinceLast;
+                console.log(`⏳ [Security Guard] 魚群過於擁擠，觸發 API 排隊等待 ${waitTime}ms...`);
+                await new Promise(r => setTimeout(r, waitTime));
+            }
+            lastDexRequestTime = Date.now(); // 更新最後開槍時間
+
+            const url = `https://api.dexscreener.com/latest/dex/tokens/${mint}`;
+            const res = await axios.get(url, { timeout: 5000, headers: BROWSER_HEADERS });
+
+            if (res.data && res.data.pairs) {
+                // 防呆：只攞 Solana 鏈，並按流動性排序
+                const pairs = res.data.pairs.filter(p => p.chainId === 'solana' && p.baseToken.address === mint);
+                if (pairs.length > 0) {
+                    pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+                    const pair = pairs[0];
+
+                    const socials = pair.info?.socials || [];
+                    const priceSol = parseFloat(pair.priceNative) || 0;
+
+                    return {
+                        symbol: pair.baseToken?.symbol || 'UNKNOWN',
+                        name: pair.baseToken?.name || 'UNKNOWN',
+                        priceUsd: parseFloat(pair.priceUsd) || 0,
+                        priceSol: priceSol,
+                        liquidity: pair.liquidity?.usd || 0,
+                        volume5m: pair.volume?.m5 || 0,
+                        fdv: pair.fdv || 0,
+                        buys5m: pair.txns?.m5?.buys || 0,
+                        sells5m: pair.txns?.m5?.sells || 0,
+                        h1: parseFloat(pair.priceChange?.h1) || 0,
+                        h24: parseFloat(pair.priceChange?.h24) || 0,
+                        socials: socials.length > 0 ? `有 (${socials.map(s => s.type).join('/')})` : '無'
+                    };
+                }
+            }
+            return null;
+        } catch (e) {
+            console.warn(`⚠️ [Security Guard] DexScreener 查價失敗 (${mint.substring(0,6)}...):`, e.message);
+            return null;
+        }
+    },
+
     async checkAll(mintAddress, poolType = 'NURSERY') {
         try {
             healthMonitor.setStatus('Security_Guard', '🟢 運作中');
@@ -35,7 +92,7 @@ const securityGuard = {
             const cleanMint = this.sanitizeAddress(mintAddress);
             if (!cleanMint) return { isSafe: false, reason: '🛑 無效的 Base58 地址格式' };
 
-            // 🚀 V7.1: 保留 RPC 帳戶驗證防線
+            // 🚀 RPC 帳戶驗證防線 (過濾未發射嘅假幣)
             try {
                 const accountInfo = await connection.getAccountInfo(new PublicKey(cleanMint));
                 if (!accountInfo) {
@@ -45,8 +102,8 @@ const securityGuard = {
                 return { isSafe: false, isPurgatory: true, reason: `⏳ RPC連線異常: ${rpcErr.message}` };
             }
 
-            // 讀取 AI 參數
-            const targetParamId = poolType === 'TRENDING' ? 3 : (poolType === 'BLUECHIP' ? 1 : 2);
+            // 讀取 AI 參數 (ID 2 = Meme, ID 3 = Trending)
+            const targetParamId = poolType === 'TRENDING' ? 3 : 2;
             const { data: params, error: dbErr } = await supabase.from('ai_strategy_params').select('*').eq('id', targetParamId).single();
             if (dbErr) throw new Error(`無法讀取參數 ID ${targetParamId}`);
 
@@ -56,8 +113,8 @@ const securityGuard = {
                 minRatio: parseFloat(params.min_liq_fdv_ratio || 0.01)
             };
 
-            // 🚀 V7.1: 完美融合！由原本 axios 改用 Oracle 查價，徹底防禦 429！
-            let marketData = await priceOracleService.getProfileAsync(cleanMint);
+            // 🚀 V8.2: 完美直連！向 DexScreener 獲取最新市場數據 (自帶 1 秒排隊系統)
+            let marketData = await this.getProfileFromDexScreener(cleanMint);
 
             if (!marketData) {
                 return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
@@ -67,7 +124,7 @@ const securityGuard = {
             const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
             if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
 
-            // 盲狙特權
+            // 盲狙特權 (流動性極低 + 5分量為0)
             const isBlindSnipe = (marketData.liquidity < 1000 && marketData.volume5m === 0);
 
             if (!isBlindSnipe) {
@@ -88,7 +145,7 @@ const securityGuard = {
                 if (currentRatio < limits.minRatio) return { isSafe: false, reason: `📉 泡沫極大 (比例 ${(currentRatio * 100).toFixed(2)}%)` };
             }
 
-            // 🚀 V7.1: 保留 RugCheck 防線！
+            // 保留 RugCheck 防線
             const rugResult = await this.checkRugPull(cleanMint);
             if (!rugResult.isSafe) return rugResult;
 
@@ -106,7 +163,7 @@ const securityGuard = {
         }
     },
 
-    // 🛡️ 檢查 RugPull (保留 V6.0 優良傳統)
+    // 🛡️ 檢查 RugPull 
     async checkRugPull(mintAddress) {
         try {
             const url = `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`;

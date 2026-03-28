@@ -65,7 +65,7 @@ const config = {
     external: {
         exchangeRateApi: getEnv('EXCHANGE_RATE_API_URL', false) || 'https://api.exchangerate-api.com/v4/latest/USD',
         jupiterApiKey: getEnv('JUPITER_API_KEY', false),
-        jupiterBaseUrl: getEnv('JUPITER_BASE_URL', false) || 'https://price.jup.ag/v6',
+        jupiterBaseUrl: getEnv('JUPITER_BASE_URL', false) || 'https://api.jup.ag',
         birdeyeApiKey: getEnv('BIRDEYE_API_KEY', false), 
         coingeckoApiKey: getEnv('COINGECKO_API_KEY', false),
     },

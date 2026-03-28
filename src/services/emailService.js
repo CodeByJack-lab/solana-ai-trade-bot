@@ -1,6 +1,6 @@
 // src/services/emailService.js
 const dns = require('dns');
-// 🚀 關鍵：強制 DNS 優先解析 IPv4 地址，解決 Railway ENETUNREACH IPv6 報錯
+// 🚀 強制 DNS 優先解析 IPv4 地址，解決 Railway ENETUNREACH IPv6 報錯
 if (dns.setDefaultResultOrder) {
     dns.setDefaultResultOrder('ipv4first');
 }
@@ -10,14 +10,15 @@ const { supabase } = require('../config/supabase');
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-// 🛠️ 建立發送器
+// 🛠️ [修改] 改用 Port 587 (STARTTLS) 繞過 Cloudflare 封鎖
 const transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
-    port: 465, // 使用 SSL 
-    secure: true, // 465 必須為 true
+    port: 587,
+    secure: false, // 587 必須為 false，讓它自動升級為 TLS
+    requireTLS: true,
     auth: {
         user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
+        pass: process.env.SMTP_PASS // ⚠️ 必須為 Google 應用程式密碼
     }
 });
 
@@ -29,7 +30,6 @@ const emailService = {
         }
 
         try {
-            // 🚀 從 Supabase 拉取生效中的 Admin Emails
             const { data: admins, error } = await supabase
                 .from('admin_subscribers')
                 .select('email')
@@ -45,10 +45,9 @@ const emailService = {
 
             const dateStr = new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong' });
             
-            // 🎨 HTML 排版維持原本設計
             const htmlContent = `
             <div style="font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-radius: 10px;">
-                <h2 style="color: #2E86C1; border-bottom: 2px solid #2E86C1; padding-bottom: 10px;">🤖 V7.0 Master AI 全自動自我進化報告</h2>
+                <h2 style="color: #2E86C1; border-bottom: 2px solid #2E86C1; padding-bottom: 10px;">🤖 V8.2 Master AI 全自動自我進化報告</h2>
                 <p><strong>🕒 報告時間：</strong> ${dateStr}</p>
                 
                 <h3 style="color: #E67E22;">📊 深度敗因與獲利分析</h3>
@@ -70,7 +69,7 @@ const emailService = {
                 </div>
                 
                 <hr style="margin-top: 30px; border: 0; border-top: 1px solid #eee;">
-                <p style="color: #7F8C8D; font-size: 12px; text-align: center;">此郵件由 Solana AI Trade Bot V7.0 自動生成，請勿直接回覆。</p>
+                <p style="color: #7F8C8D; font-size: 12px; text-align: center;">此郵件由 SOL_Trade V8.2 自動生成，請勿直接回覆。</p>
             </div>
             `;
 

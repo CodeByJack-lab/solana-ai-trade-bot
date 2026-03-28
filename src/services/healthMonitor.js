@@ -8,7 +8,7 @@ class HealthMonitor {
         this.oracleQueueSize = 0;
     }
 
-    // 1. 基本組件狀態 (🟢 運作中 / 🔴 異常)
+    // 1. 基本組件狀態
     setStatus(component, status) {
         this.statuses.set(component, status);
     }
@@ -16,7 +16,7 @@ class HealthMonitor {
     // 2. 紀錄 AI 延遲 (毫秒)
     recordAiLatency(latencyMs) {
         this.aiLatencies.push(latencyMs);
-        if (this.aiLatencies.length > 50) this.aiLatencies.shift(); // 只保留最近 50 次，防 RAM 爆
+        if (this.aiLatencies.length > 50) this.aiLatencies.shift(); // 防 RAM 爆
     }
 
     // 3. 紀錄 API 請求次數
@@ -29,12 +29,14 @@ class HealthMonitor {
         this.apiUsage.errors429++;
         const msg = `🚨 <b>[API 限流警告]</b>\n🤖 供應商: ${provider}\n🔑 Key 索引: 第 ${keyIndex + 1} 把 Key\n⚠️ 狀態: 觸發 429 Too Many Requests，系統已自動切換備用 Key！`;
         
-        console.log(`\n${msg.replace(/<[^>]*>?/gm, '')}`); 
+        console.log(`\n======================================================`);
+        console.log(`🔥 [警告] 觸發 429 限流！(${provider} - Key ${keyIndex + 1})`);
+        console.log(`======================================================\n`);
         
         try {
-            // 👈 [核心修復] 動態載入，打破循環依賴
-            const { sendAdminAlert } = require('./telegramService'); 
-            await sendAdminAlert(msg); 
+            // 👈 [核心修復] 動態載入，只有喺觸發時先 require，完美避開循環依賴！
+            const { sendAdminAlert } = require('./telegramService');
+            await sendAdminAlert(msg);
         } catch (e) {
             console.error("❌ 無法發送 429 Telegram 警告:", e.message);
         }
@@ -45,22 +47,27 @@ class HealthMonitor {
         this.oracleQueueSize = size;
     }
 
-    // 6. 產出你想要嘅完美 Dashboard
+    // 6. 產出完美排版的 Dashboard (保留咗大佬你嘅 padEnd 心血！)
     getHealthReport() {
         let report = '';
+        
+        // 上半部：各組件狀態
         for (const [component, status] of this.statuses.entries()) {
-            report += `[${component}]: ${status}\n`;
+            // 用 padEnd 令到冒號對齊，強迫症福音
+            report += `  🔹 ${component.padEnd(20, ' ')}: ${status}\n`;
         }
 
         // 計算平均延遲 (秒)
         const avgLatency = this.aiLatencies.length > 0 
-            ? (this.aiLatencies.reduce((a, b) => a + b, 0) / this.aiLatencies.length / 1000).toFixed(1) 
-            : '0.0';
+            ? (this.aiLatencies.reduce((a, b) => a + b, 0) / this.aiLatencies.length / 1000).toFixed(2) 
+            : '0.00';
 
-        // 📊 組合高級 Metrics
-        report += `\n📊 系統效能: AI_Requests: ${this.apiUsage.requests} | Oracle_Queue_Size: ${this.oracleQueueSize} | Avg_AI_Latency: ${avgLatency}s | 429_Errors: ${this.apiUsage.errors429}`;
+        // 下半部：高級效能指標
+        report += `  ----------------------------------------------------\n`;
+        report += `  📈 [效能指標] AI 總請求: ${this.apiUsage.requests.toString().padEnd(6, ' ')} | 平均延遲: ${avgLatency}s\n`;
+        report += `  ⏳ [資源狀態] Oracle排隊: ${this.oracleQueueSize.toString().padEnd(5, ' ')} | 429 阻截: ${this.apiUsage.errors429} 次`;
         
-        return report.trim();
+        return report;
     }
 }
 

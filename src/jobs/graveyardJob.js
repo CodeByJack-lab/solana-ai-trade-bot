@@ -3,16 +3,13 @@ const cron = require('node-cron');
 const { supabase } = require('../config/supabase');
 const { connection } = require('../config/solana');
 const { PublicKey, Transaction, Keypair } = require('@solana/web3.js');
+const axios = require('axios'); // 👈 [V8.2 核心改動] 引入 axios 輕量驗屍
 const { 
     createBurnInstruction, 
     createCloseAccountInstruction, 
     getAssociatedTokenAddress
 } = require('@solana/spl-token');
-// 👇👇👇 [V7.0 核心改動] 引入 Price Oracle 與中央彈藥庫，剷除 Axios
-const { priceOracleService } = require('../services/priceOracleService');
 const configEnv = require('../config/env');
-// 👆👆👆
-const path = require('path');
 
 let bs58 = require('bs58');
 if (bs58.default) {
@@ -21,7 +18,6 @@ if (bs58.default) {
 
 let wallet;
 try {
-    // 🚀 V7.0: 轉用 configEnv 單一數據源
     const rawKey = configEnv.solana.walletPrivateKey ? configEnv.solana.walletPrivateKey.trim() : null;
     
     if (rawKey) {
@@ -66,11 +62,21 @@ const graveyardJob = {
             }
 
             // ==============================================================
-            // 🚀 V7.0 升級：掟入 Oracle 坐 10 秒大巴，一次過批次驗屍！
+            // 🚀 V8.2 升級：掟入 Jupiter V6 坐大巴，一次過批次驗屍！
             // ==============================================================
             const mintsToVerify = deadTokens.map(t => t.mint_address);
-            console.log(`  📡 正在交由 Oracle 批次驗屍 ${mintsToVerify.length} 隻代幣...`);
-            const pricesMap = await priceOracleService.getPrices(mintsToVerify);
+            console.log(`  📡 正在交由 Jupiter 批次驗屍 ${mintsToVerify.length} 隻代幣...`);
+            
+            let pricesMap = {};
+            try {
+                const ids = mintsToVerify.join(',');
+                const res = await axios.get(`https://api.jup.ag/price/v2?ids=${ids}`, { timeout: 5000 });
+                if (res.data && res.data.data) {
+                    pricesMap = res.data.data;
+                }
+            } catch (err) {
+                console.warn(`  ⚠️ 無法連接 Jupiter，預設全部維持死刑。`);
+            }
 
             let burnedCount = 0;
             let revivedCount = 0;
@@ -79,18 +85,17 @@ const graveyardJob = {
                 console.log(`\n  💀 [核實死刑] $${token.token_symbol} (${token.mint_address.substring(0,6)}...)`);
 
                 try {
-                    // 直接從 Oracle Cache 讀取結果，0 延遲
+                    // 直接從 Jupiter 報價讀取結果
                     const dog = pricesMap[token.mint_address];
-                    const liquidity = dog?.liquidity || 0;
 
-                    if (liquidity > 500) {
-                        console.log(`    ↳ 😇 [奇蹟生還] 流動性已恢復至 $${liquidity.toFixed(2)}，撤銷死刑，踢回觀察區！`);
+                    if (dog && dog.price > 0) {
+                        console.log(`    ↳ 😇 [奇蹟生還] 仍有報價 ($${dog.price})，撤銷死刑，踢回觀察區！`);
                         await supabase.from('graveyard_pool').delete().eq('id', token.id);
                         revivedCount++;
                         continue;
                     }
                 } catch (e) {
-                    console.warn(`    ↳ ⚠️ [驗屍異常] Oracle 無法獲取數據，預設維持死刑判決。`);
+                    console.warn(`    ↳ ⚠️ [驗屍異常] Jupiter 無法獲取數據，預設維持死刑判決。`);
                 }
 
                 try {
@@ -100,7 +105,6 @@ const graveyardJob = {
                     let amountRaw = "0";
                     let ataExists = false;
 
-                    // 🚀 Phase 3 核心修復：防止因無帳戶導致卡死迴圈
                     try {
                         const balanceInfo = await connection.getTokenAccountBalance(ataAddress);
                         amountRaw = balanceInfo.value.amount;
@@ -144,6 +148,7 @@ const graveyardJob = {
                 } catch (burnErr) {
                     console.error(`    ↳ ❌ [執行錯誤] 火化失敗 (${token.token_symbol}):`, burnErr.message);
                 }
+                await new Promise(resolve => setTimeout(resolve, 1000));
             }
             
             console.log(`\n✅ [Graveyard] 🪦 本次清理作業完成！`);
@@ -160,7 +165,7 @@ const graveyardJob = {
         cron.schedule('0 3 * * *', () => {
             this.incinerateOldTokens();
         });
-        console.log('🕒 [GraveyardJob] 🪦 火化排程已啟動 (每晚凌晨 3 點執行, V7.0 Oracle驅動)');
+        console.log('🕒 [GraveyardJob] 🪦 火化排程已啟動 (每晚凌晨 3 點執行, V8.2 Jupiter驅動)');
     }
 };
 

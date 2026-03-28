@@ -1,171 +1,136 @@
 // src/services/trendingMonitorService.js
-const express = require('express');
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
-const { executeBuy } = require('./tradeService');
-const { healthMonitor } = require('./healthMonitor');
-const { aiOrchestrator } = require('./aiOrchestrator');
+const { getPortfolio, canBuyTrending } = require('./portfolioService');
 
-// ==========================================
-// 🧠 引入 Redis 中央緩存庫
-// ==========================================
-const configEnv = require('../config/env');
-const Redis = require('ioredis');
-const redis = new Redis(configEnv.cache.redisUrl);
+let isCrawlerRunning = false;
 
-redis.on('error', (err) => {
-    console.error('🔴 [Redis Error] (Trending Monitor):', err.message);
-});
-
-let isTrendingMonitorRunning = false;
-
-function startTrendingMonitor() {
-    console.log('📈 [Trending Radar] 熱門幣雷達已啟動 (每 1 分鐘巡邏池內代幣)...');
-    
-    setInterval(async () => {
-        if (isTrendingMonitorRunning) return;
-        isTrendingMonitorRunning = true;
-
+const trendingMonitorService = {
+    // 🌐 呼叫 GeckoTerminal 免費 API 獲取熱門池
+    async fetchTrendingFromGecko() {
         try {
-            const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
-            if (!config || !config.is_running) {
-                isTrendingMonitorRunning = false;
-                return;
-            }
-
-            const currentNewsScore = config.latest_news_score || 0;
-
-            const { data: tokens } = await supabase.from('trending_pool').select('*');
-            if (!tokens || tokens.length === 0) {
-                isTrendingMonitorRunning = false;
-                return;
-            }
-
-            const { getPortfolio } = require('./portfolioService');
-            const portfolio = getPortfolio();
-            const activePositions = portfolio.positions || [];
-
-            for (const token of tokens) {
-                const mintAddress = token.mint_address;
-
-                // 1. 檢查是否已經持有
-                const isHolding = activePositions.some(p => p.mint_address === mintAddress);
-                if (isHolding) {
-                    continue; 
-                }
-
-                // ==========================================
-                // 2. 🛡️ 智能冷卻防線：贏錢追擊，輸錢面壁 (24小時 / 7日)
-                // ==========================================
-                const { data: tradeHistory } = await supabase
-                    .from('trade_history')
-                    .select('created_at, realized_pnl_pct')
-                    .eq('token_mint', mintAddress)
-                    .eq('action', 'SELL') // 確保只睇平倉紀錄
-                    .order('created_at', { ascending: false })
-                    .limit(2);
-
-                if (tradeHistory && tradeHistory.length > 0) {
-                    const lastTrade = tradeHistory[0];
-                    const timeSinceLastTrade = Date.now() - new Date(lastTrade.created_at).getTime();
-                    const isLoss1 = lastTrade.realized_pnl_pct < 0;
-
-                    if (isLoss1) {
-                        let isLoss2 = false;
-                        if (tradeHistory.length > 1) {
-                            isLoss2 = tradeHistory[1].realized_pnl_pct < 0;
-                        }
-
-                        // 連輸兩次，鎖 7 日
-                        if (isLoss2 && timeSinceLastTrade < 7 * 24 * 60 * 60 * 1000) {
-                            console.log(`🛑 [Trending] ${token.token_symbol} 連續兩次戰敗，進入 7 日深度冷卻。`);
-                            continue;
-                        } 
-                        // 輸一次，鎖 24 小時
-                        else if (!isLoss2 && timeSinceLastTrade < 24 * 60 * 60 * 1000) {
-                            console.log(`⏳ [Trending] ${token.token_symbol} 上次交易虧損，進入 24 小時冷卻。`);
-                            continue;
-                        }
-                    } else {
-                        // 上次係賺錢，無視時間，繼續追擊！
-                        console.log(`✅ [Trending] ${token.token_symbol} 上次交易獲利 (${lastTrade.realized_pnl_pct}%)，無視冷卻期，重新評估！`);
-                    }
-                }
-
-                // ==========================================
-                // 3. 準備 DB Prompt 同埋 Redis 閃電記憶
-                // ==========================================
-                const { data: promptRecord } = await supabase.from('bot_prompts').select('content').eq('prompt_id', 'trending_strategist').single();
-                let promptTemplate = promptRecord ? promptRecord.content : `你是 Web3 敘事心理學家與動能分析師...`;
-
-                // 🧠 提取 Redis 記憶
-                let aiMemory = [];
-                const memoryStr = await redis.get(`ai_memory_trending_buy:${mintAddress}`);
-                if (memoryStr) {
-                    aiMemory = JSON.parse(memoryStr);
-                }
-                
-                let memoryText = "無歷史觀察記憶（這是首次評估）。";
-                if (aiMemory.length > 0) {
-                    memoryText = aiMemory.map((msg, idx) => `[記憶 ${idx + 1}] ${msg}`).join('\n');
-                }
-
-                let promptText = promptTemplate;
-                promptText = promptText.replace(/{{token_name}}/g, token.token_name || 'Unknown');
-                promptText = promptText.replace(/{{token_symbol}}/g, token.token_symbol || 'Unknown');
-                promptText = promptText.replace(/{{social_links}}/g, 'Twitter/Telegram Data...'); 
-                promptText = promptText.replace(/{{description}}/g, 'Trending Top 50 Token...');
-                promptText = promptText.replace(/{{latest_news_score}}/g, currentNewsScore);
-                promptText = promptText.replace(/{{ai_memory}}/g, memoryText); // 👈 注入記憶畀 AI
-
-                console.log(`\n🧠 [Trending] AI 正在評估熱門幣: ${token.token_symbol}...`);
-                const result = await aiOrchestrator.executeTask('TRENDING_STRATEGIST', 'GROQ', promptText);
-
-                const cleanDecision = (result.decision || result.verdict || '').trim().toUpperCase();
-                
-                // ==========================================
-                // 4. 💾 將 AI 評語寫入 Redis 同 DB
-                // ==========================================
-                if (result && result.reason) {
-                    const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
-                    const newComment = `[${timeStr}] ${result.reason}`;
-                    
-                    aiMemory.push(newComment);
-                    if (aiMemory.length > 3) aiMemory.shift();
-                    
-                    // 寫入 Redis，設定 7 日過期，對抗 DB 每小時清空
-                    await redis.set(`ai_memory_trending_buy:${mintAddress}`, JSON.stringify(aiMemory), 'EX', 7 * 24 * 60 * 60);
-                    
-                    // 同步最新評語去 DB 俾 Dashboard 睇
-                    await supabase.from('trending_pool').update({ last_ai_comment: result.reason }).eq('mint_address', mintAddress);
-                }
-
-                if (cleanDecision === 'PASS' || cleanDecision.includes('BUY')) {
-                    console.log(`✅ [Trending] AI 批准買入 ${token.token_symbol}!`);
-                    
-                    // 5. 交給 Security Guard 進行最後防線檢查
-                    const { securityGuard } = require('./securityGuard');
-                    const secResult = await securityGuard.checkAll(mintAddress);
-
-                    if (secResult.isSafe) {
-                        console.log(`🛡️ [Security] ${token.token_symbol} 安全通關，準備開倉...`);
-                        await executeBuy(mintAddress, token.token_symbol, 'TRENDING_MOMENTUM', result.score || 85, result.reason, config.trending_trade_amount_sol || 0.1);
-                        break; 
-                    } else {
-                        console.log(`❌ [Security] ${token.token_symbol} 被保安攔截: ${secResult.reason}`);
-                    }
-                } else {
-                    console.log(`📉 [Trending] AI 拒絕買入 ${token.token_symbol}: ${result.reason}`);
-                }
-
-                await new Promise(r => setTimeout(r, 2000));
-            }
+            const url = 'https://api.geckoterminal.com/api/v2/networks/solana/trending_pools';
+            const res = await axios.get(url, { 
+                headers: { 'accept': 'application/json' }, 
+                timeout: 8000 
+            });
+            return res.data?.data || [];
         } catch (err) {
-            console.error(`❌ [Trending Monitor Error]`, err.message);
-        } finally {
-            isTrendingMonitorRunning = false;
+            console.warn('⚠️ [Gecko Crawler] 獲取熱門榜失敗:', err.message);
+            return [];
         }
-    }, 60000); 
-}
+    },
 
-module.exports = { startTrendingMonitor };
+    start() {
+        console.log('🦎 [Gecko Crawler] 熱門榜爬蟲已啟動 (每 10 分鐘出動尋找獵物)...');
+        
+        setInterval(async () => {
+            if (isCrawlerRunning) return;
+            isCrawlerRunning = true;
+
+            try {
+                // 1. 前置倉位檢查：如果 Trending 倉位已滿，爬蟲就休息，慳資源
+                if (!canBuyTrending()) {
+                    isCrawlerRunning = false;
+                    return;
+                }
+
+                const { data: config } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
+                if (!config || !config.is_running) {
+                    isCrawlerRunning = false;
+                    return;
+                }
+
+                // 🚀 V8.2 核心修正：動態讀取 Database 中 Trending (ID=3) 的最新門檻，拒絕 Hardcode！
+                const { data: stratParams } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 3).single();
+                const dynamicMinLiquidity = stratParams?.min_liquidity || 40000;
+
+                // 2. 獲取熱門池數據
+                const pools = await this.fetchTrendingFromGecko();
+                if (pools.length === 0) {
+                    isCrawlerRunning = false;
+                    return;
+                }
+
+                const portfolio = getPortfolio();
+                const activePositions = portfolio.positions || [];
+                const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
+
+                let addedCount = 0;
+
+                for (const pool of pools) {
+                    const baseTokenId = pool.relationships?.base_token?.data?.id || '';
+                    const mintAddress = baseTokenId.replace('solana_', ''); 
+                    
+                    if (!mintAddress || mintAddress.length < 32) continue;
+
+                    // 過濾穩定幣與公鏈幣
+                    if (['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'].includes(mintAddress)) {
+                        continue;
+                    }
+
+                    const attr = pool.attributes || {};
+                    const liquidityUsd = parseFloat(attr.reserve_in_usd) || 0;
+
+                    // 🛡️ RAM 初篩：使用 Master AI 動態設定的門檻！
+                    if (liquidityUsd < dynamicMinLiquidity) continue; 
+
+                    // 檢查是否已持倉
+                    const isHolding = activePositions.some(p => p.mint_address === mintAddress);
+                    if (isHolding) continue;
+
+                    // 檢查是否已經在保溫箱中排隊
+                    const { data: existingInPool } = await supabase.from('trending_pool').select('mint_address').eq('mint_address', mintAddress).single();
+                    if (existingInPool) continue;
+
+                    // 🛡️ 智能冷卻防線：贏錢追擊，輸錢面壁 (24小時 / 7日)
+                    const { data: tradeHistory } = await supabase
+                        .from(`trade_history_${tableSuffix}`)
+                        .select('created_at, realized_pnl_pct')
+                        .eq('token_mint', mintAddress)
+                        .eq('action', 'SELL')
+                        .order('created_at', { ascending: false })
+                        .limit(2);
+
+                    let isOnCooldown = false;
+                    if (tradeHistory && tradeHistory.length > 0) {
+                        const lastTrade = tradeHistory[0];
+                        const timeSinceLastTrade = Date.now() - new Date(lastTrade.created_at).getTime();
+                        
+                        if (lastTrade.realized_pnl_pct < 0) {
+                            const isLoss2 = tradeHistory.length > 1 && tradeHistory[1].realized_pnl_pct < 0;
+                            if (isLoss2 && timeSinceLastTrade < 7 * 24 * 60 * 60 * 1000) isOnCooldown = true; 
+                            else if (!isLoss2 && timeSinceLastTrade < 24 * 60 * 60 * 1000) isOnCooldown = true; 
+                        }
+                    }
+
+                    if (isOnCooldown) continue;
+
+                    // 3. 獵物入池！交由 trendingJob.js 進行安檢與 AI 審判
+                    await supabase.from('trending_pool').insert([{
+                        mint_address: mintAddress,
+                        token_symbol: attr.name?.split(' /')[0] || 'UNKNOWN', 
+                        token_name: attr.name || 'UNKNOWN',
+                        liquidity: liquidityUsd,
+                        volume_24h: parseFloat(attr.volume_usd?.h24) || 0,
+                        price_change_24h: parseFloat(attr.price_change_percentage?.h24) || 0
+                    }]);
+
+                    addedCount++;
+                    if (addedCount >= 5) break; 
+                }
+
+                if (addedCount > 0) {
+                    console.log(`🦎 [Gecko Crawler] 成功將 ${addedCount} 隻潛力熱門幣扔入魚池 (動態過濾門檻: $${dynamicMinLiquidity})！`);
+                }
+
+            } catch (err) {
+                console.error(`❌ [Gecko Crawler] 運行異常:`, err.message);
+            } finally {
+                isCrawlerRunning = false;
+            }
+        }, 10 * 60 * 1000); // 🚀 每 10 分鐘爬一次
+    }
+};
+
+module.exports = { trendingMonitorService };

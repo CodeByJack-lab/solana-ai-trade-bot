@@ -4,7 +4,7 @@ const { connection } = require('../config/solana');
 const { supabase } = require('../config/supabase');
 const { PublicKey, Transaction, Keypair } = require('@solana/web3.js');
 const { createCloseAccountInstruction, TOKEN_PROGRAM_ID } = require('@solana/spl-token');
-const configEnv = require('../config/env'); // 👈 引入中央彈藥庫
+const configEnv = require('../config/env'); 
 
 let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;
@@ -22,9 +22,10 @@ try {
 }
 
 const janitorJob = {
+    // 🧹 任務 1：清理 0 餘額空殼帳戶 (回收 SOL)
     async cleanEmptyAccounts() {
         if (!wallet) return;
-        console.log('\n🧹 [Janitor] 清道夫啟動：掃描閒置超過 7 日的零餘額 ATA 帳戶...');
+        console.log('\n🧹 [Janitor] 任務 1：掃描閒置超過 7 日的零餘額 ATA 帳戶...');
 
         try {
             const parsedTokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
@@ -126,15 +127,40 @@ const janitorJob = {
             }
 
         } catch (error) {
-            console.error('❌ [Janitor] 清道夫執行發生錯誤:', error.message);
+            console.error('❌ [Janitor] 清道夫執行 ATA 回收發生錯誤:', error.message);
+        }
+    },
+
+    // 🚀 [V8.2 新增] 任務 2：清理保溫箱 (Trending Pool) 超過 7 日無更新的過氣代幣
+    async cleanIncubatorPool() {
+        console.log('\n🧹 [Janitor] 任務 2：掃描並清理「高潛力保溫箱」內超過 7 日的過氣代幣...');
+        try {
+            const sevenDaysAgo = new Date(Date.now() - (7 * 24 * 60 * 60 * 1000)).toISOString();
+            
+            const { error, count } = await supabase
+                .from('trending_pool')
+                .delete({ count: 'exact' })
+                .lt('updated_at', sevenDaysAgo);
+
+            if (error) throw error;
+
+            if (count && count > 0) {
+                console.log(`✅ [Janitor] 成功從保溫箱中淘汰了 ${count} 隻過氣代幣！`);
+            } else {
+                console.log(`✅ [Janitor] 保溫箱內無過期代幣，狀態健康。`);
+            }
+        } catch (err) {
+            console.error('❌ [Janitor] 清理保溫箱發生錯誤:', err.message);
         }
     },
 
     start() {
-        cron.schedule('0 4 * * *', () => {
-            this.cleanEmptyAccounts();
+        cron.schedule('0 4 * * *', async () => {
+            await this.cleanEmptyAccounts();
+            await this.cleanIncubatorPool();
+            console.log(`\n✅ [Janitor] 每日清晨 4:00 巡邏作業全數完成！`);
         });
-        console.log('🧹 [Janitor] 清道夫排程已啟動 (每天凌晨 4:00 巡邏 0 餘額空殼帳戶)');
+        console.log('🧹 [Janitor] 清道夫排程已啟動 (每天凌晨 4:00 巡邏 0餘額帳戶 及 保溫箱)');
     }
 };
 

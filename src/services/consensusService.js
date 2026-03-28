@@ -1,17 +1,20 @@
 // src/services/consensusService.js
 const { supabase } = require('../config/supabase');
-const { aiOrchestrator } = require('./aiOrchestrator'); // 👈 引入大腦總機
-const { healthMonitor } = require('./healthMonitor');
+const { aiOrchestrator } = require('./aiOrchestrator'); 
+const { promptManager } = require('./promptManager'); // 👈 引入 RAM 閃電劇本庫
 
 /**
- * 🏛️ 最高法院任務隊列 (防止瞬間湧入過多審判)
+ * 🏛️ 雙核任務隊列 (Worker Pool)
+ * 允許同時處理 N 個任務，並自帶處理完畢後的防護機制
  */
 class TaskQueue {
-    constructor(name) { 
+    constructor(name, concurrency = 2) { 
         this.name = name;
         this.queue = []; 
-        this.isProcessing = false; 
+        this.concurrency = concurrency; // 👈 核心：雙核驅動
+        this.activeCount = 0; 
     }
+    
     async add(task) {
         return new Promise((resolve, reject) => {
             this.queue.push(async () => {
@@ -20,116 +23,103 @@ class TaskQueue {
             this.process();
         });
     }
+
     async process() {
-        if (this.isProcessing || this.queue.length === 0) return;
-        this.isProcessing = true;
-        while (this.queue.length > 0) {
-            const task = this.queue.shift();
+        // 如果 2 個核都做緊嘢，或者無任務，就停低等
+        if (this.activeCount >= this.concurrency || this.queue.length === 0) return;
+        
+        this.activeCount++;
+        const task = this.queue.shift();
+        
+        try {
             await task();
-            await new Promise(r => setTimeout(r, 1000)); // 每個審判間隔 1 秒
+        } finally {
+            this.activeCount--;
+            this.process(); // 叫醒下一個任務
         }
-        this.isProcessing = false;
     }
 }
 
-const memeQueue = new TaskQueue('Meme');
-const bluechipQueue = new TaskQueue('Bluechip');
+// ⚔️ 宣告一個雙核嘅三劍俠排隊通道
+const consensusQueue = new TaskQueue('Consensus_Meme_Trending', 2);
 
 const consensusService = {
     /**
-     * ☁️ 從 Supabase 動態拉取 Prompt 並注入數據
+     * ⚔️ 核心：Meme / Trending 幣種三司會審 (雙核漏斗式決策)
      */
-    async getPrompt(promptId, data) {
-        const { data: promptData } = await supabase.from('bot_prompts').select('content').eq('prompt_id', promptId).single();
-        let content = promptData?.content || "";
-        for (const [key, value] of Object.entries(data)) {
-            content = content.replace(new RegExp(`{{${key}}}`, 'g'), value);
-        }
-        return content;
-    },
-
-    /**
-     * ⚔️ 核心：Meme / Trending 幣種三司會審 (漏斗式決策)
-     */
-    async runMemeConsensus(mintAddress, marketData, options = { isReentry: false, poolType: 'NURSERY' }) {
-        return memeQueue.add(async () => {
+    async runMemeConsensus(mintAddress, marketData, options = { poolType: 'NURSERY' }) {
+        return consensusQueue.add(async () => {
             const hallName = options.poolType === 'TRENDING' ? '熱門動能 議事廳' : 'Meme 議事廳';
-            console.log(`\n🏛️ [${hallName}] 開始審核: ${marketData.symbol || mintAddress.substring(0,6)}`);
+            const shortMint = mintAddress.substring(0,6);
+            console.log(`\n🏛️ [${hallName}] 分配 Worker 處理: ${marketData.symbol || shortMint}`);
             
             let currentNewsScore = 0;
             try {
                 const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
                 currentNewsScore = config?.latest_news_score || 0;
             } catch (e) {
-                console.warn(`⚠️ [${hallName}] 無法獲取大盤災難指數，預設為 0`);
+                console.warn(`⚠️ [${hallName}] 無法獲取災難指數，預設為 0`);
             }
             
-            // 👇👇👇 [修復與升級] 處理 lastComment 記憶及 vol_5m 命名對齊
-            let finalDescription = "無";
-            if (options.lastComment) {
-                finalDescription = `【歷史評語】${options.lastComment}`;
-            } else if (options.isReentry) {
-                finalDescription = "【注意：橫盤30分鐘後接回】";
-            }
+            let finalDescription = options.lastComment ? `【歷史評語】${options.lastComment}` : "無";
 
             const promptData = {
                 token_symbol: marketData.symbol,
                 token_name: marketData.name,
                 liquidity: marketData.liquidity,
-                vol_5m: marketData.volume5m, // 👈 [Bug Fix] 原本寫錯咗做 vol5m，導致 undefined！
+                vol_5m: marketData.volume5m, 
                 buy_txs: marketData.buys5m,
                 sell_txs: marketData.sells5m,
                 social_links: marketData.socials,
-                description: finalDescription, // 👈 [升級] 支援 Trending 歷史記憶對比
+                description: finalDescription, 
                 latest_news_score: currentNewsScore
             };
 
             const promptPrefix = options.poolType === 'TRENDING' ? 'trending' : 'meme';
-
-            // 🔀 1. 向大腦總機索取本次審判的「錯峰陣型」
             const plan = aiOrchestrator.getRoutingPlan();
 
             // ==========================================
-            // 🗡️ 第一關：先鋒 (Scout) 負責感性與敘事
+            // 🗡️ 第一關：先鋒 (Scout)
             // ==========================================
-            const pScout = await this.getPrompt(`${promptPrefix}_scout`, promptData);
-            console.log(`📡 正在呼叫先鋒 (${plan.scout})...`);
+            const pScout = promptManager.getPrompt(`${promptPrefix}_scout`, promptData); // ⚡ 直讀 RAM
+            console.log(`📡 [${marketData.symbol}] 呼叫先鋒 (${plan.scout})...`);
             const scout = await aiOrchestrator.executeTask('SCOUT', plan.scout, pScout);
             
-            const cleanScout = (scout.decision || scout.verdict || '').trim().toUpperCase();
+            await new Promise(r => setTimeout(r, 1000)); // 🛑 強制 1 秒 Cooldown
             
+            const cleanScout = (scout.decision || scout.verdict || '').trim().toUpperCase();
             if (cleanScout === 'REJECT' || cleanScout === 'VETO' || cleanScout.includes('VETO')) {
-                console.log(`🛑 [提早截斷] 先鋒否決: ${scout.reason}`);
-                return { buy: false, reason: `先鋒首輪淘汰: ${scout.reason}` };
+                return { buy: false, reason: `先鋒淘汰: ${scout.reason}` };
             }
 
             // ==========================================
-            // 🧠 第二關：軍師 (Strategist) 負責硬數據與風險
+            // 🧠 第二關：軍師 (Strategist)
             // ==========================================
-            const pStrat = await this.getPrompt(`${promptPrefix}_strategist`, promptData);
-            console.log(`📡 正在呼叫軍師 (${plan.strategist})...`);
+            const pStrat = promptManager.getPrompt(`${promptPrefix}_strategist`, promptData);
+            console.log(`📡 [${marketData.symbol}] 呼叫軍師 (${plan.strategist})...`);
             const strategist = await aiOrchestrator.executeTask('STRATEGIST', plan.strategist, pStrat);
             
+            await new Promise(r => setTimeout(r, 1000)); // 🛑 強制 1 秒 Cooldown
+            
             const cleanStrat = (strategist.decision || strategist.verdict || '').trim().toUpperCase();
-
             if (cleanStrat === 'REJECT' || cleanStrat === 'VETO' || cleanStrat.includes('VETO')) {
-                console.log(`🛑 [提早截斷] 軍師否決: ${strategist.reason}`);
-                return { buy: false, reason: `軍師數據淘汰: ${strategist.reason}` };
+                return { buy: false, reason: `軍師淘汰: ${strategist.reason}` };
             }
 
             // ==========================================
-            // ⚖️ 第三關：判官 (Auditor) 行使一票否定權
+            // ⚖️ 第三關：判官 (Auditor)
             // ==========================================
-            const pAuditBase = await this.getPrompt(`${promptPrefix}_auditor`, promptData);
-            const pAuditWrapped = `${pAuditBase}\n\n【前線戰報彙整】\n先鋒意見 (${cleanScout}): ${scout.reason}\n軍師意見 (${cleanStrat}): ${strategist.reason}\n\n請綜合以上資訊，做最終判決 (PASS 或 VETO)。你有絕對一票否定權。`;
+            const pAuditBase = promptManager.getPrompt(`${promptPrefix}_auditor`, promptData);
+            const pAuditWrapped = `${pAuditBase}\n\n【前線戰報彙整】\n先鋒意見 (${cleanScout}): ${scout.reason}\n軍師意見 (${cleanStrat}): ${strategist.reason}\n\n請綜合以上資訊，做最終判決 (PASS 或 VETO)。`;
 
-            console.log(`📡 正在呼叫判官 (${plan.auditor})...`);
+            console.log(`📡 [${marketData.symbol}] 呼叫判官 (${plan.auditor})...`);
             const auditor = await aiOrchestrator.executeTask('AUDITOR', plan.auditor, pAuditWrapped);
+            
+            await new Promise(r => setTimeout(r, 1000)); // 🛑 強制 1 秒 Cooldown
 
-            console.log(`⚡ 先鋒: ${cleanScout} | 🧠 軍師: ${cleanStrat} | ⚖️ 判官: ${auditor.decision || auditor.verdict}`);
+            console.log(`⚡ [${marketData.symbol}] 先鋒: ${cleanScout} | 🧠 軍師: ${cleanStrat} | ⚖️ 判官: ${auditor.decision || auditor.verdict}`);
 
             const cleanAudit = (auditor.decision || auditor.verdict || '').trim().toUpperCase();
-
             if (cleanAudit === 'REJECT' || cleanAudit === 'VETO' || cleanAudit.includes('VETO')) {
                 return { buy: false, reason: `⚖️ 判官否決: ${auditor.reason}` };
             }
@@ -141,46 +131,10 @@ const consensusService = {
 
             return { buy: false, reason: "判官未給出明確買入指令" };
         });
-    },
-
-    /**
-     * 🔭 老幣巡邏共識 (單一軍師機制)
-     */
-    async runBluechipConsensus(mintAddress, marketData) {
-        return bluechipQueue.add(async () => {
-            console.log(`\n🏛️ [老幣 議事廳] 開始審核: ${marketData.symbol}`);
-            
-            let currentNewsScore = 0;
-            try {
-                const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
-                currentNewsScore = config?.latest_news_score || 0;
-            } catch (e) {
-                console.warn(`⚠️ [老幣 議事廳] 無法獲取大盤災難指數，預設為 0`);
-            }
-
-            const pStrat = await this.getPrompt('bluechip_strategist', { 
-                ...marketData,
-                latest_news_score: currentNewsScore 
-            });
-            
-            const strategist = await aiOrchestrator.executeTask('STRATEGIST_BLUECHIP', 'GEMINI', pStrat);
-            
-            console.log(`🧠 老幣軍師: ${strategist.decision || strategist.verdict} | 理由: ${strategist.reason}`);
-            
-            const cleanDecision = (strategist.decision || strategist.verdict || '').trim().toUpperCase();
-
-            if (cleanDecision.includes('PASS') || cleanDecision.includes('EXECUTE_BUY') || cleanDecision === 'BUY') {
-                return { buy: true, reason: `✅ 安全: ${strategist.reason}` };
-            } else if (cleanDecision.includes('ONHOLD')) {
-                return { buy: false, reason: `⏳ ONHOLD: ${strategist.reason}` }; 
-            } else {
-                return { buy: false, reason: `🚨 攔截: ${strategist.reason}` };
-            }
-        });
     }
 };
 
 module.exports = { 
     consensusService,
-    getPendingMemeCount: () => memeQueue.queue.length
+    getPendingMemeCount: () => consensusQueue.queue.length
 };

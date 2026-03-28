@@ -24,6 +24,8 @@ try {
     console.error("⚠️ [Portfolio] 無法解析 Private Key，實盤餘額將無法同步");
 }
 
+// ... (保留上面嘅 imports 同 wallet 處理) ...
+
 let my_portfolio = {
     mode: 'PAPER',
     cash_sol: 0,
@@ -33,7 +35,12 @@ let my_portfolio = {
     last_sync: null
 };
 
-let globalMaxPositions = 10;
+// 🌟 V8.2 新增：全域保存 Database 設定嘅倉位上限
+let limitsCache = {
+    maxMeme: 2,
+    maxTrending: 3,
+    maxBluechip: 0 // 永久歸零
+};
 
 async function updateSystemStatus(msg) {
     try {
@@ -49,30 +56,26 @@ async function updateSystemStatus(msg) {
 
 async function initPortfolio() {
     try {
-        console.log("🏰 [Portfolio] 正在初始化記憶體並執行變量對齊...");
+        console.log("🏰 [Portfolio] 正在初始化記憶體並執行上帝視角對齊...");
         await updateSystemStatus("🔄 正在初始化記憶體...");
         
         const { data: config, error: configErr } = await supabase.from('system_config').select('*').eq('id', 1).maybeSingle();
         if (configErr) throw configErr;
 
         my_portfolio.mode = config ? (config.trade_mode || 'PAPER') : 'PAPER';
-        globalMaxPositions = config?.max_positions || 8; 
+        
+        // 🌟 V8.2 升級：直接讀取 Dashboard 設定嘅倉位上限 (上帝視角)
+        limitsCache.maxMeme = config?.max_meme_positions || 2;
+        limitsCache.maxTrending = config?.max_trending_positions || 3;
 
         const tableName = my_portfolio.mode === 'PAPER' ? 'active_positions_paper' : 'active_positions_live';
 
-        if (walletPublicKey) {
-            try {
-                const lamports = await connection.getBalance(walletPublicKey);
-                const liveSol = lamports / 1e9;
-                await supabase.from('system_config').update({ live_wallet_balance: liveSol }).eq('id', 1);
-                
-                if (my_portfolio.mode === 'LIVE') {
-                    my_portfolio.cash_sol = liveSol;
-                    my_portfolio.reference_capital = liveSol;
-                }
-            } catch (chainErr) {
-                console.error("⚠️ [Portfolio] 獲取鏈上真實餘額失敗:", chainErr.message);
-            }
+        // ⚠️ V8.2 升級：禁止喺平時巡邏/初始化時 Call getBalance 查真倉！
+        // 如果係 LIVE 模式，直接讀取 DB 上次紀錄嘅 live_wallet_balance
+        if (my_portfolio.mode === 'LIVE') {
+             my_portfolio.cash_sol = config?.live_wallet_balance || 0;
+             my_portfolio.reference_capital = my_portfolio.cash_sol;
+             console.log(`💰 [Portfolio] LIVE 模式：從 DB 讀取上次真倉餘額 (${my_portfolio.cash_sol} SOL)，跳過 RPC 查詢。`);
         }
 
         if (my_portfolio.mode === 'PAPER') {
@@ -94,8 +97,7 @@ async function initPortfolio() {
         my_portfolio.last_sync = new Date();
 
         healthMonitor.setStatus('Portfolio_Cache', '🟢 載入完成');
-        const limits = getPositionLimits();
-        console.log(`📊 [Portfolio] 資金鎖設定完畢。總額度: ${globalMaxPositions} (老幣: ${limits.maxBluechip}, Trending: ${limits.maxTrending}, 新幣: ${limits.maxMeme})`);
+        console.log(`📊 [Portfolio] 上帝視角鎖設定完畢。額度 -> (Meme 敢死隊: ${limitsCache.maxMeme}, Top 100 提款機: ${limitsCache.maxTrending})`);
         
         return my_portfolio;
     } catch (err) {
@@ -105,6 +107,7 @@ async function initPortfolio() {
     }
 }
 
+// ⚠️ V8.2 升級：廢除平時 Sync Live Balance，只允許喺真正交易後被 TradeService 呼叫
 async function syncLiveBalanceToDB() {
     if (walletPublicKey) {
         try {
@@ -114,17 +117,18 @@ async function syncLiveBalanceToDB() {
             if (my_portfolio.mode === 'LIVE') {
                 my_portfolio.cash_sol = liveSol;
             }
-        } catch (err) {}
+            console.log(`🏦 [RPC] 已成功同步最新真倉餘額: ${liveSol} SOL`);
+        } catch (err) {
+            console.error("⚠️ [RPC Error] 同步真倉餘額失敗:", err.message);
+        }
     }
 }
 
 function getPortfolio() { return my_portfolio; }
 
+// 🌟 獲取全域倉位限制
 function getPositionLimits() {
-    const maxBluechip = Math.floor(globalMaxPositions * 0.2); // 10 * 0.2 = 2 (老幣)
-    const maxTrending = Math.floor(globalMaxPositions * 0.6); // 10 * 0.6 = 6 (Top60) 👈 改呢度
-    const maxMeme = globalMaxPositions - maxBluechip - maxTrending; // 10 - 2 - 6 = 2 (新幣)
-    return { maxMeme, maxTrending, maxBluechip };
+    return limitsCache;
 }
 
 function getMemeCount() {
@@ -140,11 +144,10 @@ function getTrendingCount() {
 }
 
 function getBlueChipCount() {
-    return my_portfolio.positions.filter(p => 
-        p.strategy_type && p.strategy_type.includes('BLUECHIP')
-    ).length;
+    return 0; // 老幣已火化
 }
 
+// ... (保留 updateCache 函數) ...
 function updateCache(action, solAmount, positionData = null) {
     if (action === 'BUY') {
         my_portfolio.cash_sol -= solAmount;
@@ -173,7 +176,7 @@ module.exports = {
     getTrendingCount, 
     getBlueChipCount,
     getPositionLimits,
-    canBuyMeme: () => getMemeCount() < getPositionLimits().maxMeme,
-    canBuyTrending: () => getTrendingCount() < getPositionLimits().maxTrending,
-    canBuyBluechip: () => getBlueChipCount() < getPositionLimits().maxBluechip
+    canBuyMeme: () => getMemeCount() < limitsCache.maxMeme,
+    canBuyTrending: () => getTrendingCount() < limitsCache.maxTrending,
+    canBuyBluechip: () => false // 永久禁止買入
 };
