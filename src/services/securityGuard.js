@@ -4,6 +4,11 @@ const { PublicKey } = require('@solana/web3.js');
 const { connection } = require('../config/solana');
 const { supabase } = require('../config/supabase');
 const { healthMonitor } = require('./healthMonitor');
+const configEnv = require('../config/env');
+
+// 🚀 [V8.2] 引入 Redis 快取，拯救 RPC 免受 429 之災
+const Redis = require('ioredis');
+const redis = new Redis(configEnv.cache.redisUrl);
 
 // 🛡️ 偽裝 Header
 const BROWSER_HEADERS = {
@@ -11,11 +16,10 @@ const BROWSER_HEADERS = {
     'Accept': 'application/json'
 };
 
-// ⏳ V8.2 新增：全局 API 節流鎖 (確保 DexScreener 請求最少相隔 1 秒)
+// ⏳ 全局 API 節流鎖
 let lastDexRequestTime = 0;
 
 const securityGuard = {
-    // 🚀 嚴格 Base58 Payload 洗白
     sanitizeAddress(address) {
         if (!address) return null;
         const clean = address.toString().trim().replace(/[\n\r\t\s]/g, '');
@@ -23,11 +27,9 @@ const securityGuard = {
         return clean;
     },
 
-    // 🔪 升級版 GGFilter (Garbage Guard): 攔截垃圾字眼 + 顏文字/火星文
     isGarbageToken(name, symbol) {
         const target = `${name} ${symbol}`.toLowerCase();
         
-        // 1. 傳統垃圾字眼攔截 (Airdrop, Scam, Presale 等)
         const badPatterns = [
             /\.com/i, /\.io/i, /\.org/i, /\.xyz/i, /t\.me\//i,         
             /test\s*token/i, /testnet/i, /presale/i, /airdrop/i,         
@@ -37,44 +39,34 @@ const securityGuard = {
             if (pattern.test(target)) return { isGarbage: true, match: `垃圾字眼: ${pattern.toString()}` };
         }
 
-        // 2. 🛡️ 新增：純符號/無英數代號攔截 (例如 "∴｡･ﾟ")
         const hasStandardChar = /[a-zA-Z0-9]/.test(symbol);
-        if (!hasStandardChar) {
-            return { isGarbage: true, match: '無英數純符號代號' };
-        }
+        if (!hasStandardChar) return { isGarbage: true, match: '無英數純符號代號' };
 
-        // 3. 🛡️ 新增：顏文字與古怪 Unicode 區塊攔截 (防反追蹤偽裝)
         const weirdSymbolRegex = /[\u2000-\u3300\uFE00-\uFEFF\uD83C-\uD83E\uDC00-\uDFFF]/;
         if (weirdSymbolRegex.test(symbol) || weirdSymbolRegex.test(name)) {
             return { isGarbage: true, match: '偵測到顏文字/古怪符號' };
         }
 
-        // 4. 🛡️ 新增：超長代號攔截 (防亂碼)
-        if (symbol.length > 15) {
-             return { isGarbage: true, match: '代號長度異常 (>15字)' };
-        }
+        if (symbol.length > 15) return { isGarbage: true, match: '代號長度異常 (>15字)' };
 
         return { isGarbage: false };
     },
 
-    // 🚀 V8.2 新增：直連 DexScreener (配備自動排隊系統)
     async getProfileFromDexScreener(mint) {
         try {
-            // 🛑 絕對節流防線：強制每槍相隔最少 1000ms
             const now = Date.now();
             const timeSinceLast = now - lastDexRequestTime;
             if (timeSinceLast < 1000) {
                 const waitTime = 1000 - timeSinceLast;
-                console.log(`⏳ [Security Guard] 魚群過於擁擠，觸發 API 排隊等待 ${waitTime}ms...`);
+                console.log(`⏳ [Security Guard] 魚群擁擠，觸發 Dex API 節流等待 ${waitTime}ms...`);
                 await new Promise(r => setTimeout(r, waitTime));
             }
-            lastDexRequestTime = Date.now(); // 更新最後開槍時間
+            lastDexRequestTime = Date.now();
 
             const url = `https://api.dexscreener.com/latest/dex/tokens/${mint}`;
             const res = await axios.get(url, { timeout: 5000, headers: BROWSER_HEADERS });
 
             if (res.data && res.data.pairs) {
-                // 防呆：只攞 Solana 鏈，並按流動性排序
                 const pairs = res.data.pairs.filter(p => p.chainId === 'solana' && p.baseToken.address === mint);
                 if (pairs.length > 0) {
                     pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
@@ -113,17 +105,23 @@ const securityGuard = {
             const cleanMint = this.sanitizeAddress(mintAddress);
             if (!cleanMint) return { isSafe: false, reason: '🛑 無效的 Base58 地址格式' };
 
-            // 🚀 RPC 帳戶驗證防線 (過濾未發射嘅假幣)
-            try {
-                const accountInfo = await connection.getAccountInfo(new PublicKey(cleanMint));
-                if (!accountInfo) {
-                    return { isSafe: false, isPurgatory: true, reason: '⏳ 鏈上查無帳戶 (等待廣播中)' };
+            // 🚀 [V8.2] 第一重快取：帳戶是否存在
+            const accountCacheKey = `SEC_ACC:${cleanMint}`;
+            let isAccountValid = await redis.get(accountCacheKey);
+
+            if (!isAccountValid) {
+                try {
+                    const accountInfo = await connection.getAccountInfo(new PublicKey(cleanMint));
+                    if (!accountInfo) {
+                        return { isSafe: false, isPurgatory: true, reason: '⏳ 鏈上查無帳戶 (等待廣播中)' };
+                    }
+                    // 帳戶存在，記低 24 小時，以後唔使再問 RPC
+                    await redis.set(accountCacheKey, 'VALID', 'EX', 86400); 
+                } catch (rpcErr) {
+                    return { isSafe: false, isPurgatory: true, reason: `⏳ RPC連線異常: ${rpcErr.message}` };
                 }
-            } catch (rpcErr) {
-                return { isSafe: false, isPurgatory: true, reason: `⏳ RPC連線異常: ${rpcErr.message}` };
             }
 
-            // 讀取 AI 參數 (ID 2 = Meme, ID 3 = Trending)
             const targetParamId = poolType === 'TRENDING' ? 3 : 2;
             const { data: params, error: dbErr } = await supabase.from('ai_strategy_params').select('*').eq('id', targetParamId).single();
             if (dbErr) throw new Error(`無法讀取參數 ID ${targetParamId}`);
@@ -134,22 +132,16 @@ const securityGuard = {
                 minRatio: parseFloat(params.min_liq_fdv_ratio || 0.01)
             };
 
-            // 🚀 V8.2: 完美直連！向 DexScreener 獲取最新市場數據 (自帶 1 秒排隊系統)
+            // 活數據：永遠直連 DexScreener 拿取
             let marketData = await this.getProfileFromDexScreener(cleanMint);
+            if (!marketData) return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
 
-            if (!marketData) {
-                return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
-            }
-
-            // 🔪 垃圾名 / 火星文 / 顏文字 攔截
             const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
             if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
 
-            // 盲狙特權 (流動性極低 + 5分量為0)
             const isBlindSnipe = (marketData.liquidity < 1000 && marketData.volume5m === 0);
 
             if (!isBlindSnipe) {
-                // 流動性與 80% 緩刑機制
                 if (marketData.liquidity < limits.minLiq) {
                     if (poolType === 'TRENDING') return { isSafe: false, reason: `📉 流動性未達熱門標準 ($${marketData.liquidity.toFixed(0)} < $${limits.minLiq})` };
                     
@@ -166,9 +158,21 @@ const securityGuard = {
                 if (currentRatio < limits.minRatio) return { isSafe: false, reason: `📉 泡沫極大 (比例 ${(currentRatio * 100).toFixed(2)}%)` };
             }
 
-            // 保留 RugCheck 防線
-            const rugResult = await this.checkRugPull(cleanMint);
-            if (!rugResult.isSafe) return rugResult;
+            // 🚀 [V8.2] 第二重快取：合約權限與 RugPull 檢查
+            const rugCacheKey = `SEC_RUG:${cleanMint}`;
+            const cachedRugResult = await redis.get(rugCacheKey);
+            
+            if (cachedRugResult === 'SAFE') {
+                // 如果之前已經查過係安全，直接 Pass，節省 1-2 次 RPC/API Call！
+                console.log(`🛡️ [Security Cache] 命中快取: ${marketData.symbol} 合約權限已驗證為安全`);
+            } else {
+                // 如果未查過，就認真查一次
+                const rugResult = await this.checkRugPull(cleanMint);
+                if (!rugResult.isSafe) return rugResult; // 唔安全就踢走
+                
+                // 查過係安全嘅話，記低佢 24 小時！
+                await redis.set(rugCacheKey, 'SAFE', 'EX', 86400);
+            }
 
             return {
                 isSafe: true,
@@ -184,12 +188,11 @@ const securityGuard = {
         }
     },
 
-    // 🛡️ 檢查 RugPull 
     async checkRugPull(mintAddress) {
         try {
             const url = `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`;
             const response = await axios.get(url, {
-                timeout: 7000,
+                timeout: 5000, // 縮短 Timeout，防卡死
                 headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
             });
 
@@ -210,11 +213,11 @@ const securityGuard = {
 
             return { isSafe: true };
         } catch (err) {
+            // RugCheck 瓜咗先交畀原生 RPC 備援
             return await this.fallbackNativeCheck(mintAddress);
         }
     },
 
-    // 🛡️ 原生 RPC 權限備援檢查
     async fallbackNativeCheck(mintAddress) {
         try {
             const pubKey = new PublicKey(mintAddress);
