@@ -34,8 +34,11 @@ const trendingJob = {
         try {
             if (!canBuyTrending()) return; 
 
-            const { data: config } = await supabase.from('system_config').select('is_running, trending_trade_amount_sol').eq('id', 1).single();
+            // 🚀 [V8.2] 從 DB 讀取最新的生存門檻分數 (trending_survival_score)
+            const { data: config } = await supabase.from('system_config').select('is_running, trending_trade_amount_sol, trending_survival_score').eq('id', 1).single();
             if (!config || !config.is_running) return;
+
+            const survivalScore = config.trending_survival_score || 60; // 預設 60 分
 
             const { data: poolTokens } = await supabase.from('trending_pool').select('*').order('updated_at', { ascending: true }).limit(20);
             if (!poolTokens || poolTokens.length === 0) return;
@@ -44,7 +47,7 @@ const trendingJob = {
             let latestPrices = {};
             let fetchSuccess = false;
 
-            // 🛡️ 路線 1: GeckoTerminal (專查 Solana 細幣)
+            // 🛡️ 瀑布查價體系 (GeckoTerminal -> JupV3 -> JupV6)
             if (!fetchSuccess && isApiAvailable('geckoTerminal')) {
                 try {
                     const res = await axios.get(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints}`, { timeout: 3000 });
@@ -58,7 +61,6 @@ const trendingJob = {
                 } catch (e) { markApiFailed('geckoTerminal'); }
             }
 
-            // 🛡️ 路線 2: Jupiter V3 專線
             if (!fetchSuccess && isApiAvailable('jupiterV3') && configEnv.external.jupiterApiKey) {
                 try {
                     const jupConfig = { timeout: 3000, headers: { 'x-api-key': configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim() } };
@@ -72,7 +74,6 @@ const trendingJob = {
                 } catch (e) { markApiFailed('jupiterV3'); }
             }
 
-            // 🛡️ 路線 3: Jupiter V6 免費公海
             if (!fetchSuccess && isApiAvailable('jupiterV6')) {
                 try {
                     const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
@@ -94,6 +95,7 @@ const trendingJob = {
                 const mintAddress = targetToken.mint_address;
                 const lastUpdatedMs = new Date(targetToken.updated_at).getTime();
                 
+                // 5 分鐘觀察期
                 if (Date.now() - lastUpdatedMs < 5 * 60 * 1000) continue; 
 
                 console.log(`\n======================================================`);
@@ -117,15 +119,16 @@ const trendingJob = {
                     const buyResult = await executeBuy(mintAddress, secResult.marketData.symbol, 'TRENDING_MOMENTUM', aiDecision.score, aiDecision.reason, config.trending_trade_amount_sol || 0.1);
                     if (buyResult) await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                 } else {
-                    if (aiDecision.score >= 70 || aiDecision.decision === 'ONHOLD' || aiDecision.reason.includes('ONHOLD')) {
-                        console.log(`⏳ [Trending] 潛力仍在 (分數: ${aiDecision.score || 'ONHOLD'})，更新保溫箱...`);
+                    // 🚀 [V8.2] 使用動態分數門檻判斷留底還是淘汰
+                    if (aiDecision.score >= survivalScore || aiDecision.decision === 'ONHOLD' || aiDecision.reason.includes('ONHOLD')) {
+                        console.log(`⏳ [Trending] 潛力仍在 (分數: ${aiDecision.score || 'ONHOLD'} >= ${survivalScore})，更新保溫箱...`);
                         await supabase.from('trending_pool').update({ 
                             last_ai_comment: aiDecision.reason,
                             ai_score: aiDecision.score || 0,
                             updated_at: new Date().toISOString()
                         }).eq('mint_address', mintAddress);
                     } else {
-                        console.log(`🗑️ [Trending] 分數暴跌 (<70)，踢出保溫箱！`);
+                        console.log(`🗑️ [Trending] 分數低於門檻 (${aiDecision.score} < ${survivalScore})，踢出保溫箱！`);
                         await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     }
                 }
