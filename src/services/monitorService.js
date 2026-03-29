@@ -51,12 +51,10 @@ app.use(express.json());
 
 app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.2 系統正常運行中 (0 延遲防禦版)'));
 
-// 🚀 [新增] 強制喚醒 AI 大腦 API 接線
 app.post('/force-evolution', async (req, res) => {
     console.log('🧠 [Admin Command] 收到前端指令：強制喚醒 Master AI 進行進化！');
     try {
         const { retrospectiveJob } = require('../jobs/retrospectiveJob');
-        // 唔用 await，等佢自己喺背景行，即刻覆返 200 OK 畀前端，防止 Timeout
         retrospectiveJob.runEvolutionWithRetry(1).catch(err => console.error("進化失敗:", err));
         res.status(200).json({ success: true, message: '指令已送達，AI 正在運算中' });
     } catch (err) {
@@ -105,7 +103,6 @@ async function refreshPoolStatus() {
 setInterval(refreshPoolStatus, 10000);
 
 const aiReviewCooldowns = new Map(); 
-const nurseryScanCooldown = new Map(); 
 let isAiReviewing = false;
 
 async function toggleHeliusWebhook(enable = true) {
@@ -125,7 +122,7 @@ async function toggleHeliusWebhook(enable = true) {
             await axios.put(`https://api.helius.xyz/v0/webhooks/${WEBHOOK_ID_2}?api-key=${HELIUS_API_KEY_2}`, payload2);
         } catch (err) { console.error('❌ [Webhook 2 Error] Pump.fun 更新失敗'); }
     }
-    healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中...');
+    healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中 (RAM 緩衝)');
     healthMonitor.setStatus('Wallet_Radar', '🔵 由 Alchemy 監控中');
 }
 
@@ -197,10 +194,9 @@ app.post('/webhook/helius', async (req, res) => {
 
             if (newMemeAddress) {
                 detailedStats[statKey].filtered++;
-                if (isNurseryPoolFull) return; 
-                const { data: isInserted } = await supabase.rpc('insert_fish_with_limit', { new_mint_address: newMemeAddress });
-                if (isInserted) detailedStats[statKey].added++; 
-                else { isNurseryPoolFull = true; detailedStats[statKey].dropped++; }
+                // 🚀 [V8.2 終極優化] 直接入 RAM 隊列，完全 0 DB 寫入
+                await redis.zadd('ram_mints_queue', Date.now(), newMemeAddress);
+                detailedStats[statKey].added++; 
             } 
         }
     } catch (err) {}
@@ -225,9 +221,86 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
     }
 }
 
+// 🚀 [新增] RAM 預檢漏斗 (Batch RPC + Socials 攔截)
+let isRamProcessorRunning = false;
+function startRamCacheProcessor() {
+    console.log('🧠 [RAM Cache] 5分鐘記憶體漏斗已啟動 (Batch RPC 預檢模式)');
+    setInterval(async () => {
+        if (isRamProcessorRunning) return;
+        isRamProcessorRunning = true;
+        try {
+            const now = Date.now();
+            // 只取出 5 分鐘前 (300,000ms) 嘅新幣
+            const fiveMinsAgo = now - 300000; 
+            
+            const mints = await redis.zrangebyscore('ram_mints_queue', 0, fiveMinsAgo);
+            
+            if (mints && mints.length > 0) {
+                console.log(`\n📦 [RAM Batch] 提取出 ${mints.length} 隻度過 5 分鐘冷靜期嘅新幣，準備執行批量查冊...`);
+                // 從 RAM Queue 中移除
+                await redis.zremrangebyscore('ram_mints_queue', 0, fiveMinsAgo);
+
+                const { connection } = require('../config/solana');
+                const pubkeys = mints.map(m => {
+                    try { return new PublicKey(m); } catch(e) { return null; }
+                }).filter(Boolean);
+
+                // ⚡ 批量 RPC (每批最多 100 隻，只扣 1 次 Quota)
+                const chunks = [];
+                for(let i = 0; i < pubkeys.length; i += 100) chunks.push(pubkeys.slice(i, i + 100));
+
+                const validMints = [];
+                for (const chunk of chunks) {
+                    try {
+                        const accs = await connection.getMultipleAccountsInfo(chunk);
+                        for (let i = 0; i < accs.length; i++) {
+                            if (accs[i]) {
+                                const mintStr = chunk[i].toString();
+                                validMints.push(mintStr);
+                                // 預先寫入帳戶存活 Cache
+                                await redis.set(`SEC_ACC:${mintStr}`, 'VALID', 'EX', 86400);
+                            }
+                        }
+                    } catch (rpcErr) {
+                        console.error('❌ [RAM Batch] RPC 批量獲取失敗:', rpcErr.message);
+                    }
+                }
+
+                if (validMints.length > 0) {
+                    console.log(`🛡️ [RAM Batch] 鏈上存活: ${validMints.length} 隻，移交 Security Guard 進行三無過濾...`);
+                    const { securityGuard } = require('./securityGuard');
+                    
+                    for (const mint of validMints) {
+                        if (isNurseryPoolFull) break; // Supabase 滿咗就暫停入庫
+                        
+                        const secResult = await securityGuard.checkAll(mint);
+                        
+                        if (secResult.isSafe) {
+                            console.log(`✅ [RAM Batch] ${mint.substring(0, 4)}... 安全通過預檢！放入 Supabase 魚池等待 AI。`);
+                            // 將 Security Guard 嘅詳細結果暫存 Redis，陣間 AI 唔使再查
+                            await redis.set(`SEC_RES:${mint}`, JSON.stringify(secResult), 'EX', 3600);
+                            await supabase.rpc('insert_fish_with_limit', { new_mint_address: mint });
+                        } else {
+                            console.log(`🗑️ [RAM Batch] 淘汰 ${mint.substring(0, 4)}... : ${secResult.reason}`);
+                        }
+                        
+                        // 延遲 500ms 防止 DexScreener/RugCheck 連續開火被 Block
+                        await new Promise(r => setTimeout(r, 500));
+                    }
+                }
+            }
+        } catch (err) {
+            console.error(`❌ [RAM Processor] 異常:`, err.message);
+        } finally {
+            isRamProcessorRunning = false;
+        }
+    }, 10000); // 每 10 秒望一次 RAM
+}
+
+// 🚀 [升級] DB 魚池只負責排隊等 AI (秒速處理)
 let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
-    console.log('🐟 [Nursery Radar] 全 DB 依濾系統已啟動 (404 緩刑防頂死支援)');
+    console.log('🐟 [DB Nursery] AI 逐條審核系統已啟動 (由 min_age_mins 控制)');
     setInterval(async () => {
         if (isNurseryRunning) return;
         const queueLength = getPendingMemeCount();
@@ -238,37 +311,47 @@ function startDatabaseNurseryMonitor() {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
             if (!config || !config.is_running) { isNurseryRunning = false; return; }
 
-            const { data: tokens } = await supabase.from('nursery_pool').select('*').order('created_at', { ascending: true }).limit(20);
+            const { data: tokens } = await supabase.from('nursery_pool').select('*').order('created_at', { ascending: true }).limit(5);
             if (tokens && tokens.length > 0) {
                 for (const token of tokens) {
                     const mintAddress = token.mint_address;
-                    const lastChecked = nurseryScanCooldown.get(mintAddress) || 0;
-                    if (Date.now() - lastChecked < 15000) continue; 
-
-                    nurseryScanCooldown.set(mintAddress, Date.now());
+                    // ageMins 係佢進入 DB (即係過完 5 分鐘冷靜期之後) 嘅時間
                     const ageMins = (Date.now() - new Date(token.created_at).getTime()) / 60000;
 
                     if (ageMins > config.max_age_mins) {
                         await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
                         continue;
                     } 
+                    
                     if (ageMins >= config.min_age_mins) {
-                        const { securityGuard } = require('./securityGuard');
-                        const secResult = await securityGuard.checkAll(mintAddress);
-                        if (secResult.isSafe) {
+                        console.log(`\n======================================================`);
+                        console.log(`🤖 [AI Review] 幣種已達標 (入庫後 ${ageMins.toFixed(1)} 分鐘)，啟動 AI 審批...`);
+                        console.log(`======================================================\n`);
+
+                        // 直接從 RAM 拎返頭先 Security Guard 嘅詳細成績表，0 消耗！
+                        const secResultStr = await redis.get(`SEC_RES:${mintAddress}`);
+                        let secResult;
+                        
+                        if (secResultStr) {
+                            secResult = JSON.parse(secResultStr);
+                        } else {
+                            // 保底：如果 Redis 跌咗，先焗住查多次
+                            const { securityGuard } = require('./securityGuard');
+                            secResult = await securityGuard.checkAll(mintAddress);
+                        }
+                        
+                        if (secResult && secResult.isSafe) {
                             await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
                             await triggerBuyPipeline(mintAddress, secResult, config);
+                            break; 
                         } else {
-                            if (!(secResult.isPurgatory && ageMins < 5)) {
-                                await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
-                            }
+                            await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
                         }
-                        break; 
                     }
                 }
             }
         } catch (err) {} finally { isNurseryRunning = false; }
-    }, 30000); 
+    }, 10000); 
 }
 
 async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) {
@@ -364,7 +447,6 @@ function startPositionMonitor() {
         }
     });
 
-    // 🚁 HTTP 備援雷達 (當 Redis 死機超過 1 分鐘時啟動)
     setInterval(async () => {
         const timeSinceLastRedis = Date.now() - lastRedisUpdateMs;
         const { getPortfolio } = require('./portfolioService');
@@ -385,7 +467,6 @@ function startPositionMonitor() {
                 let fetchedPrices = {};
                 let fetchSuccess = false;
 
-                // 🛡️ 路線 1: GeckoTerminal
                 if (!fetchSuccess && isApiAvailable('geckoTerminal')) {
                     try {
                         const res = await axios.get(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints}`, { timeout: 3000 });
@@ -399,7 +480,6 @@ function startPositionMonitor() {
                     } catch (e) { markApiFailed('geckoTerminal'); }
                 }
 
-                // 🛡️ 路線 2: Jupiter V3
                 if (!fetchSuccess && isApiAvailable('jupiterV3') && configEnv.external.jupiterApiKey) {
                     try {
                         const jupConfig = { timeout: 3000, headers: { 'x-api-key': configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim() } };
@@ -413,7 +493,6 @@ function startPositionMonitor() {
                     } catch (e) { markApiFailed('jupiterV3'); }
                 }
 
-                // 🛡️ 路線 3: Jupiter V6
                 if (!fetchSuccess && isApiAvailable('jupiterV6')) {
                     try {
                         const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
@@ -445,7 +524,6 @@ function startPositionMonitor() {
         }
     }, 10000); 
 
-    // 🐢 Trending 慢速專線
     setInterval(async () => {
         try {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
@@ -461,7 +539,6 @@ function startPositionMonitor() {
             let fetchedPrices = {};
             let fetchSuccess = false;
 
-            // 🛡️ 路線 1: GeckoTerminal
             if (!fetchSuccess && isApiAvailable('geckoTerminal')) {
                 try {
                     const res = await axios.get(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints}`, { timeout: 3000 });
@@ -475,7 +552,6 @@ function startPositionMonitor() {
                 } catch (e) { markApiFailed('geckoTerminal'); }
             }
 
-            // 🛡️ 路線 2: Jupiter V3
             if (!fetchSuccess && isApiAvailable('jupiterV3') && configEnv.external.jupiterApiKey) {
                 try {
                     const jupConfig = { timeout: 3000, headers: { 'x-api-key': configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim() } };
@@ -489,7 +565,6 @@ function startPositionMonitor() {
                 } catch (e) { markApiFailed('jupiterV3'); }
             }
 
-            // 🛡️ 路線 3: Jupiter V6
             if (!fetchSuccess && isApiAvailable('jupiterV6')) {
                 try {
                     const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
@@ -677,6 +752,7 @@ function startMarketMonitor() {
         console.log('🔄 [System] 啟動雙 Webhook 與雙軌防線...');
         await toggleHeliusWebhook(true);
         setTimeout(() => { startPositionMonitor(); }, 2000);
+        setTimeout(() => { startRamCacheProcessor(); }, 3000); // 🚀 啟動 RAM 預檢
         setTimeout(() => { startDatabaseNurseryMonitor(); }, 4000);
         setTimeout(() => { startCommandListener(); }, 6000);
         setTimeout(() => { startOneMinuteMetricsAlert(); }, 8000);
