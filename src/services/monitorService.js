@@ -49,7 +49,7 @@ const cors = require('cors');
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.2 系統正常運行中 (0 延遲防禦版)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.8 系統正常運行中 (終極動態階梯鎖潤版)'));
 
 app.post('/force-evolution', async (req, res) => {
     console.log('🧠 [Admin Command] 收到前端指令：強制喚醒 Master AI 進行進化！');
@@ -194,7 +194,6 @@ app.post('/webhook/helius', async (req, res) => {
 
             if (newMemeAddress) {
                 detailedStats[statKey].filtered++;
-                // 🚀 [V8.2 終極優化] 直接入 RAM 隊列，完全 0 DB 寫入
                 await redis.zadd('ram_mints_queue', Date.now(), newMemeAddress);
                 detailedStats[statKey].added++; 
             } 
@@ -221,7 +220,7 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
     }
 }
 
-// 🚀 [新增] RAM 預檢漏斗 (Batch RPC + Socials 攔截)
+// 🚀 RAM 預檢漏斗 (Batch RPC + Socials 攔截)
 let isRamProcessorRunning = false;
 function startRamCacheProcessor() {
     console.log('🧠 [RAM Cache] 5分鐘記憶體漏斗已啟動 (Batch RPC 預檢模式)');
@@ -230,14 +229,11 @@ function startRamCacheProcessor() {
         isRamProcessorRunning = true;
         try {
             const now = Date.now();
-            // 只取出 5 分鐘前 (300,000ms) 嘅新幣
             const fiveMinsAgo = now - 300000; 
-            
             const mints = await redis.zrangebyscore('ram_mints_queue', 0, fiveMinsAgo);
             
             if (mints && mints.length > 0) {
                 console.log(`\n📦 [RAM Batch] 提取出 ${mints.length} 隻度過 5 分鐘冷靜期嘅新幣，準備執行批量查冊...`);
-                // 從 RAM Queue 中移除
                 await redis.zremrangebyscore('ram_mints_queue', 0, fiveMinsAgo);
 
                 const { connection } = require('../config/solana');
@@ -245,7 +241,6 @@ function startRamCacheProcessor() {
                     try { return new PublicKey(m); } catch(e) { return null; }
                 }).filter(Boolean);
 
-                // ⚡ 批量 RPC (每批最多 100 隻，只扣 1 次 Quota)
                 const chunks = [];
                 for(let i = 0; i < pubkeys.length; i += 100) chunks.push(pubkeys.slice(i, i + 100));
 
@@ -257,7 +252,6 @@ function startRamCacheProcessor() {
                             if (accs[i]) {
                                 const mintStr = chunk[i].toString();
                                 validMints.push(mintStr);
-                                // 預先寫入帳戶存活 Cache
                                 await redis.set(`SEC_ACC:${mintStr}`, 'VALID', 'EX', 86400);
                             }
                         }
@@ -271,20 +265,18 @@ function startRamCacheProcessor() {
                     const { securityGuard } = require('./securityGuard');
                     
                     for (const mint of validMints) {
-                        if (isNurseryPoolFull) break; // Supabase 滿咗就暫停入庫
+                        if (isNurseryPoolFull) break; 
                         
                         const secResult = await securityGuard.checkAll(mint);
                         
                         if (secResult.isSafe) {
                             console.log(`✅ [RAM Batch] ${mint.substring(0, 4)}... 安全通過預檢！放入 Supabase 魚池等待 AI。`);
-                            // 將 Security Guard 嘅詳細結果暫存 Redis，陣間 AI 唔使再查
                             await redis.set(`SEC_RES:${mint}`, JSON.stringify(secResult), 'EX', 3600);
                             await supabase.rpc('insert_fish_with_limit', { new_mint_address: mint });
                         } else {
                             console.log(`🗑️ [RAM Batch] 淘汰 ${mint.substring(0, 4)}... : ${secResult.reason}`);
                         }
                         
-                        // 延遲 500ms 防止 DexScreener/RugCheck 連續開火被 Block
                         await new Promise(r => setTimeout(r, 500));
                     }
                 }
@@ -294,10 +286,10 @@ function startRamCacheProcessor() {
         } finally {
             isRamProcessorRunning = false;
         }
-    }, 10000); // 每 10 秒望一次 RAM
+    }, 10000); 
 }
 
-// 🚀 [升級] DB 魚池只負責排隊等 AI (秒速處理)
+// 🚀 DB 魚池只負責排隊等 AI (秒速處理)
 let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
     console.log('🐟 [DB Nursery] AI 逐條審核系統已啟動 (由 min_age_mins 控制)');
@@ -315,7 +307,6 @@ function startDatabaseNurseryMonitor() {
             if (tokens && tokens.length > 0) {
                 for (const token of tokens) {
                     const mintAddress = token.mint_address;
-                    // ageMins 係佢進入 DB (即係過完 5 分鐘冷靜期之後) 嘅時間
                     const ageMins = (Date.now() - new Date(token.created_at).getTime()) / 60000;
 
                     if (ageMins > config.max_age_mins) {
@@ -328,14 +319,12 @@ function startDatabaseNurseryMonitor() {
                         console.log(`🤖 [AI Review] 幣種已達標 (入庫後 ${ageMins.toFixed(1)} 分鐘)，啟動 AI 審批...`);
                         console.log(`======================================================\n`);
 
-                        // 直接從 RAM 拎返頭先 Security Guard 嘅詳細成績表，0 消耗！
                         const secResultStr = await redis.get(`SEC_RES:${mintAddress}`);
                         let secResult;
                         
                         if (secResultStr) {
                             secResult = JSON.parse(secResultStr);
                         } else {
-                            // 保底：如果 Redis 跌咗，先焗住查多次
                             const { securityGuard } = require('./securityGuard');
                             secResult = await securityGuard.checkAll(mintAddress);
                         }
@@ -354,6 +343,9 @@ function startDatabaseNurseryMonitor() {
     }, 10000); 
 }
 
+// ========================================================
+// 🎯 核心：0 延遲實時盈虧監控與極速平倉 (V8.8 雙軌階梯版)
+// ========================================================
 async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) {
     if (!currentPriceSol || currentPriceSol <= 0) return;
     
@@ -389,35 +381,112 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
     let action = 'HOLD'; let reason = ''; let sellFraction = 1.0; 
     
     const isMeme = pos.strategy_type.includes('MEME');
-    const flashCrashThr = isMeme ? -10 : -7;       
-    const cliffDropThr = isMeme ? -40 : -20;       
-    const trailingProfitThr = isMeme ? 50 : 20;    
-    const trailingDrawdownThr = isMeme ? -30 : -12; 
-    const lockPrincipalThr = isMeme ? 95 : 40;     
+    let flashCrashThr = isMeme ? -10 : -7;       
+    let cliffDropThr = isMeme ? -40 : -20;       
+    const takeCapitalThr = isMeme ? 100 : 50; 
 
-    if (dropFrom1MinHigh <= flashCrashThr) {
-        action = 'SELL'; reason = `🚨 觸發瀑布防線：1 分鐘內極速插水 ${dropFrom1MinHigh.toFixed(2)}%`;
-    } else if (pnlPct <= STOP_LOSS_PCT) {
-        action = 'SELL'; reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
-    } else if (drawdownFromHigh <= cliffDropThr) {
-        action = 'SELL'; reason = `🚨 偵測到斷崖式崩盤 (回撤 ${drawdownFromHigh.toFixed(2)}%)`;
-    } else if (highestPnlPct >= trailingProfitThr && drawdownFromHigh <= trailingDrawdownThr) {
-        action = 'SELL'; reason = `💰 觸發統一移動止盈 (曾賺 +${highestPnlPct.toFixed(2)}%，現回撤 ${drawdownFromHigh.toFixed(2)}%)`;
-    } else if (!isHalfSold && highestPnlPct >= lockPrincipalThr) { 
-        action = 'SELL'; sellFraction = 0.5; reason = `🚀 觸發利潤保護 (歷史最高: +${highestPnlPct.toFixed(2)}%)，賣 50% 鎖定本金`;
+    // 🚀 [V8.8 終極雙軌升級] Meme 與 Trending 專屬的 Absolute PnL 動態鎖潤階梯
+    let trailingTriggered = false;
+    let trailingReason = '';
+    const pnlDropPoints = highestPnlPct - pnlPct; // 計算由歷史高位回落咗幾多個「百分點」
+
+    if (isMeme) {
+        // 🐶 Meme 幣：高風險、高爆發，容忍極端洗盤
+        if (highestPnlPct >= 300) {
+            flashCrashThr = -25;
+            cliffDropThr = -60;
+            // 300% 以上，容許跌 100 個 PnL 點 (真實跌幅容忍約 25%)
+            if (pnlDropPoints >= 100) { trailingTriggered = true; trailingReason = `最高 +${highestPnlPct.toFixed(0)}%，回落 100 個利潤點鎖潤`; }
+        } else if (highestPnlPct >= 200) {
+            flashCrashThr = -20;
+            cliffDropThr = -50;
+            // 200% 以上，容許跌 70 個 PnL 點 (真實跌幅容忍約 23.3%)
+            if (pnlDropPoints >= 70) { trailingTriggered = true; trailingReason = `最高 +${highestPnlPct.toFixed(0)}%，回落 70 個利潤點鎖潤`; }
+        } else if (highestPnlPct >= 150) {
+            flashCrashThr = -15;
+            cliffDropThr = -40;
+            // 150% 以上，容許跌 50 個 PnL 點 (真實跌幅容忍約 20%)
+            if (pnlDropPoints >= 50) { trailingTriggered = true; trailingReason = `最高 +${highestPnlPct.toFixed(0)}%，回落 50 個利潤點鎖潤`; }
+        } else if (highestPnlPct >= 100) {
+            flashCrashThr = -12;
+            cliffDropThr = -35;
+            // 100% 以上 (剛出本)，容許跌 40 個 PnL 點 (真實跌幅容忍約 20%)
+            if (pnlDropPoints >= 40) { trailingTriggered = true; trailingReason = `最高 +${highestPnlPct.toFixed(0)}%，回落 40 個利潤點鎖潤`; }
+        } else if (highestPnlPct >= 50) {
+            // 未翻倍前，用傳統真實回撤比例 (-30%) 保護
+            if (drawdownFromHigh <= -30) { trailingTriggered = true; trailingReason = `未翻倍前觸發追蹤止盈 (最高 +${highestPnlPct.toFixed(0)}%，現價真實回撤達 30%)`; }
+        }
+    } else {
+        // 🔥 Trending / 藍籌幣：高市值、穩健拉升，收緊保護網
+        if (highestPnlPct >= 150) {
+            flashCrashThr = -15;
+            cliffDropThr = -40;
+            // 150% 已經係超級大牛市，容許跌 40 個 PnL 點 (即係保底食 +110%)
+            if (pnlDropPoints >= 40) { trailingTriggered = true; trailingReason = `熱門幣最高 +${highestPnlPct.toFixed(0)}%，回落 40 個利潤點鎖潤`; }
+        } else if (highestPnlPct >= 100) {
+            flashCrashThr = -12;
+            cliffDropThr = -30;
+            // 100% 以上，容許跌 30 個 PnL 點 (保底食 +70%)
+            if (pnlDropPoints >= 30) { trailingTriggered = true; trailingReason = `熱門幣最高 +${highestPnlPct.toFixed(0)}%，回落 30 個利潤點鎖潤`; }
+        } else if (highestPnlPct >= 80) {
+            flashCrashThr = -10;
+            cliffDropThr = -25;
+            // 80% 以上，容許跌 25 個 PnL 點 (保底食 +55%)
+            if (pnlDropPoints >= 25) { trailingTriggered = true; trailingReason = `熱門幣最高 +${highestPnlPct.toFixed(0)}%，回落 25 個利潤點鎖潤`; }
+        } else if (highestPnlPct >= 50) {
+            flashCrashThr = -8;
+            cliffDropThr = -25;
+            // 50% 以上 (剛出本)，容許跌 20 個 PnL 點 (保底食 +30%)
+            if (pnlDropPoints >= 20) { trailingTriggered = true; trailingReason = `熱門幣最高 +${highestPnlPct.toFixed(0)}%，回落 20 個利潤點鎖潤`; }
+        } else if (highestPnlPct >= 20) {
+            // 熱門幣未夠 50% 出本前，只要升過 +20%，回撤 -12% 就走人保平安
+            if (drawdownFromHigh <= -12) { trailingTriggered = true; trailingReason = `未出本前觸發追蹤止盈 (最高 +${highestPnlPct.toFixed(0)}%，現價真實回撤達 12%)`; }
+        }
+    }
+
+    // 🏆 優先度 1：無情硬止盈 (Meme翻倍出本 / 熱門幣+50%出本) - 絕對優先！
+    if (!isHalfSold && pnlPct >= takeCapitalThr) {
+        action = 'SELL'; 
+        sellFraction = 0.5; 
+        reason = `🎯 觸發硬止盈 (抽回本金)：利潤達 +${pnlPct.toFixed(2)}%，賣出 50% 鎖定本金，實現零風險持倉！`;
+    } 
+    // 🛡️ 優先度 2：極速瀑布防線 (1分鐘內暴跌，現已支援高位動態放寬)
+    else if (dropFrom1MinHigh <= flashCrashThr) {
+        action = 'SELL'; 
+        reason = `🚨 觸發瀑布防線：1 分鐘內極速插水 ${dropFrom1MinHigh.toFixed(2)}% (當前容忍度: ${flashCrashThr}%)`;
+    } 
+    // 🛡️ 優先度 3：物理硬止損 (保護底線，跌穿必斬，移除 !isHalfSold 確保歸零前走人)
+    else if (pnlPct <= STOP_LOSS_PCT) {
+        action = 'SELL'; 
+        reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
+    } 
+    // 🛡️ 優先度 4：大佬專屬動態鎖潤網 (PnL 點數階梯)
+    else if (trailingTriggered) {
+        action = 'SELL'; 
+        reason = `💰 ${trailingReason}`;
+    }
+    // 🛡️ 優先度 5：斷崖式崩盤 (高位回撤過大)
+    else if (drawdownFromHigh <= cliffDropThr) {
+        action = 'SELL'; 
+        reason = `🚨 偵測到斷崖式崩盤 (高位回撤 ${drawdownFromHigh.toFixed(2)}%，當前容忍度: ${cliffDropThr}%)`;
     }
 
     if (action === 'SELL') {
         sellingLocks.add(pos.mint_address);
         priceHistory1Min.delete(pos.mint_address);
         runSellPipeline(pos, currentPriceSol, reason, sellFraction).then(sellResult => {
-            if (sellResult && sellFraction === 0.5) sendTelegramAlert(`🌟 <b>分批鎖定利潤</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定利潤！`);
+            if (sellResult && sellFraction === 0.5) {
+                const telegramMsg = reason.includes('抽回本金') 
+                    ? `🎯 <b>零風險持倉達成！</b>\n🪙 代幣: $${pos.token_symbol}\n🔥 利潤達標，已成功賣出 50% 抽回全數本金！剩下的讓利潤奔跑！`
+                    : `🌟 <b>分批鎖定利潤</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定利潤！`;
+                sendTelegramAlert(telegramMsg);
+            }
         }).catch(err => console.error(`❌ [Zero Latency Sell Error]`, err.message)).finally(() => sellingLocks.delete(pos.mint_address));
     }
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] V8.2 雙軌秒斬防線 + 瀑布備援查價系統已啟動...');
+    console.log('👁️ [Radar] V8.8 雙軌秒斬防線 + 瀑布備援查價系統已啟動...');
     let cachedSolPriceUsd = 150; 
     const { getSolPriceInHKD } = require('./priceService');
     
@@ -752,7 +821,7 @@ function startMarketMonitor() {
         console.log('🔄 [System] 啟動雙 Webhook 與雙軌防線...');
         await toggleHeliusWebhook(true);
         setTimeout(() => { startPositionMonitor(); }, 2000);
-        setTimeout(() => { startRamCacheProcessor(); }, 3000); // 🚀 啟動 RAM 預檢
+        setTimeout(() => { startRamCacheProcessor(); }, 3000); 
         setTimeout(() => { startDatabaseNurseryMonitor(); }, 4000);
         setTimeout(() => { startCommandListener(); }, 6000);
         setTimeout(() => { startOneMinuteMetricsAlert(); }, 8000);
