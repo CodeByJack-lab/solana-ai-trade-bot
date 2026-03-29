@@ -6,7 +6,7 @@ const { healthMonitor } = require('../services/healthMonitor');
 const { aiOrchestrator } = require('../services/aiOrchestrator');
 const { emailService } = require('../services/emailService'); 
 const configEnv = require('../config/env');
-const { promptManager } = require('../services/promptManager'); // 👈 [V8.2] 引入 RAM 劇本緩存
+const { promptManager } = require('../services/promptManager'); 
 
 const retrospectiveJob = {
     async runEvolutionWithRetry(attempt = 1) {
@@ -72,17 +72,17 @@ const retrospectiveJob = {
             }
 
             const { data: lastAudit } = await supabase.from('daily_audit_reports').select('*').order('created_at', { ascending: false }).limit(1).single();
-            let lastAuditText = "無歷史紀錄 (這是你第一次執行進化)。";
+            let lastAuditText = "No historical records (First execution).";
             
             if (lastAudit) {
-                lastAuditText = `【上次你給出的敗因分析】: ${lastAudit.analysis_content}\n`;
+                lastAuditText = `[Your Previous Analysis]: ${lastAudit.analysis_content}\n`;
                 if (lastAudit.param_changes && lastAudit.param_changes.status === 'VETOED') {
-                    lastAuditText += `\n⚠️ 【嚴重警告：上次你提出的進化提案被「獨立風控董事會」強力否決！】\n`;
-                    lastAuditText += `【被否決的詳細原因】: ${JSON.stringify(lastAudit.prompt_changes)}\n`;
-                    lastAuditText += `(💡 核心指令：請仔細閱讀上述否決原因！你上次的提案過於危險或充滿邏輯漏洞，本次提案絕對不能再犯同樣的錯誤！)\n`;
+                    lastAuditText += `\n⚠️ [CRITICAL WARNING: Your last proposal was firmly VETOED by the Independent Risk Board!]\n`;
+                    lastAuditText += `[Detailed Rejection Reasons]: ${JSON.stringify(lastAudit.prompt_changes)}\n`;
+                    lastAuditText += `(💡 Core Directive: Read the rejection reasons carefully! Do NOT repeat the same logical flaws or dangerous parameters in this proposal!)\n`;
                 } else {
-                    lastAuditText += `【上次你修改的參數】: ${JSON.stringify(lastAudit.param_changes)}\n`;
-                    lastAuditText += `【上次你修改的Prompt紀錄】: ${JSON.stringify(lastAudit.prompt_changes)}\n`;
+                    lastAuditText += `[Your Previous Parameter Tweaks]: ${JSON.stringify(lastAudit.param_changes)}\n`;
+                    lastAuditText += `[Your Previous Prompt Tweaks]: ${JSON.stringify(lastAudit.prompt_changes)}\n`;
                 }
             }
 
@@ -96,11 +96,12 @@ const retrospectiveJob = {
             const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
             const { data: masterPrompt } = await supabase.from('master_auditor_prompts').select('content').eq('id', 1).single();
 
+            // 🚀 英文 Key 替換，迎合 Master AI 英文大腦
             const tradeDataToAI = hasTrades ? {
-                "最差3單_虧損教訓": badTrades.map(t => ({ symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type })),
-                "最佳3單_成功經驗": bestTrades.map(t => ({ symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type }))
+                "worst_3_trades_lessons": badTrades.map(t => ({ symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type })),
+                "best_3_trades_successes": bestTrades.map(t => ({ symbol: t.token_symbol, pnl: t.realized_pnl_pct, reason: t.ai_factcheck_result, strategy: t.strategy_type }))
             } : {
-                "系統狀態": "過去 12 小時無任何有效交易。系統處於空倉觀望狀態。"
+                "system_status": "No valid trades in the past 12 hours. System is currently holding cash and observing."
             };
 
             let promptText = masterPrompt.content
@@ -108,29 +109,28 @@ const retrospectiveJob = {
                 .replace('{{loss_trades_data}}', JSON.stringify(tradeDataToAI, null, 2))
                 .replace('{{current_disaster_score}}', config?.latest_news_score || 0);
                 
-            promptText += `\n\n【重要系統設定說明】\n系統目前有三套獨立參數 (所有部門共用同一組欄位名，你可以自由為各部門調整)：\n`;
-            promptText += `ID 1 (老幣/BLUECHIP): min_liquidity=${param1?.min_liquidity}, min_vol_5m=${param1?.min_vol_5m}, max_rsi=${param1?.max_rsi}, min_drop_pct=${param1?.min_drop_pct}, min_vol_24h=${param1?.min_vol_24h}\n`;
-            promptText += `ID 2 (新幣/MEME盲狙): min_liquidity=${param2?.min_liquidity}, min_vol_5m=${param2?.min_vol_5m}, max_rsi=${param2?.max_rsi}, min_drop_pct=${param2?.min_drop_pct}, min_vol_24h=${param2?.min_vol_24h}\n`;
-            promptText += `ID 3 (熱門榜/TRENDING): min_liquidity=${param3?.min_liquidity}, min_vol_5m=${param3?.min_vol_5m}, max_rsi=${param3?.max_rsi}, min_drop_pct=${param3?.min_drop_pct}, min_vol_24h=${param3?.min_vol_24h}\n`;
-            promptText += `\n【資金配置說明 (參考用)】\nMeme幣單筆: ${config?.trade_amount_sol} SOL | 老幣波段單筆: ${config?.bluechip_trade_amount_sol} SOL | Top50追擊單筆: ${config?.trending_trade_amount_sol} SOL\n`;
+            promptText += `\n\n[Crucial System Configuration Context]\nThe system operates with 3 independent parameter sets (all share the same column names, adjust independently):\n`;
+            promptText += `ID 1 (BLUECHIP): min_liquidity=${param1?.min_liquidity}, min_vol_5m=${param1?.min_vol_5m}, max_rsi=${param1?.max_rsi}, min_drop_pct=${param1?.min_drop_pct}, min_vol_24h=${param1?.min_vol_24h}\n`;
+            promptText += `ID 2 (MEME_SNIPE): min_liquidity=${param2?.min_liquidity}, min_vol_5m=${param2?.min_vol_5m}, max_rsi=${param2?.max_rsi}, min_drop_pct=${param2?.min_drop_pct}, min_vol_24h=${param2?.min_vol_24h}\n`;
+            promptText += `ID 3 (TRENDING): min_liquidity=${param3?.min_liquidity}, min_vol_5m=${param3?.min_vol_5m}, max_rsi=${param3?.max_rsi}, min_drop_pct=${param3?.min_drop_pct}, min_vol_24h=${param3?.min_vol_24h}\n`;
+            promptText += `\n[Capital Allocation (For context only)]\nMeme: ${config?.trade_amount_sol} SOL | Bluechip: ${config?.bluechip_trade_amount_sol} SOL | Trending: ${config?.trending_trade_amount_sol} SOL\n`;
             
-            promptText += `\n【輸出要求升級】\n你的 \`recommended_params\` 必須包含 \`bluechip\`, \`meme\`, \`trending\` 三個子物件，例如：\n`;
-            promptText += `"recommended_params": { "bluechip": { "min_liquidity": 20000, "max_rsi": 40 }, "meme": { "min_liquidity": 6000 }, "trending": { "min_liquidity": 40000 } }`;
+            promptText += `\n[Strict Output Formatting Upgrade]\nYour \`recommended_params\` object MUST contain \`bluechip\`, \`meme\`, and \`trending\` sub-objects. Example:\n`;
+            promptText += `"recommended_params": { "bluechip": { "min_liquidity": 20000, "max_rsi": 40 }, "meme": { "min_liquidity": 10000 }, "trending": { "min_liquidity": 30000 } }`;
 
             if (!hasTrades) {
-                promptText += `\n\n【特別狀況指示】\n過去 12 小時系統完全沒有觸發任何交易。這可能是因為大盤災難指數過高觸發了防禦機制，或者目前的參數門檻過於嚴格。\n請簡單分析當前的宏觀大盤氣氛與現有參數設置，評估目前的「空倉策略」是否合理。你可以選擇維持現狀，或者稍微微調參數以增加出手機會。`;
+                promptText += `\n\n[Special Situational Directive]\nZero trades occurred in the last 12 hours. This might be due to a high disaster score triggering defensive protocols, or parameters being too strict.\nBriefly analyze current macro sentiment vs. existing parameters. Decide if the "empty position" strategy is sound. You may maintain the status quo or slightly loosen parameters to allow sniper entries.`;
             }
 
-            // 🚀 [V8.2] 移除資料庫讀取，直接從 RAM 提取當前運作中的 Prompt 畀 Master AI 參考
-            let contextStr = "\n\n【當前系統使用的 AI 劇本 (僅提供有包含該策略好壞單的部門供你修改)】\n";
+            let contextStr = "\n\n[Current Active AI Prompts (Provided only for departments with related trades in this review)]\n";
             
             if (!hasTrades || hasMemeTrade) {
                 const overseer = promptManager.cache.get('reviewer_overseer');
-                if (overseer) contextStr += `\n目標ID: reviewer_overseer (Meme 監軍)\n內容: ${overseer}\n`;
+                if (overseer) contextStr += `\nTarget ID: reviewer_overseer (Meme Swing Overseer)\nContent: ${overseer}\n`;
             }
             if (!hasTrades || hasTrendingTrade) {
                 const trendingOverseer = promptManager.cache.get('reviewer_trending');
-                if (trendingOverseer) contextStr += `\n目標ID: reviewer_trending (熱門波段監軍)\n內容: ${trendingOverseer}\n`;
+                if (trendingOverseer) contextStr += `\nTarget ID: reviewer_trending (Trending Swing Overseer)\nContent: ${trendingOverseer}\n`;
             }
             promptText += contextStr;
 
@@ -148,15 +148,16 @@ const retrospectiveJob = {
             if (report.target_prompt_id && report.new_prompt_content && report.target_prompt_id !== "null") {
                 console.log(`⚖️ [Board of Directors] Master AI 提出修改 ${report.target_prompt_id}，正在交由 Groq 董事會審批...`);
                 
-                const auditorPrompt = `你是量化基金的「獨立風控董事會」。首席 AI 剛剛針對近期的系統表現，提出了一份升級提案。
-【首席 AI 的分析】: ${report.analysis}
-【它企圖修改的 Prompt ID】: ${report.target_prompt_id}
-【它寫出的新 Prompt 內容】: ${report.new_prompt_content}
+                // 🚀 [V8.4] 董事會 Prompt 全英文機構級重寫，防止 Groq 降智
+                const auditorPrompt = `You are the "Independent Risk Board" of a quantitative hedge fund. The Chief AI has proposed a system upgrade based on recent performance.
+[Chief AI's Analysis]: ${report.analysis}
+[Target Prompt ID to modify]: ${report.target_prompt_id}
+[Proposed New Prompt Content]: ${report.new_prompt_content}
 
-【你的任務】審查這個新 Prompt 是否安全。
-1. 如果它移除止損邏輯、鼓勵盲目重倉、或出現邏輯矛盾，請果斷回覆 VETO。
-2. 如果邏輯合理、防禦性足夠、且對症下藥，請回覆 PASS。
-請只回傳 JSON: {"decision": "PASS" 或 "VETO", "reason": "50字內的審查意見"}`;
+[Your Task] Audit this new prompt for safety and logic.
+1. If it removes stop-loss logic, encourages blind all-ins, or introduces logical contradictions/hallucinations, firmly reply VETO.
+2. If the logic is sound, maintains defensive protocols, and addresses the root cause of recent issues, reply PASS.
+[Output] Strict JSON: {"decision": "PASS" | "VETO", "reason": "<Under 50 words explaining your audit verdict>"}. CRUCIAL: Output the "reason" value strictly in Traditional Chinese (Cantonese tone).`;
 
                 try {
                     const boardDecision = await aiOrchestrator.executeTask('BOARD_OF_DIRECTORS', 'GROQ', auditorPrompt);
