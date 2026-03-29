@@ -56,7 +56,8 @@ const config = {
     // 5. 警報與通知 (Telegram)
     telegram: {
         mainBotToken: getEnv('TELEGRAM_BOT_TOKEN'),
-        adminBotToken: getEnv('TELEGRAM_ADMIN_BOT_TOKEN') || process.env.TELEGRAM_BOT_TOKEN,
+        // 🚀 修正: 將 required 設為 false，等後面嘅 fallback 真正生效！
+        adminBotToken: getEnv('TELEGRAM_ADMIN_BOT_TOKEN', false) || getEnv('TELEGRAM_BOT_TOKEN'),
         chatId: getEnv('TELEGRAM_CHAT_ID'),
         channelId: getEnv('TELEGRAM_CHANNEL_ID'),
     },
