@@ -162,77 +162,88 @@ async function processTelegramCallback(callbackQuery) {
 
     if (!data.startsWith('APPROVE_') && !data.startsWith('REJECT_')) return;
 
-    const action = data.split('_')[0]; // 'APPROVE' or 'REJECT'
+    const action = data.split('_')[0]; 
     const proposalId = data.replace(`${action}_`, '');
 
     try {
-        // 1. 從 Supabase 讀取提案
         const { data: proposal, error } = await supabase.from('ai_proposals').select('*').eq('id', proposalId).single();
         
         if (error || !proposal) {
-            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "⚠️ 找不到該提案，可能已被處理或過期。" });
+            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "⚠️ 找不到該提案。" });
             return;
         }
 
         if (proposal.status !== 'PENDING') {
-            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: `⚠️ 該提案已被處理過 (狀態: ${proposal.status})。` });
+            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: `⚠️ 提案狀態為 ${proposal.status}，無法重複處理。` });
             return;
         }
 
-        // 2. 執行你的決定
         if (action === 'REJECT') {
             await supabase.from('ai_proposals').update({ status: 'REJECTED' }).eq('id', proposalId);
-            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "🗑️ <b>提案已否決。</b> 系統將維持現有設定。", parse_mode: 'HTML' });
+            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "🗑️ <b>提案已否決。</b>", parse_mode: 'HTML' });
         } 
         else if (action === 'APPROVE') {
-            const changes = proposal.proposed_changes;
+            // 🚀 重點：如果 proposed_changes 係 String，要先 parse 做 JSON
+            const changes = typeof proposal.proposed_changes === 'string' ? JSON.parse(proposal.proposed_changes) : proposal.proposed_changes;
             let successMsg = "✅ <b>提案已批准並套用！</b>\n";
 
-            // 如果係 Master AI 提案
             if (proposal.proposal_type === 'MASTER_AI') {
+                // 1. 更新 Prompt
                 if (changes.target_prompt_id && changes.new_prompt_content) {
                     await supabase.from('bot_prompts').update({ content: changes.new_prompt_content, updated_at: new Date() }).eq('prompt_id', changes.target_prompt_id);
                     successMsg += `\n🧠 劇本 [${changes.target_prompt_id}] 已更新。`;
                 }
                 
+                // 2. 更新入場參數 (全能解析版)
                 if (changes.recommended_params) {
-                    const parseUpdates = (params) => {
+                    const parseAllFields = (params) => {
                         const updates = {};
                         if (params.min_liquidity !== undefined) updates.min_liquidity = Number(params.min_liquidity);
                         if (params.min_vol_5m !== undefined) updates.min_vol_5m = Number(params.min_vol_5m);
                         if (params.min_drop_pct !== undefined) updates.min_drop_pct = Number(params.min_drop_pct);
+                        if (params.stop_loss_pct !== undefined) updates.stop_loss_pct = Number(params.stop_loss_pct);
+                        if (params.min_liq_fdv_ratio !== undefined) updates.min_liq_fdv_ratio = Number(params.min_liq_fdv_ratio);
+                        if (params.trailing_pullback !== undefined) updates.trailing_pullback = Number(params.trailing_pullback);
+                        if (params.trailing_tp_trigger !== undefined) updates.trailing_tp_trigger = Number(params.trailing_tp_trigger);
                         return updates;
                     };
 
                     if (changes.recommended_params.meme) {
-                        const memeUpdates = parseUpdates(changes.recommended_params.meme);
-                        if (Object.keys(memeUpdates).length > 0) await supabase.from('ai_strategy_params').update(memeUpdates).eq('id', 2);
+                        const memeUpdates = parseAllFields(changes.recommended_params.meme);
+                        if (Object.keys(memeUpdates).length > 0) {
+                            const { error: err2 } = await supabase.from('ai_strategy_params').update(memeUpdates).eq('id', 2);
+                            if (err2) console.error("Update Meme Params Error:", err2);
+                        }
                     }
                     if (changes.recommended_params.trending) {
-                        const trendUpdates = parseUpdates(changes.recommended_params.trending);
-                        if (Object.keys(trendUpdates).length > 0) await supabase.from('ai_strategy_params').update(trendUpdates).eq('id', 3);
+                        const trendUpdates = parseAllFields(changes.recommended_params.trending);
+                        if (Object.keys(trendUpdates).length > 0) {
+                            const { error: err3 } = await supabase.from('ai_strategy_params').update(trendUpdates).eq('id', 3);
+                            if (err3) console.error("Update Trending Params Error:", err3);
+                        }
                     }
-                    successMsg += `\n⚙️ 入場策略參數已更新。`;
+                    successMsg += `\n⚙️ 入場及風險參數已同步更新。`;
                 }
             }
 
-            // 如果係回測引擎改 出場設定 (Phase 3 用)
-            if (proposal.proposal_type === 'BACKTEST' && changes.new_params) {
-                await supabase.from('system_config').update(changes.new_params).eq('id', 1);
-                successMsg += `\n🛡️ 止損與動態止盈參數已更新。`;
+            if (proposal.proposal_type === 'BACKTEST') {
+                if (changes.meme_params) await supabase.from('ai_strategy_params').update(changes.meme_params).eq('id', 2);
+                if (changes.trending_params) await supabase.from('ai_strategy_params').update(changes.trending_params).eq('id', 3);
+                successMsg += `\n🛡️ 每週回測最佳化參數已套用。`;
             }
 
             await supabase.from('ai_proposals').update({ status: 'APPROVED' }).eq('id', proposalId);
             await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: successMsg, parse_mode: 'HTML' });
         }
 
-        // 3. 移除原本 Message 上的按鈕
+        // 移除按鈕
         await axios.post(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
             chat_id: chat, message_id: messageId, reply_markup: { inline_keyboard: [] } 
         });
 
     } catch (err) {
         console.error("❌ [Telegram Callback Error]:", err.message);
+        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: `❌ 處理出錯: ${err.message}` });
     }
 }
 
