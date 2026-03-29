@@ -1,13 +1,14 @@
 // src/config/solana.js
-const { Connection } = require('@solana/web3.js');
-const configEnv = require('./env'); // 👈 引入中央彈藥庫
+const { Connection, PublicKey, Keypair } = require('@solana/web3.js'); // 👈 補返 PublicKey, Keypair
+const configEnv = require('./env');
 
 // ==========================================
 // 🚀 Tier 1 & 2: 用戶專屬 VIP 節點
 // ==========================================
-const alchemyUrl = configEnv.rpc.alchemy.url;
-const heliusUrl = configEnv.rpc.helius1.url;
-const heliusUrl2 = configEnv.rpc.helius2.url; 
+// 確保 env 變數路徑正確，如果 alchemy 無分層，可能係 configEnv.rpc.alchemyApiKey
+const alchemyUrl = configEnv.rpc.alchemy?.url || `https://solana-mainnet.g.alchemy.com/v2/${configEnv.rpc.alchemyApiKey}`;
+const heliusUrl = configEnv.rpc.helius1?.url || `https://mainnet.helius-rpc.com/?api-key=${configEnv.rpc.helius1?.apiKey}`;
+const heliusUrl2 = configEnv.rpc.helius2?.url || `https://mainnet.helius-rpc.com/?api-key=${configEnv.rpc.helius2?.apiKey}`;
 
 // ==========================================
 // 🌍 Tier 3: 終極免費公共節點池 (無需 API Key)
@@ -19,7 +20,7 @@ const PUBLIC_RPCS = [
 ];
 
 // 🚀 智能分流邏輯 (Load Balancing)
-const vipRpcs = [alchemyUrl, heliusUrl, heliusUrl2].filter(Boolean);
+const vipRpcs = [alchemyUrl, heliusUrl, heliusUrl2].filter(url => url && !url.includes('undefined'));
 const availableRpcs = vipRpcs.length > 0 ? vipRpcs : PUBLIC_RPCS;
 
 const primaryIndex = Math.floor(Math.random() * availableRpcs.length);
@@ -32,10 +33,24 @@ const publicIndex = Math.floor(Math.random() * PUBLIC_RPCS.length);
 const selectedPublicUrl = PUBLIC_RPCS[publicIndex];
 
 console.log(`\n🔌 [System] 初始化 Solana 多核連線 (具備極速超時切換與公共池備援)...`);
-console.log(`🎯 [RPC 主力] ${selectedPrimaryUrl.replace(/\?api-key=.*/, '?api-key=***')}`);
-console.log(`🛡️ [RPC 備援] ${selectedFallbackUrl.replace(/\?api-key=.*/, '?api-key=***')}`);
+console.log(`🎯 [RPC 主力] ${selectedPrimaryUrl.replace(/\?api-key=[^&]*/, '?api-key=***').replace(/\/v2\/[^/]*/, '/v2/***')}`);
+console.log(`🛡️ [RPC 備援] ${selectedFallbackUrl.replace(/\?api-key=[^&]*/, '?api-key=***').replace(/\/v2\/[^/]*/, '/v2/***')}`);
 
-const connectionConfig = { commitment: 'confirmed', maxRetries: 0 };
+// ⚡ 核心殺招：Fetch 攔截器 (防止 web3.js 儍等 500ms)
+async function smartFetch(url, options) {
+    const response = await fetch(url, options);
+    if (response.status === 429) {
+        // 秒速 Throw Error，直接掟畀下面個 Proxy Catch，強制瞬間換線！
+        throw new Error("HTTP_429_TOO_MANY_REQUESTS");
+    }
+    return response;
+}
+
+const connectionConfig = { 
+    commitment: 'confirmed', 
+    maxRetries: 0, 
+    fetch: smartFetch // 👈 注入攔截器
+};
 
 const primaryConnection = new Connection(selectedPrimaryUrl, connectionConfig);
 const fallbackConnection = new Connection(selectedFallbackUrl, connectionConfig);
@@ -78,14 +93,19 @@ const connection = new Proxy(primaryConnection, {
                 try {
                     return await withTimeout(origMethod.apply(target, args), 5000, propKey);
                 } catch (err) {
-                    console.warn(`\n⚠️ 觸發備援機制！原因: ${err.message}`);
+                    const is429 = err.message.includes('429');
+                    if (is429) {
+                        console.warn(`\n⚠️ 觸發備援機制！原因: 🚦 [429 限流] 主節點爆 Quota，已攔截底層延遲！`);
+                    } else {
+                        console.warn(`\n⚠️ 觸發備援機制！原因: ${err.message}`);
+                    }
                     console.warn(`🔄 瞬間無縫切換至備援水喉補救...`);
                     
                     try {
                         const fallbackMethod = fallbackConnection[propKey];
                         return await fallbackMethod.apply(fallbackConnection, args);
                     } catch (err2) {
-                        console.warn(`⚠️ 雙節點皆觸發 429/超時，瞬間駁入免 Key 公共節點 (dRPC/Ankr)...`);
+                        console.warn(`⚠️ 雙節點皆觸發異常，瞬間駁入免 Key 公共節點 (dRPC/Ankr)...`);
                         const publicMethod = publicConnection[propKey];
                         return await publicMethod.apply(publicConnection, args);
                     }
@@ -96,4 +116,5 @@ const connection = new Proxy(primaryConnection, {
     }
 });
 
-module.exports = { connection, primaryConnection, fallbackConnection };
+// 👈 補返 PublicKey, Keypair，等出面啲 File 唔會死
+module.exports = { connection, primaryConnection, fallbackConnection, PublicKey, Keypair };
