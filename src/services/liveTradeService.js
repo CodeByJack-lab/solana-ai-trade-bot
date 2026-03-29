@@ -4,7 +4,7 @@ const { connection } = require('../config/solana');
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
 const { healthMonitor } = require('./healthMonitor'); 
-const configEnv = require('../config/env'); // 👈 引入彈藥庫
+const configEnv = require('../config/env'); 
 
 let bs58 = require('bs58');
 if (bs58.default) {
@@ -21,6 +21,13 @@ const JITO_TIP_ACCOUNTS = [
     "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
     "DttWaMuVvTiduZRnguLF7QsBgTysiEwCAQtbNheJ4sBE",
     "3AVi9Tg9Uao68XNwNmtcwEdqvLhATCq0MExeb1Z51vtv"
+];
+
+// 🚀 [V8.9 機構級升級] Jito 全球多節點廣播
+const JITO_ENDPOINTS = [
+    'https://mainnet.block-engine.jito.wtf/api/v1/bundles',
+    'https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles',
+    'https://amsterdam.mainnet.block-engine.jito.wtf/api/v1/bundles'
 ];
 
 let wallet;
@@ -43,7 +50,7 @@ try {
     healthMonitor.setStatus('Live_Engine', `🔴 私鑰解析失敗`); 
 }
 
-// 🚀 核心修復：自定義 Jito 簽名輪詢機制 (15秒超時防卡死)
+// 🚀 極速確認機制
 async function pollSignatureStatus(signature, timeoutMs = 15000) {
     const startTime = Date.now();
     while (Date.now() - startTime < timeoutMs) {
@@ -55,10 +62,8 @@ async function pollSignatureStatus(signature, timeoutMs = 15000) {
                 }
                 return true; 
             }
-        } catch (e) {
-            // 忽略查詢過程中的小 error，繼續 poll
-        }
-        await new Promise(r => setTimeout(r, 2000)); // 每 2 秒查一次
+        } catch (e) {}
+        await new Promise(r => setTimeout(r, 2000)); 
     }
     throw new Error('Jito Bundle 確認超時 (Transaction Dropped or Pending)');
 }
@@ -89,7 +94,8 @@ async function getJupiterSwapTransaction(quoteResponse) {
     }
 }
 
-async function executeLiveSwapUAT(quoteResponse, action) {
+// 🎯 接收 reason 參數，啟動智能環境感知
+async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
     if (!wallet) return { success: false, txid: null };
 
     console.log(`\n⚡ [Live Execution] 正在向 Jupiter 請求構建 ${action} 交易...`);
@@ -114,63 +120,91 @@ async function executeLiveSwapUAT(quoteResponse, action) {
             return { success: false, txid: null };
         } 
         
-        console.log(`✅ [Pre-flight Success] 模擬通過，準備打包 Jito Bundle...`);
-        healthMonitor.setStatus('Live_Engine', '🟢 送出 Jito Bundle 中...'); 
+        console.log(`✅ [Pre-flight Success] 模擬通過，準備進入 Jito 動態拍賣場...`);
 
-        let dynamicTip = 100000; 
+        // 讀取基礎 Tip (預設 150,000)
+        let baseTip = 150000; 
         try {
             const { data: config } = await supabase.from('system_config').select('jito_tip_lamports').eq('id', 1).single();
-            if (config && config.jito_tip_lamports) {
-                dynamicTip = Number(config.jito_tip_lamports);
-                console.log(`💸 [Jito Tip] 使用動態小費設定: ${dynamicTip} lamports`);
+            if (config && config.jito_tip_lamports) baseTip = Number(config.jito_tip_lamports);
+        } catch (dbErr) {}
+
+        // 🚀 [智能環境感知] 根據不同戰況，動態調整起步價
+        let currentTip = baseTip;
+        let isEmergency = false;
+
+        if (action === 'BUY') {
+            currentTip = baseTip * 2; // 搶貨稍為加價
+        } else if (action === 'SELL' && reason) {
+            if (reason.includes('瀑布') || reason.includes('硬止損') || reason.includes('崩盤') || reason.includes('拔線')) {
+                currentTip = baseTip * 4; // 🚨 緊急逃生，4 倍起跳
+                isEmergency = true;
+                console.log(`🚨 [環境感知] 偵測到極端危險，Jito 起步價直接拉升至 ${(currentTip/1e9).toFixed(5)} SOL！`);
             }
-        } catch (dbErr) {
-            console.warn(`⚠️ [Jito Tip] 無法讀取 DB 設定，使用保底 100000 lamports`);
         }
 
-        const latestBlockHash = await connection.getLatestBlockhash();
-        const tipAccount = new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]);
-        
-        const tipTx = new Transaction().add(
-            SystemProgram.transfer({
-                fromPubkey: wallet.publicKey,
-                toPubkey: tipAccount,
-                lamports: dynamicTip, 
-            })
-        );
-        tipTx.recentBlockhash = latestBlockHash.blockhash;
-        tipTx.feePayer = wallet.publicKey;
-        tipTx.sign(wallet);
-
+        const maxRetries = isEmergency ? 4 : 3; 
         const serializedSwapTx = bs58.encode(transaction.serialize());
-        const serializedTipTx = bs58.encode(tipTx.serialize());
-
-        const jitoUrl = 'https://mainnet.block-engine.jito.wtf/api/v1/bundles';
-        const jitoResponse = await axios.post(jitoUrl, {
-            jsonrpc: "2.0",
-            id: 1,
-            method: "sendBundle",
-            params: [ [serializedSwapTx, serializedTipTx] ]
-        }, { headers: { 'Content-Type': 'application/json' } });
-
-        const bundleId = jitoResponse.data.result;
-        console.log(`✅ [Jito Success] Bundle 已成功送出！Bundle ID: ${bundleId}`);
-
         const txid = bs58.encode(transaction.signatures[0]);
-        console.log(`🔗 追蹤連結: https://solscan.io/tx/${txid}`);
-        console.log(`⏳ 等待區塊鏈確認 (最大等候 15 秒)...`);
 
-        await pollSignatureStatus(txid, 15000); 
-        
-        console.log(`🎉 [Live Trade] ${action} 交易已在鏈上確認！`);
-        healthMonitor.setStatus('Live_Engine', `🟢 交易確認成功`); 
-        setTimeout(() => healthMonitor.setStatus('Live_Engine', '🟢 錢包已掛載 (待命)'), 5000); 
-        
-        return { success: true, txid: txid }; 
+        // 階梯式加注迴圈
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+            console.log(`💸 [Jito 拍賣 - 第 ${attempt}/${maxRetries} 輪] 出價: ${(currentTip / 1e9).toFixed(5)} SOL`);
+            healthMonitor.setStatus('Live_Engine', `🟢 Jito 第 ${attempt} 輪競價...`); 
+
+            // 確保每次 retry 都攞最新 Blockhash，防止過期
+            const latestBlockHash = await connection.getLatestBlockhash();
+            const tipAccount = new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]);
+            
+            const tipTx = new Transaction().add(
+                SystemProgram.transfer({
+                    fromPubkey: wallet.publicKey,
+                    toPubkey: tipAccount,
+                    lamports: Math.floor(currentTip), 
+                })
+            );
+            tipTx.recentBlockhash = latestBlockHash.blockhash;
+            tipTx.feePayer = wallet.publicKey;
+            tipTx.sign(wallet);
+
+            const serializedTipTx = bs58.encode(tipTx.serialize());
+            const bundlePayload = {
+                jsonrpc: "2.0", id: 1, method: "sendBundle",
+                params: [ [serializedSwapTx, serializedTipTx] ]
+            };
+
+            // 🌐 全球同步廣播 Bundle
+            const sendPromises = JITO_ENDPOINTS.map(url => 
+                axios.post(url, bundlePayload, { headers: { 'Content-Type': 'application/json' }, timeout: 3000 })
+                .catch(() => null) 
+            );
+            await Promise.all(sendPromises);
+
+            console.log(`🔗 追蹤連結: https://solscan.io/tx/${txid}`);
+            console.log(`⏳ 等待區塊鏈確認 (最大等候 5 秒)...`);
+
+            try {
+                // ⚡ 極速探測：5 秒無反應即視為被踢出區塊，準備加注
+                await pollSignatureStatus(txid, 5000); 
+                console.log(`🎉 [Live Trade] ${action} 交易已在鏈上確認！成交 Tip: ${(currentTip / 1e9).toFixed(5)} SOL`);
+                healthMonitor.setStatus('Live_Engine', `🟢 交易確認成功`); 
+                setTimeout(() => healthMonitor.setStatus('Live_Engine', '🟢 錢包已掛載 (待命)'), 5000); 
+                return { success: true, txid: txid }; 
+            } catch (e) {
+                console.log(`⚠️ [Jito 拍賣失敗] 交易超時或被擠出。`);
+                if (attempt < maxRetries) {
+                    currentTip = currentTip * 2; // 失敗就 Double
+                    console.log(`🔥 準備加碼保護費，重新發送...`);
+                }
+            }
+        }
+
+        console.error(`❌ [Live Execution] 交易徹底失敗，已達最大重試次數 (${maxRetries}次)。請檢查網絡或手動平倉！`);
+        healthMonitor.setStatus('Live_Engine', '🔴 交易多次丟包失敗'); 
+        return { success: false, txid: null };
 
     } catch (err) {
-        console.error(`❌ [Live Execution] 交易未完成 (已被 Jito 拋棄或超時):`, err.message);
-        healthMonitor.setStatus('Live_Engine', '🔴 交易確認超時/丟包'); 
+        console.error(`❌ [Live Execution] 發生未預期錯誤:`, err.message);
         return { success: false, txid: null };
     }
 }

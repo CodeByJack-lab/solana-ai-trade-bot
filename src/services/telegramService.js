@@ -119,4 +119,121 @@ async function sendParamSnapshot() {
     }
 }
 
-module.exports = { sendTelegramAlert, sendAdminAlert, sendParamSnapshot, safeHTML };
+// ==========================================
+// 🛡️ V8.9 HITL 審批中樞 (Human-in-the-Loop)
+// ==========================================
+
+// 1. 發送帶有「批准/否決」按鈕的報告
+async function sendApprovalRequest(reportText, proposalId) {
+    const token = ADMIN_BOT_TOKEN || TRADE_BOT_TOKEN;
+    const chat = ADMIN_CHAT_ID || TRADE_CHAT_ID;
+    if (!token || !chat) return;
+
+    const url = `https://api.telegram.org/bot${token}/sendMessage`;
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: "✅ 批准並套用 (Apply)", callback_data: `APPROVE_${proposalId}` },
+                { text: "❌ 否決提案 (Reject)", callback_data: `REJECT_${proposalId}` }
+            ]
+        ]
+    };
+
+    try {
+        await axios.post(url, { 
+            chat_id: chat, 
+            text: reportText, 
+            parse_mode: 'HTML',
+            reply_markup: keyboard
+        });
+        console.log(`📨 [Telegram] 審批請求已發送 (Proposal ID: ${proposalId})`);
+    } catch (err) {
+        console.error(`❌ [Telegram] 審批請求發送失敗:`, err.response?.data?.description || err.message);
+    }
+}
+
+// 2. 處理 Telegram 傳回來的按鈕點擊 (Callback Query)
+async function processTelegramCallback(callbackQuery) {
+    const { supabase } = require('../config/supabase');
+    const data = callbackQuery.data; 
+    const messageId = callbackQuery.message.message_id;
+    const chat = callbackQuery.message.chat.id;
+    const token = ADMIN_BOT_TOKEN || TRADE_BOT_TOKEN;
+
+    if (!data.startsWith('APPROVE_') && !data.startsWith('REJECT_')) return;
+
+    const action = data.split('_')[0]; // 'APPROVE' or 'REJECT'
+    const proposalId = data.replace(`${action}_`, '');
+
+    try {
+        // 1. 從 Supabase 讀取提案
+        const { data: proposal, error } = await supabase.from('ai_proposals').select('*').eq('id', proposalId).single();
+        
+        if (error || !proposal) {
+            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "⚠️ 找不到該提案，可能已被處理或過期。" });
+            return;
+        }
+
+        if (proposal.status !== 'PENDING') {
+            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: `⚠️ 該提案已被處理過 (狀態: ${proposal.status})。` });
+            return;
+        }
+
+        // 2. 執行你的決定
+        if (action === 'REJECT') {
+            await supabase.from('ai_proposals').update({ status: 'REJECTED' }).eq('id', proposalId);
+            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "🗑️ <b>提案已否決。</b> 系統將維持現有設定。", parse_mode: 'HTML' });
+        } 
+        else if (action === 'APPROVE') {
+            const changes = proposal.proposed_changes;
+            let successMsg = "✅ <b>提案已批准並套用！</b>\n";
+
+            // 如果係 Master AI 提案
+            if (proposal.proposal_type === 'MASTER_AI') {
+                if (changes.target_prompt_id && changes.new_prompt_content) {
+                    await supabase.from('bot_prompts').update({ content: changes.new_prompt_content, updated_at: new Date() }).eq('prompt_id', changes.target_prompt_id);
+                    successMsg += `\n🧠 劇本 [${changes.target_prompt_id}] 已更新。`;
+                }
+                
+                if (changes.recommended_params) {
+                    const parseUpdates = (params) => {
+                        const updates = {};
+                        if (params.min_liquidity !== undefined) updates.min_liquidity = Number(params.min_liquidity);
+                        if (params.min_vol_5m !== undefined) updates.min_vol_5m = Number(params.min_vol_5m);
+                        if (params.min_drop_pct !== undefined) updates.min_drop_pct = Number(params.min_drop_pct);
+                        return updates;
+                    };
+
+                    if (changes.recommended_params.meme) {
+                        const memeUpdates = parseUpdates(changes.recommended_params.meme);
+                        if (Object.keys(memeUpdates).length > 0) await supabase.from('ai_strategy_params').update(memeUpdates).eq('id', 2);
+                    }
+                    if (changes.recommended_params.trending) {
+                        const trendUpdates = parseUpdates(changes.recommended_params.trending);
+                        if (Object.keys(trendUpdates).length > 0) await supabase.from('ai_strategy_params').update(trendUpdates).eq('id', 3);
+                    }
+                    successMsg += `\n⚙️ 入場策略參數已更新。`;
+                }
+            }
+
+            // 如果係回測引擎改 出場設定 (Phase 3 用)
+            if (proposal.proposal_type === 'BACKTEST' && changes.new_params) {
+                await supabase.from('system_config').update(changes.new_params).eq('id', 1);
+                successMsg += `\n🛡️ 止損與動態止盈參數已更新。`;
+            }
+
+            await supabase.from('ai_proposals').update({ status: 'APPROVED' }).eq('id', proposalId);
+            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: successMsg, parse_mode: 'HTML' });
+        }
+
+        // 3. 移除原本 Message 上的按鈕
+        await axios.post(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
+            chat_id: chat, message_id: messageId, reply_markup: { inline_keyboard: [] } 
+        });
+
+    } catch (err) {
+        console.error("❌ [Telegram Callback Error]:", err.message);
+    }
+}
+
+module.exports = { sendTelegramAlert, sendAdminAlert, sendParamSnapshot, safeHTML, sendApprovalRequest, processTelegramCallback };

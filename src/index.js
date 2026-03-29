@@ -4,7 +4,7 @@ const { supabase } = require('./config/supabase');
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
 const { startMarketMonitor } = require('./services/monitorService'); 
 const { getSolPriceInHKD } = require('./services/priceService'); 
-
+const { weeklyBacktestJob } = require('./jobs/weeklyBacktestJob');
 const { macroMonitorService } = require('./services/macroMonitorService'); 
 const { retrospectiveJob } = require('./jobs/retrospectiveJob');           
 const { healthMonitor } = require('./services/healthMonitor');             
@@ -129,6 +129,7 @@ async function startApp() {
     setTimeout(() => { janitorJob.start(); }, 20000);           // 20s: 清道夫
     setTimeout(() => { graveyardJob.start(); }, 22000);         // 22s: 墓地火化
     setTimeout(() => { retrospectiveJob.start(); }, 24000);     // 24s: 大腦進化
+    setTimeout(() => { weeklyBacktestJob.start(); }, 26000);    // 26s: 回測引擎
 
     async function backgroundReportLoop() {
         if (global.isRunning === false) {

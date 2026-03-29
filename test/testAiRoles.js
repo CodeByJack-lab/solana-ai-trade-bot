@@ -1,5 +1,5 @@
 // src/testAiRoles.js
-const { aiOrchestrator } = require('./src/services/aiOrchestrator');
+const { aiOrchestrator } = require('../src/services/aiOrchestrator');
 
 async function runValidation() {
     console.log("🚀 [AI Validation] 啟動大腦岗位驗證程序...");

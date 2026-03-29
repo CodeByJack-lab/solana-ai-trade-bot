@@ -1,7 +1,7 @@
 // testAI.js
-const { consensusService } = require('./src/services/consensusService');
-const { initPortfolio } = require('./src/services/portfolioService');
-const { healthMonitor } = require('./src/services/healthMonitor');
+const { consensusService } = require('../src/services/consensusService');
+const { initPortfolio } = require('../src/services/portfolioService');
+const { healthMonitor } = require('../src/services/healthMonitor');
 
 async function runTest() {
     console.log("🧪 [AI Test] 正在初始化環境並測試三白劍俠 API...");

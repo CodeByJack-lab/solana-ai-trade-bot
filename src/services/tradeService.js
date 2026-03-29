@@ -32,7 +32,6 @@ try {
     console.error("⚠️ [TradeService] 無法解析 Private Key");
 }
 
-// ⚠️ V8.2 RPC 節食：此函數僅在 Live 交易確認後調用
 async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     try {
         const walletKey = new PublicKey(walletPubKeyStr);
@@ -51,7 +50,6 @@ async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     }
 }
 
-// 🎯 V8.2 核心：無論 Live 定 Paper，都要 Call Jupiter 問真實報價與滑點
 async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageBps = null) {
     try {
         let decimals = 6; 
@@ -105,9 +103,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // ==========================================
-    // 👑 V8.2 上帝視角倉位鎖
-    // ==========================================
     const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
     const maxMemePositions = config?.max_meme_positions || 2; 
     const maxTrendingPositions = config?.max_trending_positions || 3;
@@ -124,7 +119,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 檢查連敗黑名單
     try {
         const { data: recentTrades } = await supabase
             .from(`trade_history_${tableSuffix}`)
@@ -143,7 +137,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         }
     } catch (dbErr) {}
 
-    // 資金檢查 (Live & Paper 共用)
     const safetyBufferSol = portfolio.reference_capital * 0.1;
     const requiredTotalSol = configTradeAmountSol + safetyBufferSol;
 
@@ -152,7 +145,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🎯 取得真實報價
     const quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol); 
     if (!quoteData) {
         console.log(`❌ [Execution] 無法獲取 Jupiter 報價，放棄買入。`);
@@ -165,16 +157,12 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     let finalTxid = "BUY_" + Math.random().toString(36).substring(2, 8).toUpperCase(); 
     let totalCostSol = configTradeAmountSol;
 
-    // ==========================================
-    // 🩸 V8.2 真實模擬交易引擎 (扣滑點 + Jito)
-    // ==========================================
-    const JITO_TIP_SOL = (config?.jito_tip_lamports || 100000) / 1e9; 
+    const JITO_TIP_SOL = (config?.jito_tip_lamports || 150000) / 1e9; 
     const isMeme = strategyType.includes('MEME');
-    const PAPER_SLIPPAGE_PCT = isMeme ? 0.02 : 0.005; // Meme 預設 2% 滑點損耗，藍籌 0.5%
+    const PAPER_SLIPPAGE_PCT = isMeme ? 0.02 : 0.005; 
 
     if (isLive) {
-        // 真倉執行
-        const liveResult = await executeLiveSwapUAT(quoteData.rawResponse, "BUY");
+        const liveResult = await executeLiveSwapUAT(quoteData.rawResponse, "BUY", aiReason);
         tradeSuccess = liveResult?.success || false;
         if (tradeSuccess && liveResult?.txid) {
             finalTxid = liveResult.txid; 
@@ -194,7 +182,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             }
         }
     } else {
-        // 紙黃金執行：硬扣真實滑點 + Jito
         buyPriceSol = buyPriceSol * (1 + PAPER_SLIPPAGE_PCT);
         tokenQuantity = new BigNumber(configTradeAmountSol).div(buyPriceSol).toNumber();
         totalCostSol = configTradeAmountSol + JITO_TIP_SOL; 
@@ -204,7 +191,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         tradeSuccess = true;
     }
 
-    // 寫入資料庫
     if (tradeSuccess && tokenQuantity > 0) {
         updateCache('BUY', totalCostSol, {
             mint_address: mintAddress, token_symbol: tokenSymbol,
@@ -216,7 +202,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         let currentBalance = isLive ? Number(config.live_wallet_balance || 0) : Number(config.simulated_balance || 10);
         let newBalance = currentBalance - Number(totalCostSol);
 
-        // Live 模式下，更新真實 RPC 餘額
         if (isLive && globalWalletPublicKey) {
             try {
                 const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
@@ -250,7 +235,9 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
 
         if(typeof sendTelegramAlert === 'function') {
             const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
-            sendTelegramAlert(`${modeTag} <b>✅ 買入成功</b>\n🪙 代幣: $${tokenSymbol}\n💰 投入: ${totalCostSol.toFixed(4)} SOL\n🔗 TX: ${isLive ? `<a href="https://solscan.io/tx/${finalTxid}">Solscan</a>` : finalTxid}\n🧠 理由: ${aiReason}`);
+            // 👇 加入分類標籤
+            const typeTag = strategyType.includes('MEME') ? '🐣 NEW meme' : '🔥 TOP 100 meme';
+            sendTelegramAlert(`${modeTag} <b>✅ 買入成功</b>\n🏷️ 類別: ${typeTag}\n🪙 代幣: $${tokenSymbol}\n💰 投入: ${totalCostSol.toFixed(4)} SOL\n🔗 TX: ${isLive ? `<a href="https://solscan.io/tx/${finalTxid}">Solscan</a>` : finalTxid}\n🧠 理由: ${aiReason}`);
         }
         healthMonitor.setStatus('Trade_Engine', `🟢 最近買入 ${tokenSymbol}`);
         return true;
@@ -272,10 +259,20 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     console.log(`\n⚡ [Sell] 正在嘗試平倉: ${tokenSymbol} (預期比例: ${sellFraction * 100}%)`);
 
     if (isLive && globalWalletPublicKey) {
-        const realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
+        // 🛠️ [修正一：RPC 餘額狀態重試機制 (防假歸零)]
+        let realBal = null;
+        for (let i = 1; i <= 3; i++) {
+            realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
+            if (realBal !== null && realBal > 0) break; // 搵到幣就即走
+            if (realBal === 0 && i < 3) {
+                console.warn(`⚠️ [RPC Retry] 第 ${i} 次查餘額為 0，可能係節點未 Sync，等 2 秒再查...`);
+                await new Promise(r => setTimeout(r, 2000));
+            }
+        }
+
         if (realBal !== null) {
             if (realBal === 0) {
-                console.error(`🚨 [FATAL] 鏈上餘額為 0，無法賣出！自動執行本地撇帳。`);
+                console.error(`🚨 [FATAL] 鏈上餘額連續 3 次確認為 0，無法賣出！自動執行本地撇帳。`);
                 await forceWriteOff(mintAddress, "實盤餘額為 0，假持倉撇帳");
                 return false;
             }
@@ -285,37 +282,38 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     }
 
     const isStopLoss = reason.includes('止損') || reason.includes('硬止損') || reason.includes('虧損') || reason.includes('拔線') || reason.includes('瀑布');
-    let currentSlippage = isStopLoss ? 1500 : 500; 
-
-    let quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
     
-    if (!quoteData) {
+    // 🛠️ [修正二：動態滑點計算 (Dynamic Slippage)]
+    // 1. 先攞一個初始 Quote 來探測 Price Impact (衝擊)
+    let initialQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, 50); // 先用 0.5% 攞資料
+
+    if (!initialQuote) {
         console.log(`⚠️ [Liquidity Warning] ${tokenSymbol} 查無常規報價，流動性可能枯竭。嘗試最高絕望滑點 (30%) 強平...`);
-        currentSlippage = 3000;
-        quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
+        initialQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, 3000);
+        if (!initialQuote) {
+            try {
+                const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`, { timeout: 3000 });
+                const pair = dexRes.data?.pairs?.find(p => p.chainId === 'solana');
+                if ((pair?.liquidity?.usd || 0) < 500) await forceWriteOff(mintAddress, "流動性枯竭，強行撇帳");
+            } catch (e) {}
+            return false; 
+        }
     }
 
-    if (!quoteData) {
-        try {
-            const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`, { timeout: 3000 });
-            const pair = dexRes.data?.pairs?.find(p => p.chainId === 'solana');
-            if ((pair?.liquidity?.usd || 0) < 500) await forceWriteOff(mintAddress, "流動性枯竭，強行撇帳");
-        } catch (e) {}
-        return false; 
-    }
+    let impactPct = Number(initialQuote.rawResponse.priceImpactPct || 0);
+    
+    // 🧮 動態滑點公式：最佳滑點 = (Impact * 10000 bps) + 200 bps (即係 +2% Buffer)
+    let currentSlippage = Math.ceil(impactPct * 10000) + 200;
 
-    let impactPct = Number(quoteData.rawResponse.priceImpactPct || 0);
+    // 分拆砸盤防線保持不變...
     if (isStopLoss && impactPct > 0.15) {
         console.log(`\n🚨 [Slippage Control] 警告！偵測到毀滅性砸盤影響 (${(impactPct*100).toFixed(2)}%)！`);
-        
-        const expectedTotalSol = Number(quoteData.rawResponse.outAmount || 0) / 1e9;
+        const expectedTotalSol = Number(initialQuote.rawResponse.outAmount || 0) / 1e9;
         
         if (expectedTotalSol < 0.05 && sellFraction === 1.0) {
             console.log(`🗑️ [Dust Clean] 剩餘預期價值極低 (${expectedTotalSol.toFixed(4)} SOL < 0.05 SOL)！`);
             console.log(`⚔️ 啟動「斷頭台模式」：解鎖極限滑點 (50%) 執行一刀切清倉止血！`);
             currentSlippage = 5000; 
-            quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
-            if (!quoteData) return false;
         } else {
             console.log(`🛡️ 啟動「分拆砸盤」機制，本次僅平倉原定比例的 50%。`);
             sellFraction = sellFraction * 0.5;
@@ -326,20 +324,31 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
             }
             sellQuantity = new BigNumber(baseQuantity).times(sellFraction).toNumber();
 
-            quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
-            if (!quoteData) return false;
+            // 重新攞 Impact
+            let splitQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, 50);
+            if (splitQuote) {
+                impactPct = Number(splitQuote.rawResponse.priceImpactPct || 0);
+                currentSlippage = Math.ceil(impactPct * 10000) + 200;
+            }
         }
     }
     
+    // 安全封頂：平時最多 15%，緊急止損最多 30% (除非斷頭台 50%)
+    if (currentSlippage > 1500 && !isStopLoss) currentSlippage = 1500;
+    if (currentSlippage > 3000 && isStopLoss && currentSlippage !== 5000) currentSlippage = 3000;
+
+    console.log(`📊 [Dynamic Slippage] 價格衝擊: ${(impactPct*100).toFixed(2)}% | 決定使用滑點: ${(currentSlippage/100).toFixed(2)}%`);
+
+    // 2. 用計算出嚟嘅動態滑點攞最終 Quote
+    let quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
+    if (!quoteData) quoteData = initialQuote; 
+
     let finalPriceSol = quoteData.pricePerToken;
     let tradeSuccess = false;
     let finalTxid = "SELL_" + Math.random().toString(36).substring(2, 8).toUpperCase(); 
 
-    // ==========================================
-    // 🩸 V8.2 真實模擬交易引擎 (扣滑點 + Jito)
-    // ==========================================
     const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
-    const JITO_TIP_SOL = (config?.jito_tip_lamports || 100000) / 1e9; 
+    const JITO_TIP_SOL = (config?.jito_tip_lamports || 150000) / 1e9; 
     const isMeme = pos.strategy_type.includes('MEME');
     const PAPER_SLIPPAGE_PCT = isMeme ? 0.02 : 0.005;
 
@@ -352,9 +361,25 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
             try { preSellBalanceLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey)); } catch (e) {}
         }
         
-        const liveResult = await executeLiveSwapUAT(quoteData.rawResponse, "SELL");
+        // 第一刀：以動態滑點執行交易
+        let liveResult = await executeLiveSwapUAT(quoteData.rawResponse, "SELL", reason);
         tradeSuccess = liveResult?.success || false;
         
+        // 🚨 🛡️ [修正二：動態滑點失敗 Fallback (絕命強平)]
+        if (!tradeSuccess && isStopLoss) {
+            console.log(`⚔️ [Fallback] 動態滑點賣出失敗！可能係滑點太緊。啟動保命模式：30% 絕望滑點強平！`);
+            let desperateQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, 3000);
+            if (desperateQuote) {
+                // 傳入 "拔線" 字眼，觸發 liveTradeService 入面嘅 Jito 4 倍 Tip 機制！
+                liveResult = await executeLiveSwapUAT(desperateQuote.rawResponse, "SELL", reason + " 拔線");
+                tradeSuccess = liveResult?.success || false;
+                if (tradeSuccess) {
+                    quoteData = desperateQuote; 
+                    finalPriceSol = quoteData.pricePerToken;
+                }
+            }
+        }
+
         if (tradeSuccess && liveResult?.txid) {
             finalTxid = liveResult.txid;
             sellValueSol = new BigNumber(sellQuantity).times(finalPriceSol).toNumber();
@@ -371,7 +396,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
             }
         }
     } else {
-        // 紙黃金執行：硬扣真實滑點 - Jito
         finalPriceSol = finalPriceSol * (1 - PAPER_SLIPPAGE_PCT);
         sellValueSol = (sellQuantity * finalPriceSol) - JITO_TIP_SOL; 
         
@@ -476,7 +500,9 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     if(typeof sendTelegramAlert === 'function') {
         const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
         const pnlTag = pnlPct >= 0 ? `🟢 +${pnlPct.toFixed(2)}%` : `🔴 ${pnlPct.toFixed(2)}%`;
-        sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🪙 代幣: $${pos.token_symbol}\n📈 PNL: ${pnlTag}\n🔗 TX: ${isLive && !txid.includes('FORCE') ? `<a href="https://solscan.io/tx/${txid}">Solscan</a>` : txid}\n🧠 理由: ${finalReason}`);
+        // 👇 加入分類標籤
+        const typeTag = safeStrategyType.includes('MEME') ? '🐣 NEW meme' : '🔥 TOP 100 meme';
+        sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🏷️ 類別: ${typeTag}\n🪙 代幣: $${pos.token_symbol}\n📈 PNL: ${pnlTag}\n🔗 TX: ${isLive && !txid.includes('FORCE') ? `<a href="https://solscan.io/tx/${txid}">Solscan</a>` : txid}\n🧠 理由: ${finalReason}`);
     }
 }
 
@@ -489,7 +515,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
     }
 }
 
-// ... 保留 handleIncomingFund 同 handleOutgoingFund 唔變 ...
 async function handleIncomingFund(address, amount, txid) {
     console.log(`🚀 [Process] 處理新入帳: ${amount} SOL from ${address}`);
     const personName = await getPersonNameByAddress(address);

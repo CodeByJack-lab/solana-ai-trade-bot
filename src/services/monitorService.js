@@ -28,17 +28,12 @@ const trendingPriceCache = new Map();
 let lastRedisUpdateMs = Date.now();
 let isHttpFallbackActive = false;
 
-// 🧠 斷路器：紀錄每隻 API 嘅冷卻到期時間 (Timestamp)
-const apiCooldowns = {
-    geckoTerminal: 0,
-    jupiterV3: 0,
-    jupiterV6: 0
-};
+// 🌟 [新增] 雙軌參數快取 (0延遲查價用)
+let cachedStrategyParams = { meme: null, trending: null };
 
-function isApiAvailable(apiName) {
-    return Date.now() > apiCooldowns[apiName];
-}
+const apiCooldowns = { geckoTerminal: 0, jupiterV3: 0, jupiterV6: 0 };
 
+function isApiAvailable(apiName) { return Date.now() > apiCooldowns[apiName]; }
 function markApiFailed(apiName) {
     console.warn(`🚨 [Monitor Fallback] ${apiName} 發生故障，已觸發斷路器，進入 60 秒冷卻期！`);
     apiCooldowns[apiName] = Date.now() + 60000;
@@ -49,7 +44,7 @@ const cors = require('cors');
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.8 系統正常運行中 (終極動態階梯鎖潤版)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.9 系統正常運行中 (雙軌回測參數聯動版)'));
 
 app.post('/force-evolution', async (req, res) => {
     console.log('🧠 [Admin Command] 收到前端指令：強制喚醒 Master AI 進行進化！');
@@ -58,7 +53,6 @@ app.post('/force-evolution', async (req, res) => {
         retrospectiveJob.runEvolutionWithRetry(1).catch(err => console.error("進化失敗:", err));
         res.status(200).json({ success: true, message: '指令已送達，AI 正在運算中' });
     } catch (err) {
-        console.error('❌ [Admin Command] 強制喚醒失敗:', err.message);
         res.status(500).json({ success: false, error: err.message });
     }
 });
@@ -80,10 +74,7 @@ let webhooksThisMinute = 0;
 let lastAiCount = 0;
 let isNurseryPoolFull = false; 
 
-function initStatKey(key) {
-    if (!detailedStats[key]) detailedStats[key] = { received: 0, filtered: 0, added: 0 };
-}
-
+function initStatKey(key) { if (!detailedStats[key]) detailedStats[key] = { received: 0, filtered: 0, added: 0 }; }
 function sanitizeAddress(address) {
     if (!address) return null;
     const clean = address.toString().trim().replace(/[\n\r\t\s]/g, '');
@@ -125,6 +116,16 @@ async function toggleHeliusWebhook(enable = true) {
     healthMonitor.setStatus('Meme_Radar', '🟢 撈魚中 (RAM 緩衝)');
     healthMonitor.setStatus('Wallet_Radar', '🔵 由 Alchemy 監控中');
 }
+
+app.post('/webhook/telegram', async (req, res) => {
+    res.status(200).send('OK'); 
+    try {
+        if (req.body && req.body.callback_query) {
+            const { processTelegramCallback } = require('./telegramService');
+            await processTelegramCallback(req.body.callback_query);
+        }
+    } catch (err) { console.error("❌ [Telegram Webhook] 處理失敗:", err.message); }
+});
 
 app.post('/webhook/helius', async (req, res) => {
     res.status(200).send('OK'); 
@@ -220,10 +221,8 @@ async function triggerBuyPipeline(mintAddress, secResult, config) {
     }
 }
 
-// 🚀 RAM 預檢漏斗 (Batch RPC + Socials 攔截)
 let isRamProcessorRunning = false;
 function startRamCacheProcessor() {
-    console.log('🧠 [RAM Cache] 5分鐘記憶體漏斗已啟動 (Batch RPC 預檢模式)');
     setInterval(async () => {
         if (isRamProcessorRunning) return;
         isRamProcessorRunning = true;
@@ -233,13 +232,9 @@ function startRamCacheProcessor() {
             const mints = await redis.zrangebyscore('ram_mints_queue', 0, fiveMinsAgo);
             
             if (mints && mints.length > 0) {
-                console.log(`\n📦 [RAM Batch] 提取出 ${mints.length} 隻度過 5 分鐘冷靜期嘅新幣，準備執行批量查冊...`);
                 await redis.zremrangebyscore('ram_mints_queue', 0, fiveMinsAgo);
-
                 const { connection } = require('../config/solana');
-                const pubkeys = mints.map(m => {
-                    try { return new PublicKey(m); } catch(e) { return null; }
-                }).filter(Boolean);
+                const pubkeys = mints.map(m => { try { return new PublicKey(m); } catch(e) { return null; } }).filter(Boolean);
 
                 const chunks = [];
                 for(let i = 0; i < pubkeys.length; i += 100) chunks.push(pubkeys.slice(i, i + 100));
@@ -255,44 +250,28 @@ function startRamCacheProcessor() {
                                 await redis.set(`SEC_ACC:${mintStr}`, 'VALID', 'EX', 86400);
                             }
                         }
-                    } catch (rpcErr) {
-                        console.error('❌ [RAM Batch] RPC 批量獲取失敗:', rpcErr.message);
-                    }
+                    } catch (rpcErr) {}
                 }
 
                 if (validMints.length > 0) {
-                    console.log(`🛡️ [RAM Batch] 鏈上存活: ${validMints.length} 隻，移交 Security Guard 進行三無過濾...`);
                     const { securityGuard } = require('./securityGuard');
-                    
                     for (const mint of validMints) {
                         if (isNurseryPoolFull) break; 
-                        
                         const secResult = await securityGuard.checkAll(mint);
-                        
                         if (secResult.isSafe) {
-                            console.log(`✅ [RAM Batch] ${mint.substring(0, 4)}... 安全通過預檢！放入 Supabase 魚池等待 AI。`);
                             await redis.set(`SEC_RES:${mint}`, JSON.stringify(secResult), 'EX', 3600);
                             await supabase.rpc('insert_fish_with_limit', { new_mint_address: mint });
-                        } else {
-                            console.log(`🗑️ [RAM Batch] 淘汰 ${mint.substring(0, 4)}... : ${secResult.reason}`);
                         }
-                        
                         await new Promise(r => setTimeout(r, 500));
                     }
                 }
             }
-        } catch (err) {
-            console.error(`❌ [RAM Processor] 異常:`, err.message);
-        } finally {
-            isRamProcessorRunning = false;
-        }
+        } catch (err) {} finally { isRamProcessorRunning = false; }
     }, 10000); 
 }
 
-// 🚀 DB 魚池只負責排隊等 AI (秒速處理)
 let isNurseryRunning = false;
 function startDatabaseNurseryMonitor() {
-    console.log('🐟 [DB Nursery] AI 逐條審核系統已啟動 (由 min_age_mins 控制)');
     setInterval(async () => {
         if (isNurseryRunning) return;
         const queueLength = getPendingMemeCount();
@@ -315,10 +294,6 @@ function startDatabaseNurseryMonitor() {
                     } 
                     
                     if (ageMins >= config.min_age_mins) {
-                        console.log(`\n======================================================`);
-                        console.log(`🤖 [AI Review] 幣種已達標 (入庫後 ${ageMins.toFixed(1)} 分鐘)，啟動 AI 審批...`);
-                        console.log(`======================================================\n`);
-
                         const secResultStr = await redis.get(`SEC_RES:${mintAddress}`);
                         let secResult;
                         
@@ -344,7 +319,7 @@ function startDatabaseNurseryMonitor() {
 }
 
 // ========================================================
-// 🎯 核心：0 延遲實時盈虧監控與極速平倉 (V8.8 雙軌階梯版)
+// 🎯 核心：0 延遲實時盈虧監控與極速平倉 (V8.9 動態雙核心版)
 // ========================================================
 async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) {
     if (!currentPriceSol || currentPriceSol <= 0) return;
@@ -376,96 +351,68 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
     const drawdownFromHigh = ((currentPriceSol - pos.highest_price_sol) / pos.highest_price_sol) * 100;
     const highestPnlPct = ((pos.highest_price_sol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
     const isHalfSold = pos.strategy_type && pos.strategy_type.includes('HALF_SOLD');
-    const STOP_LOSS_PCT = parseFloat(config.stop_loss_pct || -20);
+    const isMeme = pos.strategy_type.includes('MEME');
+
+    // 🌟 [讀取快取參數] 根據魚池類型匹配專屬防線
+    const specificParams = isMeme ? cachedStrategyParams.meme : cachedStrategyParams.trending;
+    
+    // 如果 Backtest 未產出參數，Fallback 去 system_config 嘅 Dashboard 設定
+    const STOP_LOSS_PCT = specificParams?.stop_loss_pct !== undefined && specificParams?.stop_loss_pct !== null
+        ? Number(specificParams.stop_loss_pct) 
+        : parseFloat(config.stop_loss_pct || -20);
+
+    const tpTrigger = specificParams?.trailing_tp_trigger !== undefined && specificParams?.trailing_tp_trigger !== null
+        ? Number(specificParams.trailing_tp_trigger) 
+        : (isMeme ? 100 : 50);
+
+    const pullbackTolerance = specificParams?.trailing_pullback !== undefined && specificParams?.trailing_pullback !== null
+        ? Number(specificParams.trailing_pullback) 
+        : (isMeme ? 40 : 20);
 
     let action = 'HOLD'; let reason = ''; let sellFraction = 1.0; 
     
-    const isMeme = pos.strategy_type.includes('MEME');
-    let flashCrashThr = isMeme ? -10 : -7;       
-    let cliffDropThr = isMeme ? -40 : -20;       
+    // 瀑布防線保留少許硬指標防禦閃崩
+    let flashCrashThr = isMeme ? -15 : -10;       
+    let cliffDropThr = isMeme ? -45 : -30;       
     const takeCapitalThr = isMeme ? 100 : 50; 
 
-    // 🚀 [V8.8 終極雙軌升級] Meme 與 Trending 專屬的 Absolute PnL 動態鎖潤階梯
     let trailingTriggered = false;
     let trailingReason = '';
-    const pnlDropPoints = highestPnlPct - pnlPct; // 計算由歷史高位回落咗幾多個「百分點」
+    const pnlDropPoints = highestPnlPct - pnlPct; 
 
-    if (isMeme) {
-        // 🐶 Meme 幣：高風險、高爆發，容忍極端洗盤
-        if (highestPnlPct >= 300) {
-            flashCrashThr = -25;
-            cliffDropThr = -60;
-            // 300% 以上，容許跌 100 個 PnL 點 (真實跌幅容忍約 25%)
-            if (pnlDropPoints >= 100) { trailingTriggered = true; trailingReason = `最高 +${highestPnlPct.toFixed(0)}%，回落 100 個利潤點鎖潤`; }
-        } else if (highestPnlPct >= 200) {
-            flashCrashThr = -20;
-            cliffDropThr = -50;
-            // 200% 以上，容許跌 70 個 PnL 點 (真實跌幅容忍約 23.3%)
-            if (pnlDropPoints >= 70) { trailingTriggered = true; trailingReason = `最高 +${highestPnlPct.toFixed(0)}%，回落 70 個利潤點鎖潤`; }
-        } else if (highestPnlPct >= 150) {
-            flashCrashThr = -15;
-            cliffDropThr = -40;
-            // 150% 以上，容許跌 50 個 PnL 點 (真實跌幅容忍約 20%)
-            if (pnlDropPoints >= 50) { trailingTriggered = true; trailingReason = `最高 +${highestPnlPct.toFixed(0)}%，回落 50 個利潤點鎖潤`; }
-        } else if (highestPnlPct >= 100) {
-            flashCrashThr = -12;
-            cliffDropThr = -35;
-            // 100% 以上 (剛出本)，容許跌 40 個 PnL 點 (真實跌幅容忍約 20%)
-            if (pnlDropPoints >= 40) { trailingTriggered = true; trailingReason = `最高 +${highestPnlPct.toFixed(0)}%，回落 40 個利潤點鎖潤`; }
-        } else if (highestPnlPct >= 50) {
-            // 未翻倍前，用傳統真實回撤比例 (-30%) 保護
-            if (drawdownFromHigh <= -30) { trailingTriggered = true; trailingReason = `未翻倍前觸發追蹤止盈 (最高 +${highestPnlPct.toFixed(0)}%，現價真實回撤達 30%)`; }
+    // 🏆 [V8.9 動態追蹤止盈]
+    if (highestPnlPct >= tpTrigger) {
+        if (pnlDropPoints >= pullbackTolerance) { 
+            trailingTriggered = true; 
+            trailingReason = `動態網格防線: 最高 +${highestPnlPct.toFixed(0)}%，回落 ${pullbackTolerance} 個利潤點鎖潤`; 
         }
-    } else {
-        // 🔥 Trending / 藍籌幣：高市值、穩健拉升，收緊保護網
-        if (highestPnlPct >= 150) {
-            flashCrashThr = -15;
-            cliffDropThr = -40;
-            // 150% 已經係超級大牛市，容許跌 40 個 PnL 點 (即係保底食 +110%)
-            if (pnlDropPoints >= 40) { trailingTriggered = true; trailingReason = `熱門幣最高 +${highestPnlPct.toFixed(0)}%，回落 40 個利潤點鎖潤`; }
-        } else if (highestPnlPct >= 100) {
-            flashCrashThr = -12;
-            cliffDropThr = -30;
-            // 100% 以上，容許跌 30 個 PnL 點 (保底食 +70%)
-            if (pnlDropPoints >= 30) { trailingTriggered = true; trailingReason = `熱門幣最高 +${highestPnlPct.toFixed(0)}%，回落 30 個利潤點鎖潤`; }
-        } else if (highestPnlPct >= 80) {
-            flashCrashThr = -10;
-            cliffDropThr = -25;
-            // 80% 以上，容許跌 25 個 PnL 點 (保底食 +55%)
-            if (pnlDropPoints >= 25) { trailingTriggered = true; trailingReason = `熱門幣最高 +${highestPnlPct.toFixed(0)}%，回落 25 個利潤點鎖潤`; }
-        } else if (highestPnlPct >= 50) {
-            flashCrashThr = -8;
-            cliffDropThr = -25;
-            // 50% 以上 (剛出本)，容許跌 20 個 PnL 點 (保底食 +30%)
-            if (pnlDropPoints >= 20) { trailingTriggered = true; trailingReason = `熱門幣最高 +${highestPnlPct.toFixed(0)}%，回落 20 個利潤點鎖潤`; }
-        } else if (highestPnlPct >= 20) {
-            // 熱門幣未夠 50% 出本前，只要升過 +20%，回撤 -12% 就走人保平安
-            if (drawdownFromHigh <= -12) { trailingTriggered = true; trailingReason = `未出本前觸發追蹤止盈 (最高 +${highestPnlPct.toFixed(0)}%，現價真實回撤達 12%)`; }
-        }
+        // 動態放寬瀑布容忍度 (賺緊錢唔好輕易被洗走)
+        flashCrashThr = -20;
+        cliffDropThr = -50;
+    } else if (highestPnlPct >= 50 && isMeme) {
+        if (drawdownFromHigh <= -30) { trailingTriggered = true; trailingReason = `未達防線前保命 (最高 +${highestPnlPct.toFixed(0)}%，現價真實回撤達 30%)`; }
+    } else if (highestPnlPct >= 20 && !isMeme) {
+        if (drawdownFromHigh <= -15) { trailingTriggered = true; trailingReason = `未達防線前保命 (最高 +${highestPnlPct.toFixed(0)}%，現價真實回撤達 15%)`; }
     }
 
-    // 🏆 優先度 1：無情硬止盈 (Meme翻倍出本 / 熱門幣+50%出本) - 絕對優先！
+    // 🚨 優先度結算 
     if (!isHalfSold && pnlPct >= takeCapitalThr) {
         action = 'SELL'; 
         sellFraction = 0.5; 
         reason = `🎯 觸發硬止盈 (抽回本金)：利潤達 +${pnlPct.toFixed(2)}%，賣出 50% 鎖定本金，實現零風險持倉！`;
     } 
-    // 🛡️ 優先度 2：極速瀑布防線 (1分鐘內暴跌，現已支援高位動態放寬)
     else if (dropFrom1MinHigh <= flashCrashThr) {
         action = 'SELL'; 
         reason = `🚨 觸發瀑布防線：1 分鐘內極速插水 ${dropFrom1MinHigh.toFixed(2)}% (當前容忍度: ${flashCrashThr}%)`;
     } 
-    // 🛡️ 優先度 3：物理硬止損 (保護底線，跌穿必斬，移除 !isHalfSold 確保歸零前走人)
     else if (pnlPct <= STOP_LOSS_PCT) {
         action = 'SELL'; 
         reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${STOP_LOSS_PCT}%)`;
     } 
-    // 🛡️ 優先度 4：大佬專屬動態鎖潤網 (PnL 點數階梯)
     else if (trailingTriggered) {
         action = 'SELL'; 
         reason = `💰 ${trailingReason}`;
     }
-    // 🛡️ 優先度 5：斷崖式崩盤 (高位回撤過大)
     else if (drawdownFromHigh <= cliffDropThr) {
         action = 'SELL'; 
         reason = `🚨 偵測到斷崖式崩盤 (高位回撤 ${drawdownFromHigh.toFixed(2)}%，當前容忍度: ${cliffDropThr}%)`;
@@ -486,11 +433,22 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] V8.8 雙軌秒斬防線 + 瀑布備援查價系統已啟動...');
+    console.log('👁️ [Radar] V8.9 雙軌動態秒斬防線已啟動...');
     let cachedSolPriceUsd = 150; 
     const { getSolPriceInHKD } = require('./priceService');
     
-    setInterval(async () => { try { cachedSolPriceUsd = (await getSolPriceInHKD()) / 7.8; } catch(e) {} }, 60000);
+    // 🌟 [新增] 每 60 秒刷新快取參數
+    async function fetchStrategyParams() {
+        try {
+            cachedSolPriceUsd = (await getSolPriceInHKD()) / 7.8;
+            const { data: p2 } = await supabase.from('ai_strategy_params').select('*').eq('id', 2).single();
+            const { data: p3 } = await supabase.from('ai_strategy_params').select('*').eq('id', 3).single();
+            if (p2) cachedStrategyParams.meme = p2;
+            if (p3) cachedStrategyParams.trending = p3;
+        } catch(e) {}
+    }
+    fetchStrategyParams(); // 啟動時先跑一次
+    setInterval(fetchStrategyParams, 60000);
 
     setInterval(async () => {
         const { getPortfolio } = require('./portfolioService');
@@ -524,14 +482,11 @@ function startPositionMonitor() {
         if (timeSinceLastRedis > 60000 && portfolio?.positions?.length > 0) {
             if (!isHttpFallbackActive) {
                 isHttpFallbackActive = true;
-                sendAdminAlert(`⚠️ <b>[情報源中斷]</b>\n超過 1 分鐘未收到 Koyeb 無人機報價！\n大本營已自動啟動 HTTP 瀑布備援查價 (每 10 秒)。`);
-                console.log(`🚨 [Fallback] 啟動每 10 秒 HTTP 瀑布備援查價...`);
+                sendAdminAlert(`⚠️ <b>[情報源中斷]</b>\n超過 1 分鐘未收到 Koyeb 報價！大本營已啟動 HTTP 備援。`);
             }
-
             try {
                 const config = (await supabase.from('system_config').select('*').eq('id', 1).single()).data;
                 if (!config?.is_running) return;
-                
                 const mints = portfolio.positions.map(p => p.mint_address).join(',');
                 let fetchedPrices = {};
                 let fetchSuccess = false;
@@ -541,34 +496,17 @@ function startPositionMonitor() {
                         const res = await axios.get(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints}`, { timeout: 3000 });
                         const pricesObj = res.data?.data?.attributes?.token_prices;
                         if (pricesObj) {
-                            for (const [mint, priceStr] of Object.entries(pricesObj)) {
-                                if (priceStr) fetchedPrices[mint] = parseFloat(priceStr);
-                            }
+                            for (const [mint, priceStr] of Object.entries(pricesObj)) if (priceStr) fetchedPrices[mint] = parseFloat(priceStr);
                             fetchSuccess = true;
                         }
                     } catch (e) { markApiFailed('geckoTerminal'); }
-                }
-
-                if (!fetchSuccess && isApiAvailable('jupiterV3') && configEnv.external.jupiterApiKey) {
-                    try {
-                        const jupConfig = { timeout: 3000, headers: { 'x-api-key': configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim() } };
-                        const res = await axios.get(`https://api.jup.ag/price/v3?ids=${mints}`, jupConfig);
-                        if (res.data) {
-                            for (const [mint, info] of Object.entries(res.data)) {
-                                if (info.usdPrice) fetchedPrices[mint] = parseFloat(info.usdPrice);
-                            }
-                            fetchSuccess = true;
-                        }
-                    } catch (e) { markApiFailed('jupiterV3'); }
                 }
 
                 if (!fetchSuccess && isApiAvailable('jupiterV6')) {
                     try {
                         const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
                         if (res.data?.data) {
-                            for (const [mint, info] of Object.entries(res.data.data)) {
-                                if (info.price) fetchedPrices[mint] = parseFloat(info.price);
-                            }
+                            for (const [mint, info] of Object.entries(res.data.data)) if (info.price) fetchedPrices[mint] = parseFloat(info.price);
                             fetchSuccess = true;
                         }
                     } catch (e) { markApiFailed('jupiterV6'); }
@@ -581,15 +519,12 @@ function startPositionMonitor() {
                             await handleZeroLatencyCheck(pos.mint_address, solPrice, config, portfolio);
                         }
                     }
-                } else {
-                    console.warn(`⚠️ [Fallback] 所有備援 HTTP 查價皆已癱瘓！`);
                 }
             } catch (err) {}
 
         } else if (timeSinceLastRedis <= 60000 && isHttpFallbackActive) {
             isHttpFallbackActive = false;
-            sendAdminAlert(`✅ <b>[情報源恢復]</b>\nRedis 報價重新連線，大本營已關閉 HTTP 備援，切換回 0 延遲模式！`);
-            console.log(`🟢 [Fallback] 關閉備援，恢復 Redis 監聽。`);
+            sendAdminAlert(`✅ <b>[情報源恢復]</b>\nRedis 報價連線恢復，切換回 0 延遲模式！`);
         }
     }, 10000); 
 
@@ -613,37 +548,10 @@ function startPositionMonitor() {
                     const res = await axios.get(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints}`, { timeout: 3000 });
                     const pricesObj = res.data?.data?.attributes?.token_prices;
                     if (pricesObj) {
-                        for (const [mint, priceStr] of Object.entries(pricesObj)) {
-                            if (priceStr) fetchedPrices[mint] = parseFloat(priceStr);
-                        }
+                        for (const [mint, priceStr] of Object.entries(pricesObj)) if (priceStr) fetchedPrices[mint] = parseFloat(priceStr);
                         fetchSuccess = true;
                     }
                 } catch (e) { markApiFailed('geckoTerminal'); }
-            }
-
-            if (!fetchSuccess && isApiAvailable('jupiterV3') && configEnv.external.jupiterApiKey) {
-                try {
-                    const jupConfig = { timeout: 3000, headers: { 'x-api-key': configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim() } };
-                    const res = await axios.get(`https://api.jup.ag/price/v3?ids=${mints}`, jupConfig);
-                    if (res.data) {
-                        for (const [mint, info] of Object.entries(res.data)) {
-                            if (info.usdPrice) fetchedPrices[mint] = parseFloat(info.usdPrice);
-                        }
-                        fetchSuccess = true;
-                    }
-                } catch (e) { markApiFailed('jupiterV3'); }
-            }
-
-            if (!fetchSuccess && isApiAvailable('jupiterV6')) {
-                try {
-                    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
-                    if (res.data?.data) {
-                        for (const [mint, info] of Object.entries(res.data.data)) {
-                            if (info.price) fetchedPrices[mint] = parseFloat(info.price);
-                        }
-                        fetchSuccess = true;
-                    }
-                } catch (e) { markApiFailed('jupiterV6'); }
             }
 
             if (fetchSuccess) {
@@ -673,9 +581,7 @@ function startPositionMonitor() {
             }
 
             const currentMints = new Set(positions.map(p => p.mint_address));
-            for (const mint of aiReviewCooldowns.keys()) {
-                if (!currentMints.has(mint)) aiReviewCooldowns.delete(mint);
-            }
+            for (const mint of aiReviewCooldowns.keys()) if (!currentMints.has(mint)) aiReviewCooldowns.delete(mint);
 
             for (const pos of positions) {
                 if (sellingLocks.has(pos.mint_address)) continue;
@@ -696,8 +602,6 @@ function startPositionMonitor() {
                 const pnlPct = (((currentPrice - pos.entry_price_sol) * pos.quantity) / (pos.entry_price_sol * pos.quantity)) * 100;
                 aiReviewCooldowns.set(pos.mint_address, nowMs);
 
-                console.log(`\n👁️ [AI Overseer] 正在審查 ${pos.token_symbol} (PNL: ${pnlPct.toFixed(2)}%)...`);
-                
                 try {
                     let aiMemory = [];
                     const memoryStr = await redis.get(`ai_memory:${pos.mint_address}`);
@@ -751,18 +655,15 @@ function startPositionMonitor() {
 }
 
 function startCommandListener() {
-    console.log('👂 [Command] 獨立訊號接收器已啟動...');
     setInterval(async () => {
         try {
             const { data: commands } = await supabase.from('command_queue').select('*').order('created_at', { ascending: true });
             if (!commands || commands.length === 0) return;
 
             for (const cmd of commands) {
-                console.log(`📥 [Command] 收到管理員指令: ${cmd.command_type} (${cmd.mint_address || 'All'})`);
-
                 if (cmd.command_type === 'FORCE_SELL_ALL' || cmd.command_type === 'SELL_ALL') {
                     await supabase.from('system_config').update({ is_running: false, status_msg: '大盤暴跌自動避險中' }).eq('id', 1);
-                    sendAdminAlert(`🚨 <b>大盤雪崩，拔線逃生</b>\n管理員已按下紅色按鈕，全線強平清倉！`);
+                    sendAdminAlert(`🚨 <b>大盤雪崩，拔線逃生</b>\n全線強平清倉！`);
 
                     const { getPortfolio } = require('./portfolioService');
                     const positions = getPortfolio().positions;
@@ -779,11 +680,15 @@ function startCommandListener() {
                         let currentPrice = pos.entry_price_sol;
                         if (pos.strategy_type.includes('MEME')) {
                             const priceUsdStr = await redis.get(`price_usd:${pos.mint_address}`);
-                            if (priceUsdStr) currentPrice = parseFloat(priceUsdStr) / 150; 
+                            if (priceUsdStr) {
+                                const { getSolPriceInHKD } = require('./priceService');
+                                let liveSolUsd = 150;
+                                try { liveSolUsd = (await getSolPriceInHKD()) / 7.8; } catch(e) {}
+                                currentPrice = parseFloat(priceUsdStr) / liveSolUsd;
+                            }
                         } else {
                             currentPrice = trendingPriceCache.get(pos.mint_address) || pos.entry_price_sol;
                         }
-                        console.log(`👨‍💻 [Command] 執行手推斬倉: ${pos.token_symbol}`);
                         await runSellPipeline(pos, currentPrice, "👨‍💻 管理員手動市價平倉", 1.0);
                     }
                 }
@@ -810,7 +715,6 @@ function startOneMinuteMetricsAlert() {
 
         const currentWebhooks = webhooksThisMinute;
         webhooksThisMinute = 0; 
-
         const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
         console.log(`[${timeStr}] 📊 Minute Heartbeat -> AI Call: ${aiThisMinute} | Webhook: ${currentWebhooks}`);
     }, 60000); 

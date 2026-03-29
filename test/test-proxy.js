@@ -1,6 +1,6 @@
 // 確保路徑指啱你去你嘅 solana.js 檔案
 // 假設你個 solana.js 喺 ./src/config/solana.js，如果唔係請自行修改路徑
-const { connection } = require('./src/config/solana'); 
+const { connection } = require('../src/config/solana'); 
 
 async function runTest() {
     console.log("=========================================");
