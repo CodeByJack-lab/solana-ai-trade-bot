@@ -76,15 +76,11 @@ const securityGuard = {
                     const websites = pair.info?.websites || [];
                     const priceSol = parseFloat(pair.priceNative) || 0;
 
-                    // 判斷社交媒體
                     const hasSocials = socials.length > 0 || websites.length > 0;
                     const socialLabels = [...socials.map(s => s.type), ...(websites.length > 0 ? ['website'] : [])];
 
-                    // 🚀 [V8.3 新增] 榨取並判斷項目簡介 (Description)
                     const rawDescription = (pair.info?.description || pair.info?.header || '').trim();
-                    const cleanDescription = rawDescription.substring(0, 300); // 限制長度
-                    
-                    // 如果簡介長度少於 5 個字（例如淨係打個 "hi"），都當係無敘事！
+                    const cleanDescription = rawDescription.substring(0, 300); 
                     const hasDescription = cleanDescription.length >= 5; 
 
                     return {
@@ -101,7 +97,7 @@ const securityGuard = {
                         h24: parseFloat(pair.priceChange?.h24) || 0,
                         hasSocials: hasSocials,
                         socials: hasSocials ? `有 (${socialLabels.join('/')})` : '無',
-                        hasDescription: hasDescription, // 🚩 布林值，用嚟秒殺
+                        hasDescription: hasDescription, 
                         description: hasDescription ? cleanDescription : '無'
                     };
                 }
@@ -120,7 +116,6 @@ const securityGuard = {
             const cleanMint = this.sanitizeAddress(mintAddress);
             if (!cleanMint) return { isSafe: false, reason: '🛑 無效的 Base58 地址格式' };
 
-            // 🚀 第一重快取：帳戶是否存在
             const accountCacheKey = `SEC_ACC:${cleanMint}`;
             let isAccountValid = await redis.get(accountCacheKey);
 
@@ -146,7 +141,6 @@ const securityGuard = {
                 minRatio: parseFloat(params.min_liq_fdv_ratio || 0.01)
             };
 
-            // 活數據：直連 DexScreener 拿取
             let marketData = await this.getProfileFromDexScreener(cleanMint);
             if (!marketData) return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
 
@@ -159,7 +153,7 @@ const securityGuard = {
                 return { isSafe: false, reason: '🛑 項目三無 (無社交連結，極高危)' };
             }
 
-            // 2. 🚀 [V8.3 終極斬首] 敘事空白攔截 (無 Description)
+            // 2. 敘事空白攔截 (無 Description)
             if (!marketData.hasDescription) {
                 return { isSafe: false, reason: '🛑 敘事空白 (DexScreener 無項目簡介，拒絕交予 AI 浪費算力)' };
             }
@@ -167,6 +161,36 @@ const securityGuard = {
             // 3. 垃圾字眼/顏文字攔截
             const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
             if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
+
+            // 🚀 [V8.8 新增] 機器人刷量雷達 (Wash Trade Radar)
+            const buys = marketData.buys5m;
+            const sells = marketData.sells5m;
+            const totalTxs = buys + sells;
+            const m5Volume = marketData.volume5m;
+
+            if (totalTxs > 0) {
+                // 🛑 雷達 A: 假 FOMO / 貔貅攔截 (極端單向交易)
+                if (buys >= 15 && sells === 0) {
+                    return { isSafe: false, reason: "🛑 貔貅盤特徵 (買單>=15但零賣單，極高危)" };
+                }
+
+                // 🛑 雷達 B: 納米機關槍攔截 (平均單價過低)
+                if (totalTxs > 30) {
+                    const avgVolumePerTx = m5Volume / totalTxs;
+                    if (avgVolumePerTx < 15) { // 平均每單少於 $15 美金
+                        return { isSafe: false, reason: `🛑 納米刷量機 (均單僅 $${avgVolumePerTx.toFixed(2)}，偽造熱度)` };
+                    }
+                }
+
+                // 🛑 雷達 C: 完美乒乓波攔截 (對敲洗盤)
+                if (totalTxs > 50) {
+                    const buyRatio = buys / totalTxs;
+                    // 真實散戶盤買單數量通常遠超賣單，如果比例極度接近 1:1，必為 Bot 左手交右手
+                    if (buyRatio > 0.48 && buyRatio < 0.52) {
+                        return { isSafe: false, reason: `🛑 乒乓波對敲刷量 (買賣單數比例 ${buyRatio.toFixed(2)} 極度不自然)` };
+                    }
+                }
+            }
 
             const isBlindSnipe = (marketData.liquidity < 1000 && marketData.volume5m === 0);
 
@@ -187,7 +211,6 @@ const securityGuard = {
                 if (currentRatio < limits.minRatio) return { isSafe: false, reason: `📉 泡沫極大 (比例 ${(currentRatio * 100).toFixed(2)}%)` };
             }
 
-            // 🚀 第二重快取：合約權限與 RugPull 檢查
             const rugCacheKey = `SEC_RUG:${cleanMint}`;
             const cachedRugResult = await redis.get(rugCacheKey);
             
@@ -203,7 +226,7 @@ const securityGuard = {
             return {
                 isSafe: true,
                 isBlindSnipe: isBlindSnipe,
-                marketData: marketData, // 👈 依家呢度包埋 description，AI 軍師睇得一清二楚！
+                marketData: marketData,
                 reason: '✅ 物理與合約防線全數通過'
             };
 
