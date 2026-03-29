@@ -13,13 +13,16 @@ const apiCooldowns = {
     jupiterV6: 0
 };
 
+// 🚀 [新增] 全局記憶體：記住最後一次成功獲取嘅 SOL 價格 (預設 150 USD)
+let lastValidPriceUsd = 150;
+
 function isApiAvailable(apiName) {
     return Date.now() > apiCooldowns[apiName];
 }
 
 function markApiFailed(apiName) {
     console.warn(`🚨 [Price Fallback] ${apiName} 發生故障，已觸發斷路器，進入 60 秒冷卻期！`);
-    apiCooldowns[apiName] = Date.now() + 60000; // 鎖 60 秒
+    apiCooldowns[apiName] = Date.now() + 60000;
 }
 
 async function getSolPriceInHKD() {
@@ -60,16 +63,21 @@ async function getSolPriceInHKD() {
         } catch (err) { markApiFailed('jupiterV6'); }
     }
 
-    // 💰 結算
+    // 💰 結算與記憶更新
     try {
         if (priceUsd) {
+            lastValidPriceUsd = priceUsd; // 🚀 更新最後生還記憶
             const hkdRate = await getUSDHKDRate(); 
             return priceUsd * hkdRate; 
         }
-        console.error(`💥 [PriceService] 所有情報源均已癱瘓！使用最後保底價。`);
-        return 1150; 
+        
+        // 🛑 如果真係 4 條喉都死晒，用記憶體入面最後一口有效價！
+        console.error(`💥 [PriceService] 所有情報源均已癱瘓！使用最後成功記憶報價: $${lastValidPriceUsd} USD`);
+        const hkdRate = await getUSDHKDRate().catch(() => 7.8); // 防止 HKD API 亦同時癱瘓
+        return lastValidPriceUsd * hkdRate; 
+
     } catch (e) {
-        return 1150;
+        return lastValidPriceUsd * 7.8;
     }
 }
 
