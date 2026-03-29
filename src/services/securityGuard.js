@@ -73,7 +73,12 @@ const securityGuard = {
                     const pair = pairs[0];
 
                     const socials = pair.info?.socials || [];
+                    const websites = pair.info?.websites || [];
                     const priceSol = parseFloat(pair.priceNative) || 0;
+
+                    // 🚀 [新增] 嚴格判斷是否有任何社交媒體或網站
+                    const hasSocials = socials.length > 0 || websites.length > 0;
+                    const socialLabels = [...socials.map(s => s.type), ...(websites.length > 0 ? ['website'] : [])];
 
                     return {
                         symbol: pair.baseToken?.symbol || 'UNKNOWN',
@@ -87,7 +92,8 @@ const securityGuard = {
                         sells5m: pair.txns?.m5?.sells || 0,
                         h1: parseFloat(pair.priceChange?.h1) || 0,
                         h24: parseFloat(pair.priceChange?.h24) || 0,
-                        socials: socials.length > 0 ? `有 (${socials.map(s => s.type).join('/')})` : '無'
+                        hasSocials: hasSocials, // 🚩 布林值，方便攔截
+                        socials: hasSocials ? `有 (${socialLabels.join('/')})` : '無'
                     };
                 }
             }
@@ -115,7 +121,6 @@ const securityGuard = {
                     if (!accountInfo) {
                         return { isSafe: false, isPurgatory: true, reason: '⏳ 鏈上查無帳戶 (等待廣播中)' };
                     }
-                    // 帳戶存在，記低 24 小時，以後唔使再問 RPC
                     await redis.set(accountCacheKey, 'VALID', 'EX', 86400); 
                 } catch (rpcErr) {
                     return { isSafe: false, isPurgatory: true, reason: `⏳ RPC連線異常: ${rpcErr.message}` };
@@ -135,6 +140,11 @@ const securityGuard = {
             // 活數據：永遠直連 DexScreener 拿取
             let marketData = await this.getProfileFromDexScreener(cleanMint);
             if (!marketData) return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
+
+            // 🚨 [V8.2 終極過濾] 項目三無攔截 (無 X / Telegram / 網站)
+            if (!marketData.hasSocials) {
+                return { isSafe: false, reason: '🛑 項目三無 (無 X/Telegram/網站等社交連結，極高危)' };
+            }
 
             const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
             if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
@@ -163,14 +173,11 @@ const securityGuard = {
             const cachedRugResult = await redis.get(rugCacheKey);
             
             if (cachedRugResult === 'SAFE') {
-                // 如果之前已經查過係安全，直接 Pass，節省 1-2 次 RPC/API Call！
                 console.log(`🛡️ [Security Cache] 命中快取: ${marketData.symbol} 合約權限已驗證為安全`);
             } else {
-                // 如果未查過，就認真查一次
                 const rugResult = await this.checkRugPull(cleanMint);
-                if (!rugResult.isSafe) return rugResult; // 唔安全就踢走
+                if (!rugResult.isSafe) return rugResult; 
                 
-                // 查過係安全嘅話，記低佢 24 小時！
                 await redis.set(rugCacheKey, 'SAFE', 'EX', 86400);
             }
 
@@ -192,7 +199,7 @@ const securityGuard = {
         try {
             const url = `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`;
             const response = await axios.get(url, {
-                timeout: 5000, // 縮短 Timeout，防卡死
+                timeout: 5000, 
                 headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
             });
 
@@ -213,7 +220,6 @@ const securityGuard = {
 
             return { isSafe: true };
         } catch (err) {
-            // RugCheck 瓜咗先交畀原生 RPC 備援
             return await this.fallbackNativeCheck(mintAddress);
         }
     },
