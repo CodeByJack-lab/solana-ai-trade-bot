@@ -23,16 +23,37 @@ const securityGuard = {
         return clean;
     },
 
+    // 🔪 升級版 GGFilter (Garbage Guard): 攔截垃圾字眼 + 顏文字/火星文
     isGarbageToken(name, symbol) {
         const target = `${name} ${symbol}`.toLowerCase();
+        
+        // 1. 傳統垃圾字眼攔截 (Airdrop, Scam, Presale 等)
         const badPatterns = [
             /\.com/i, /\.io/i, /\.org/i, /\.xyz/i, /t\.me\//i,         
             /test\s*token/i, /testnet/i, /presale/i, /airdrop/i,         
             /claim/i, /free/i, /scam/i, /fake/i, /honeypot/i
         ];
         for (const pattern of badPatterns) {
-            if (pattern.test(target)) return { isGarbage: true, match: pattern.toString() };
+            if (pattern.test(target)) return { isGarbage: true, match: `垃圾字眼: ${pattern.toString()}` };
         }
+
+        // 2. 🛡️ 新增：純符號/無英數代號攔截 (例如 "∴｡･ﾟ")
+        const hasStandardChar = /[a-zA-Z0-9]/.test(symbol);
+        if (!hasStandardChar) {
+            return { isGarbage: true, match: '無英數純符號代號' };
+        }
+
+        // 3. 🛡️ 新增：顏文字與古怪 Unicode 區塊攔截 (防反追蹤偽裝)
+        const weirdSymbolRegex = /[\u2000-\u3300\uFE00-\uFEFF\uD83C-\uD83E\uDC00-\uDFFF]/;
+        if (weirdSymbolRegex.test(symbol) || weirdSymbolRegex.test(name)) {
+            return { isGarbage: true, match: '偵測到顏文字/古怪符號' };
+        }
+
+        // 4. 🛡️ 新增：超長代號攔截 (防亂碼)
+        if (symbol.length > 15) {
+             return { isGarbage: true, match: '代號長度異常 (>15字)' };
+        }
+
         return { isGarbage: false };
     },
 
@@ -120,7 +141,7 @@ const securityGuard = {
                 return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
             }
 
-            // 垃圾名攔截
+            // 🔪 垃圾名 / 火星文 / 顏文字 攔截
             const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
             if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
 
