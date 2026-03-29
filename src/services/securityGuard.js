@@ -76,9 +76,16 @@ const securityGuard = {
                     const websites = pair.info?.websites || [];
                     const priceSol = parseFloat(pair.priceNative) || 0;
 
-                    // 🚀 [新增] 嚴格判斷是否有任何社交媒體或網站
+                    // 判斷社交媒體
                     const hasSocials = socials.length > 0 || websites.length > 0;
                     const socialLabels = [...socials.map(s => s.type), ...(websites.length > 0 ? ['website'] : [])];
+
+                    // 🚀 [V8.3 新增] 榨取並判斷項目簡介 (Description)
+                    const rawDescription = (pair.info?.description || pair.info?.header || '').trim();
+                    const cleanDescription = rawDescription.substring(0, 300); // 限制長度
+                    
+                    // 如果簡介長度少於 5 個字（例如淨係打個 "hi"），都當係無敘事！
+                    const hasDescription = cleanDescription.length >= 5; 
 
                     return {
                         symbol: pair.baseToken?.symbol || 'UNKNOWN',
@@ -92,8 +99,10 @@ const securityGuard = {
                         sells5m: pair.txns?.m5?.sells || 0,
                         h1: parseFloat(pair.priceChange?.h1) || 0,
                         h24: parseFloat(pair.priceChange?.h24) || 0,
-                        hasSocials: hasSocials, // 🚩 布林值，方便攔截
-                        socials: hasSocials ? `有 (${socialLabels.join('/')})` : '無'
+                        hasSocials: hasSocials,
+                        socials: hasSocials ? `有 (${socialLabels.join('/')})` : '無',
+                        hasDescription: hasDescription, // 🚩 布林值，用嚟秒殺
+                        description: hasDescription ? cleanDescription : '無'
                     };
                 }
             }
@@ -111,7 +120,7 @@ const securityGuard = {
             const cleanMint = this.sanitizeAddress(mintAddress);
             if (!cleanMint) return { isSafe: false, reason: '🛑 無效的 Base58 地址格式' };
 
-            // 🚀 [V8.2] 第一重快取：帳戶是否存在
+            // 🚀 第一重快取：帳戶是否存在
             const accountCacheKey = `SEC_ACC:${cleanMint}`;
             let isAccountValid = await redis.get(accountCacheKey);
 
@@ -137,15 +146,25 @@ const securityGuard = {
                 minRatio: parseFloat(params.min_liq_fdv_ratio || 0.01)
             };
 
-            // 活數據：永遠直連 DexScreener 拿取
+            // 活數據：直連 DexScreener 拿取
             let marketData = await this.getProfileFromDexScreener(cleanMint);
             if (!marketData) return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
 
-            // 🚨 [V8.2 終極過濾] 項目三無攔截 (無 X / Telegram / 網站)
+            // ==========================================
+            // 🚨 物理秒殺區 (連 AI 都慳返)
+            // ==========================================
+            
+            // 1. 三無攔截 (無 X / Telegram / 網站)
             if (!marketData.hasSocials) {
-                return { isSafe: false, reason: '🛑 項目三無 (無 X/Telegram/網站等社交連結，極高危)' };
+                return { isSafe: false, reason: '🛑 項目三無 (無社交連結，極高危)' };
             }
 
+            // 2. 🚀 [V8.3 終極斬首] 敘事空白攔截 (無 Description)
+            if (!marketData.hasDescription) {
+                return { isSafe: false, reason: '🛑 敘事空白 (DexScreener 無項目簡介，拒絕交予 AI 浪費算力)' };
+            }
+
+            // 3. 垃圾字眼/顏文字攔截
             const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
             if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
 
@@ -168,7 +187,7 @@ const securityGuard = {
                 if (currentRatio < limits.minRatio) return { isSafe: false, reason: `📉 泡沫極大 (比例 ${(currentRatio * 100).toFixed(2)}%)` };
             }
 
-            // 🚀 [V8.2] 第二重快取：合約權限與 RugPull 檢查
+            // 🚀 第二重快取：合約權限與 RugPull 檢查
             const rugCacheKey = `SEC_RUG:${cleanMint}`;
             const cachedRugResult = await redis.get(rugCacheKey);
             
@@ -184,7 +203,7 @@ const securityGuard = {
             return {
                 isSafe: true,
                 isBlindSnipe: isBlindSnipe,
-                marketData: marketData,
+                marketData: marketData, // 👈 依家呢度包埋 description，AI 軍師睇得一清二楚！
                 reason: '✅ 物理與合約防線全數通過'
             };
 
