@@ -1,3 +1,4 @@
+// src/services/newsSentimentService.js
 const axios = require('axios');
 const Parser = require('rss-parser');
 const { supabase } = require('../config/supabase');
@@ -17,13 +18,14 @@ const newsSentimentService = {
 
             const recentTitles = feed.items.slice(0, 10).map(item => `- ${item.title}`).join('\n');
             
-            const prompt = `你是量化基金風控官。請評估以下標題對幣圈的恐慌程度 (0-100)。
-            0-30: 平靜/利好。
-            31-60: 常規震盪。
-            61-100: 黑天鵝/崩盤。
-            只回傳純 JSON：{"score": 數字}
+            // 🚀 [V8.4 升級] 華爾街全英文指令，完美契合英文新聞標題，解放 Groq 最高智商
+            const prompt = `You are the Macro Risk Officer of a quantitative hedge fund. Evaluate the panic level (0-100) of the cryptocurrency market based on the following news headlines.
+            0-30: Calm / Bullish / Greed.
+            31-60: Normal volatility / Neutral.
+            61-100: Black Swan / Crash / Extreme Fear.
+            Output pure JSON only: {"score": <number>}
             
-            標題：\n${recentTitles}`;
+            Headlines:\n${recentTitles}`;
 
             // 🚀 核心：直接使用 SENTIMENT 崗位，Orchestrator 會自動從 SQL 抓取最新配置
             const result = await aiOrchestrator.executeTask('SENTIMENT', 'GROQ', prompt);
