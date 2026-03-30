@@ -11,7 +11,7 @@ let useCoinGeckoNext = true;
 
 const macroMonitorService = {
     
-    // 🦎 數據源 A: CoinGecko (使用 Demo API Key)
+    // 🦎 數據源 A: CoinGecko
     async fetchHighAndDropCoinGecko(coinId) {
         const url = `https://api.coingecko.com/api/v3/coins/${coinId}/market_chart?vs_currency=usd&days=1`;
         const config = {
@@ -19,15 +19,10 @@ const macroMonitorService = {
             timeout: 10000
         };
 
-        // 🚀 動態注入 CoinGecko 金鑰
+        // 🚀 [核心修復] 統一使用 Demo Header，防止 400 Bad Request
         if (configEnv.external.coingeckoApiKey) {
             const cleanKey = configEnv.external.coingeckoApiKey.replace(/['"]/g, '').trim();
-            // 判斷是 Demo Key 還是 Pro Key (Demo Key 通常以 CG- 開頭)
-            if (cleanKey.startsWith('CG-')) {
-                config.headers['x-cg-pro-api-key'] = cleanKey;
-            } else {
-                config.headers['x-cg-demo-api-key'] = cleanKey;
-            }
+            config.headers['x-cg-demo-api-key'] = cleanKey;
         }
 
         const res = await axios.get(url, config);
@@ -163,7 +158,6 @@ const macroMonitorService = {
 
                 const { btcData, solData, sourceName } = await this.getMarketData();
                 
-                // 🛑 移除了原本這裡的 `useCoinGeckoNext = !useCoinGeckoNext;`，讓它一直用到 Failed 為止！
                 healthMonitor.setStatus('Macro_Radar', `🟢 正常 (${sourceName})`);
 
                 let isPriceTriggered = false;
