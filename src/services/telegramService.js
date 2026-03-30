@@ -4,13 +4,17 @@ const path = require('path');
 const configEnv = require('../config/env');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-// 📈 交易戰報 Bot (Main)
+// 📈 交易戰報 Bot (Main / Channel)
 const TRADE_BOT_TOKEN = configEnv.telegram.mainBotToken;
 const TRADE_CHAT_ID = configEnv.telegram.channelId;
 
-// ⚙️ 系統管理員 Bot (Admin)
+// ⚙️ 系統管理員 Bot (Admin / 專收 Approve 掣)
 const ADMIN_BOT_TOKEN = configEnv.telegram.adminBotToken;
 const ADMIN_CHAT_ID = configEnv.telegram.chatId;
+
+// 🌟 Personal Chat ID (你的私人 TG ID，用嚟收系統通知)
+// 既然同 Admin ID 一樣，如果無特別 set personalChatId，就直接用 ADMIN_CHAT_ID 嘅數字
+const PERSONAL_CHAT_ID = configEnv.telegram.personalChatId || process.env.PERSONAL_CHAT_ID || ADMIN_CHAT_ID;
 
 function safeHTML(text) {
     if (!text) return "";
@@ -47,14 +51,14 @@ async function _send(message, token, chatId) {
     }
 }
 
+// 🔵 買賣戰報：用 Main Bot 去 Channel
 async function sendTelegramAlert(message) {
     await _send(message, TRADE_BOT_TOKEN, TRADE_CHAT_ID);
 }
 
+// 🟠 系統通知 (Health/Error/Fallback)：用 Main Bot 去你 Personal Chat
 async function sendAdminAlert(message) {
-    const token = ADMIN_BOT_TOKEN || TRADE_BOT_TOKEN;
-    const chat = ADMIN_CHAT_ID || TRADE_CHAT_ID;
-    await _send(message, token, chat);
+    await _send(message, TRADE_BOT_TOKEN, PERSONAL_CHAT_ID);
 }
 
 // ==========================================
@@ -72,29 +76,23 @@ function checkSystemHealth() {
     const currentErrors = lines.filter(l => l.includes('🔴') || l.includes('🟡')).join('\n');
     
     if (currentErrors !== "") {
-        // 有錯誤發生
         if (currentErrors !== lastErrorState) {
-            // 新的錯誤，開始計時，不立即報警
             lastErrorState = currentErrors;
             errorStartTime = Date.now();
             hasAlertedError = false;
         } else if (!hasAlertedError && (Date.now() - errorStartTime > 60000)) {
-            // 🚀 [新增] 相同錯誤持續超過 1 分鐘 -> 發送警報！
             const cleanReport = safeHTML(report);
             const alertMsg = `🚨 <b>【系統故障警告】偵測到持續 1 分鐘以上的異常！</b>\n請即刻檢查伺服器狀態！\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
             sendAdminAlert(alertMsg);
-            hasAlertedError = true; // 標記已發送，防止每 20 秒洗版
+            hasAlertedError = true; 
         }
     } else {
-        // 恢復全綠
         if (lastErrorState !== "") {
             if (hasAlertedError) {
-                // 🚀 [新增] 如果之前有報警，依家好返，先至 send 恢復通知
                 const cleanReport = safeHTML(report);
                 const recoveryMsg = `✅ <b>【系統恢復正常】所有模組已穩定超過 1 分鐘！解除警報！</b>\n\n🩺 <b>當前看板狀態：</b>\n${cleanReport}`;
                 sendAdminAlert(recoveryMsg);
             }
-            // 清空狀態
             lastErrorState = "";
             errorStartTime = 0;
             hasAlertedError = false;
@@ -102,9 +100,11 @@ function checkSystemHealth() {
     }
 }
 
-// 🚀 [新增] 每 20 秒 Check，滿足 60 秒條件先 Send
 setInterval(checkSystemHealth, 20 * 1000);
 
+// ==========================================
+// 📸 參數快照
+// ==========================================
 async function sendParamSnapshot() {
     const { supabase } = require('../config/supabase');
     try {
@@ -123,11 +123,15 @@ async function sendParamSnapshot() {
 // 🛡️ V8.9 HITL 審批中樞 (Human-in-the-Loop)
 // ==========================================
 
-// 1. 發送帶有「批准/否決」按鈕的報告
+// 1. 發送帶有「批准/否決」按鈕的報告 (強制去 Admin Chat)
 async function sendApprovalRequest(reportText, proposalId) {
-    const token = ADMIN_BOT_TOKEN || TRADE_BOT_TOKEN;
-    const chat = ADMIN_CHAT_ID || TRADE_CHAT_ID;
-    if (!token || !chat) return;
+    const token = ADMIN_BOT_TOKEN;
+    const chat = ADMIN_CHAT_ID;
+    
+    if (!token || !chat) {
+        console.error("❌ [Telegram] 缺少 ADMIN_BOT_TOKEN 或 ADMIN_CHAT_ID");
+        return;
+    }
 
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
     const keyboard = {
@@ -152,13 +156,13 @@ async function sendApprovalRequest(reportText, proposalId) {
     }
 }
 
-// 2. 處理 Telegram 傳回來的按鈕點擊 (Callback Query)
+// 2. 處理 Telegram 傳回來的按鈕點擊 (強制用 Admin Bot 回覆)
 async function processTelegramCallback(callbackQuery) {
     const { supabase } = require('../config/supabase');
     const data = callbackQuery.data; 
     const messageId = callbackQuery.message.message_id;
     const chat = callbackQuery.message.chat.id;
-    const token = ADMIN_BOT_TOKEN || TRADE_BOT_TOKEN;
+    const token = ADMIN_BOT_TOKEN; 
 
     if (!data.startsWith('APPROVE_') && !data.startsWith('REJECT_')) return;
 
@@ -183,18 +187,15 @@ async function processTelegramCallback(callbackQuery) {
             await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "🗑️ <b>提案已否決。</b>", parse_mode: 'HTML' });
         } 
         else if (action === 'APPROVE') {
-            // 🚀 重點：如果 proposed_changes 係 String，要先 parse 做 JSON
             const changes = typeof proposal.proposed_changes === 'string' ? JSON.parse(proposal.proposed_changes) : proposal.proposed_changes;
             let successMsg = "✅ <b>提案已批准並套用！</b>\n";
 
             if (proposal.proposal_type === 'MASTER_AI') {
-                // 1. 更新 Prompt
                 if (changes.target_prompt_id && changes.new_prompt_content) {
                     await supabase.from('bot_prompts').update({ content: changes.new_prompt_content, updated_at: new Date() }).eq('prompt_id', changes.target_prompt_id);
                     successMsg += `\n🧠 劇本 [${changes.target_prompt_id}] 已更新。`;
                 }
                 
-                // 2. 更新入場參數 (全能解析版)
                 if (changes.recommended_params) {
                     const parseAllFields = (params) => {
                         const updates = {};
@@ -211,15 +212,13 @@ async function processTelegramCallback(callbackQuery) {
                     if (changes.recommended_params.meme) {
                         const memeUpdates = parseAllFields(changes.recommended_params.meme);
                         if (Object.keys(memeUpdates).length > 0) {
-                            const { error: err2 } = await supabase.from('ai_strategy_params').update(memeUpdates).eq('id', 2);
-                            if (err2) console.error("Update Meme Params Error:", err2);
+                            await supabase.from('ai_strategy_params').update(memeUpdates).eq('id', 2);
                         }
                     }
                     if (changes.recommended_params.trending) {
                         const trendUpdates = parseAllFields(changes.recommended_params.trending);
                         if (Object.keys(trendUpdates).length > 0) {
-                            const { error: err3 } = await supabase.from('ai_strategy_params').update(trendUpdates).eq('id', 3);
-                            if (err3) console.error("Update Trending Params Error:", err3);
+                            await supabase.from('ai_strategy_params').update(trendUpdates).eq('id', 3);
                         }
                     }
                     successMsg += `\n⚙️ 入場及風險參數已同步更新。`;

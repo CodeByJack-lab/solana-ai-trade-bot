@@ -2,8 +2,8 @@
 const { getPortfolio, updateCache } = require('./portfolioService');
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
-const { PublicKey, Keypair } = require('@solana/web3.js'); 
-const { connection } = require('../config/solana'); 
+const { PublicKey, Keypair, Connection } = require('@solana/web3.js'); 
+const { connection } = require('../config/solana'); // 👈 主節點 (專屬寫入/模擬)
 const BigNumber = require('bignumber.js'); 
 const { executeLiveSwapUAT } = require('./liveTradeService');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService'); 
@@ -17,6 +17,36 @@ if (bs58.default) {
 }
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
+
+// ==========================================
+// 🛡️ [V8.9 讀寫分離] 免費公共 RPC 彈匣 (自動輪替)
+// ==========================================
+const PUBLIC_RPC_ENDPOINTS = [
+    'https://api.mainnet-beta.solana.com', // 官方兜底節點
+    'https://solana-rpc.publicnode.com'    // PublicNode 免費節點
+];
+
+// 核心重試引擎：將「讀取」動作交畀免費節點，失敗自動切換
+async function executeReadWithFailover(operationName, readFunction) {
+    for (let i = 0; i < PUBLIC_RPC_ENDPOINTS.length; i++) {
+        const currentEndpoint = PUBLIC_RPC_ENDPOINTS[i];
+        const readConnection = new Connection(currentEndpoint, 'confirmed');
+        try {
+            return await readFunction(readConnection);
+        } catch (error) {
+            console.warn(`⚠️ [Read Fallback] ${operationName} 於免費節點 ${i+1} 失敗，嘗試切換備援...`);
+            if (i === PUBLIC_RPC_ENDPOINTS.length - 1) {
+                console.warn(`⚠️ [Read Fallback] 所有免費節點癱瘓，切換回主節點 (Helius/QuickNode) 執行 ${operationName}...`);
+                try {
+                    return await readFunction(connection); // 最後用主節點保底
+                } catch (mainErr) {
+                    console.error(`❌ [Read Fatal] ${operationName} 主節點亦告失敗！`);
+                    return null;
+                }
+            }
+        }
+    }
+}
 
 let globalWalletPublicKey = null;
 try {
@@ -32,31 +62,44 @@ try {
     console.error("⚠️ [TradeService] 無法解析 Private Key");
 }
 
+// 🎯 將「查餘額」掟畀免費節點 + 內置三連查防護 (防假歸零)
 async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
-    try {
+    return await executeReadWithFailover('getRealTokenBalance', async (readConn) => {
         const walletKey = new PublicKey(walletPubKeyStr);
         const mintKey = new PublicKey(tokenMintStr);
-        const parsedTokenAccounts = await connection.getParsedTokenAccountsByOwner(walletKey, { mint: mintKey });
-        if (parsedTokenAccounts.value.length === 0) return 0;
-
+        
+        let attempts = 0;
         let totalUiAmount = 0;
-        for (const accountInfo of parsedTokenAccounts.value) {
-            totalUiAmount += accountInfo.account.data.parsed.info.tokenAmount.uiAmount;
+        
+        // 🛡️ RPC 三連查機制：防止區塊未 Sync 導致嘅假歸零
+        while (attempts < 3) {
+            const parsedTokenAccounts = await readConn.getParsedTokenAccountsByOwner(walletKey, { mint: mintKey });
+            if (parsedTokenAccounts.value.length === 0) {
+                attempts++;
+                if (attempts < 3) await new Promise(r => setTimeout(r, 1500)); // 等 1.5 秒再查
+                continue;
+            }
+            
+            totalUiAmount = 0;
+            for (const accountInfo of parsedTokenAccounts.value) {
+                totalUiAmount += accountInfo.account.data.parsed.info.tokenAmount.uiAmount;
+            }
+            return totalUiAmount; // 成功搵到餘額，即刻 Return
         }
-        return totalUiAmount;
-    } catch (e) {
-        console.error(`⚠️ [Balance Check] 無法獲取真實代幣餘額:`, e.message);
-        return null; 
-    }
+        return totalUiAmount; // 3 次都係 0，回傳 0
+    });
 }
 
+// 🎯 將「查代幣小數點」掟畀免費節點
 async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageBps = null) {
     try {
         let decimals = 6; 
-        try {
-            const supplyInfo = await connection.getTokenSupply(new PublicKey(tokenMint));
-            decimals = supplyInfo.value?.decimals ?? 6; 
-        } catch (e) {}
+        
+        const decimalsResult = await executeReadWithFailover('getTokenSupply', async (readConn) => {
+            const supplyInfo = await readConn.getTokenSupply(new PublicKey(tokenMint));
+            return supplyInfo.value?.decimals;
+        });
+        if (decimalsResult !== undefined && decimalsResult !== null) decimals = decimalsResult;
 
         let inputMint = isBuying ? SOL_MINT : tokenMint;
         let outputMint = isBuying ? tokenMint : SOL_MINT;
@@ -203,10 +246,10 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         let newBalance = currentBalance - Number(totalCostSol);
 
         if (isLive && globalWalletPublicKey) {
-            try {
-                const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
-                newBalance = realLamports / 1e9;
-            } catch (e) {}
+            const realLamports = await executeReadWithFailover('getBalance(Buy)', async (readConn) => {
+                return await readConn.getBalance(new PublicKey(globalWalletPublicKey));
+            });
+            if (realLamports !== null) newBalance = realLamports / 1e9;
         }
 
         await supabase.from('system_config')
@@ -235,7 +278,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
 
         if(typeof sendTelegramAlert === 'function') {
             const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
-            // 👇 加入分類標籤
             const typeTag = strategyType.includes('MEME') ? '🐣 NEW meme' : '🔥 TOP 100 meme';
             sendTelegramAlert(`${modeTag} <b>✅ 買入成功</b>\n🏷️ 類別: ${typeTag}\n🪙 代幣: $${tokenSymbol}\n💰 投入: ${totalCostSol.toFixed(4)} SOL\n🔗 TX: ${isLive ? `<a href="https://solscan.io/tx/${finalTxid}">Solscan</a>` : finalTxid}\n🧠 理由: ${aiReason}`);
         }
@@ -245,6 +287,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     return false;
 }
 
+// 🛡️ V8.9 終極防禦：階梯式動態滑點 + 讀寫分離 + DEFCON 防禦網
 async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction = 1.0) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
@@ -259,17 +302,8 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     console.log(`\n⚡ [Sell] 正在嘗試平倉: ${tokenSymbol} (預期比例: ${sellFraction * 100}%)`);
 
     if (isLive && globalWalletPublicKey) {
-        // 🛠️ [修正一：RPC 餘額狀態重試機制 (防假歸零)]
-        let realBal = null;
-        for (let i = 1; i <= 3; i++) {
-            realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
-            if (realBal !== null && realBal > 0) break; // 搵到幣就即走
-            if (realBal === 0 && i < 3) {
-                console.warn(`⚠️ [RPC Retry] 第 ${i} 次查餘額為 0，可能係節點未 Sync，等 2 秒再查...`);
-                await new Promise(r => setTimeout(r, 2000));
-            }
-        }
-
+        // 🛠️ [防假歸零] getRealTokenBalance 內已經自帶 3 連查機制
+        const realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
         if (realBal !== null) {
             if (realBal === 0) {
                 console.error(`🚨 [FATAL] 鏈上餘額連續 3 次確認為 0，無法賣出！自動執行本地撇帳。`);
@@ -283,66 +317,83 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     const isStopLoss = reason.includes('止損') || reason.includes('硬止損') || reason.includes('虧損') || reason.includes('拔線') || reason.includes('瀑布');
     
-    // 🛠️ [修正二：動態滑點計算 (Dynamic Slippage)]
-    // 1. 先攞一個初始 Quote 來探測 Price Impact (衝擊)
-    let initialQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, 50); // 先用 0.5% 攞資料
-
-    if (!initialQuote) {
-        console.log(`⚠️ [Liquidity Warning] ${tokenSymbol} 查無常規報價，流動性可能枯竭。嘗試最高絕望滑點 (30%) 強平...`);
-        initialQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, 3000);
-        if (!initialQuote) {
-            try {
-                const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`, { timeout: 3000 });
-                const pair = dexRes.data?.pairs?.find(p => p.chainId === 'solana');
-                if ((pair?.liquidity?.usd || 0) < 500) await forceWriteOff(mintAddress, "流動性枯竭，強行撇帳");
-            } catch (e) {}
-            return false; 
+    // 🟡 DEFCON 4 & 5：統一由 5% (500 bps) 起步試水溫，拒絕一嚟送錢！
+    let currentSlippage = 500; 
+    let quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
+    
+    // 🟠 DEFCON 3：報價失敗 ➡️ 溫水煮蛙階梯放寬 (10% 到 30%)
+    if (!quoteData) {
+        console.warn(`⚠️ [Liquidity Warning] ${tokenSymbol} ${currentSlippage/100}% 滑點無報價，啟動階梯式放寬探測...`);
+        // 止損最高試到 30%，非止損最高試到 15%
+        const fallbackSteps = isStopLoss ? [1000, 1500, 2000, 2500, 3000] : [1000, 1500]; 
+        
+        for (const stepSlippage of fallbackSteps) {
+            console.log(`🔄 [DEFCON 3] 嘗試放寬滑點至 ${(stepSlippage/100).toFixed(0)}%...`);
+            quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, stepSlippage);
+            if (quoteData) {
+                currentSlippage = stepSlippage;
+                console.log(`✅ [Slippage Found] 成功於 ${(currentSlippage/100).toFixed(0)}% 取得流動性報價！`);
+                break; // 搵到就即停，鎖死最低滑點！
+            }
         }
     }
 
-    let impactPct = Number(initialQuote.rawResponse.priceImpactPct || 0);
-    
-    // 🧮 動態滑點公式：最佳滑點 = (Impact * 10000 bps) + 200 bps (即係 +2% Buffer)
-    let currentSlippage = Math.ceil(impactPct * 10000) + 200;
+    // 查冊判定死池
+    if (!quoteData) {
+        try {
+            const dexRes = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`, { timeout: 3000 });
+            const pair = dexRes.data?.pairs?.find(p => p.chainId === 'solana');
+            if ((pair?.liquidity?.usd || 0) < 500) await forceWriteOff(mintAddress, "流動性枯竭，強行撇帳");
+        } catch (e) {}
+        console.error(`❌ [Fatal] 已達極限滑點仍無法取得報價，放棄本次平倉。`);
+        return false; 
+    }
 
-    // 分拆砸盤防線保持不變...
+    let impactPct = Number(quoteData.rawResponse.priceImpactPct || 0);
+    
+    // 🟢 DEFCON 5 (補充)：動態收緊賺盡機制！
+    if (impactPct < (currentSlippage / 10000)) {
+        // 止損預留 3% Buffer，止盈預留 1.5% Buffer
+        let buffer = isStopLoss ? 300 : 150; 
+        let optimizedSlippage = Math.floor((impactPct * 10000) + buffer);
+        if (optimizedSlippage < 200) optimizedSlippage = 200; // 保底 2%
+        
+        if (optimizedSlippage < currentSlippage) {
+            console.log(`🛡️ [DEFCON 5] 流動性良好，動態收緊滑點由 ${(currentSlippage/100).toFixed(2)}% 降至 ${(optimizedSlippage/100).toFixed(2)}%`);
+            let newQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, optimizedSlippage);
+            if (newQuote) {
+                quoteData = newQuote;
+                currentSlippage = optimizedSlippage;
+            }
+        }
+    }
+
+    // 🔴 DEFCON 2：毀滅性砸盤 (>15% 衝擊)
     if (isStopLoss && impactPct > 0.15) {
-        console.log(`\n🚨 [Slippage Control] 警告！偵測到毀滅性砸盤影響 (${(impactPct*100).toFixed(2)}%)！`);
-        const expectedTotalSol = Number(initialQuote.rawResponse.outAmount || 0) / 1e9;
+        console.log(`\n🚨 [DEFCON 2] 警告！偵測到毀滅性砸盤影響 (${(impactPct*100).toFixed(2)}%)！`);
+        const expectedTotalSol = Number(quoteData.rawResponse.outAmount || 0) / 1e9;
         
         if (expectedTotalSol < 0.05 && sellFraction === 1.0) {
             console.log(`🗑️ [Dust Clean] 剩餘預期價值極低 (${expectedTotalSol.toFixed(4)} SOL < 0.05 SOL)！`);
             console.log(`⚔️ 啟動「斷頭台模式」：解鎖極限滑點 (50%) 執行一刀切清倉止血！`);
             currentSlippage = 5000; 
+            quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
+            if (!quoteData) return false;
         } else {
             console.log(`🛡️ 啟動「分拆砸盤」機制，本次僅平倉原定比例的 50%。`);
             sellFraction = sellFraction * 0.5;
             let baseQuantity = pos.quantity;
             if (isLive && globalWalletPublicKey) {
-                const realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
-                if (realBal !== null && realBal > 0) baseQuantity = realBal;
+                const currentBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
+                if (currentBal !== null && currentBal > 0) baseQuantity = currentBal;
             }
             sellQuantity = new BigNumber(baseQuantity).times(sellFraction).toNumber();
 
-            // 重新攞 Impact
-            let splitQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, 50);
-            if (splitQuote) {
-                impactPct = Number(splitQuote.rawResponse.priceImpactPct || 0);
-                currentSlippage = Math.ceil(impactPct * 10000) + 200;
-            }
+            quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
+            if (!quoteData) return false;
         }
     }
     
-    // 安全封頂：平時最多 15%，緊急止損最多 30% (除非斷頭台 50%)
-    if (currentSlippage > 1500 && !isStopLoss) currentSlippage = 1500;
-    if (currentSlippage > 3000 && isStopLoss && currentSlippage !== 5000) currentSlippage = 3000;
-
-    console.log(`📊 [Dynamic Slippage] 價格衝擊: ${(impactPct*100).toFixed(2)}% | 決定使用滑點: ${(currentSlippage/100).toFixed(2)}%`);
-
-    // 2. 用計算出嚟嘅動態滑點攞最終 Quote
-    let quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
-    if (!quoteData) quoteData = initialQuote; 
-
     let finalPriceSol = quoteData.pricePerToken;
     let tradeSuccess = false;
     let finalTxid = "SELL_" + Math.random().toString(36).substring(2, 8).toUpperCase(); 
@@ -358,24 +409,36 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     if (isLive) {
         if (globalWalletPublicKey) {
-            try { preSellBalanceLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey)); } catch (e) {}
+            const preBal = await executeReadWithFailover('getBalance(PreSell)', async (readConn) => {
+                return await readConn.getBalance(new PublicKey(globalWalletPublicKey));
+            });
+            if (preBal !== null) preSellBalanceLamports = preBal;
         }
         
-        // 第一刀：以動態滑點執行交易
+        // 🗡️ 第一刀：以探測出嚟嘅最優滑點執行交易
         let liveResult = await executeLiveSwapUAT(quoteData.rawResponse, "SELL", reason);
         tradeSuccess = liveResult?.success || false;
         
-        // 🚨 🛡️ [修正二：動態滑點失敗 Fallback (絕命強平)]
+        // 💀 DEFCON 1：實戰上鏈失敗 ➡️ 階梯式絕命強平 + Jito 4倍拔線
         if (!tradeSuccess && isStopLoss) {
-            console.log(`⚔️ [Fallback] 動態滑點賣出失敗！可能係滑點太緊。啟動保命模式：30% 絕望滑點強平！`);
-            let desperateQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, 3000);
-            if (desperateQuote) {
-                // 傳入 "拔線" 字眼，觸發 liveTradeService 入面嘅 Jito 4 倍 Tip 機制！
-                liveResult = await executeLiveSwapUAT(desperateQuote.rawResponse, "SELL", reason + " 拔線");
-                tradeSuccess = liveResult?.success || false;
-                if (tradeSuccess) {
-                    quoteData = desperateQuote; 
-                    finalPriceSol = quoteData.pricePerToken;
+            console.log(`⚔️ [DEFCON 1] 實戰上鏈失敗！可能被夾或跌穿滑點，啟動階梯加碼強平！`);
+            
+            // 由當前滑點下一級開始試，直到 30%
+            const liveFallbackSteps = [1000, 1500, 2000, 2500, 3000].filter(s => s > currentSlippage);
+            
+            for (const stepSlippage of liveFallbackSteps) {
+                console.log(`🔄 [DEFCON 1] 嘗試放寬滑點至 ${(stepSlippage/100).toFixed(0)}% + 拔線強平...`);
+                let desperateQuote = await getJupiterFinalQuote(mintAddress, false, sellQuantity, stepSlippage);
+                if (desperateQuote) {
+                    // 🚨 加上 "拔線" 字眼，觸發 liveTradeService 畀 4倍 Tip 打尖！
+                    liveResult = await executeLiveSwapUAT(desperateQuote.rawResponse, "SELL", reason + " 拔線");
+                    tradeSuccess = liveResult?.success || false;
+                    if (tradeSuccess) {
+                        quoteData = desperateQuote; 
+                        finalPriceSol = quoteData.pricePerToken;
+                        console.log(`✅ [Fallback Success] 成功於 ${(stepSlippage/100).toFixed(0)}% 滑點逃生！`);
+                        break; 
+                    }
                 }
             }
         }
@@ -387,12 +450,16 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
             if (globalWalletPublicKey) {
                 console.log(`🔍 [Live Check] 正在驗證鏈上真實 SOL 收益 (等待 5 秒確認區塊)...`);
                 await new Promise(r => setTimeout(r, 5000));
-                try {
-                    const postSellBalanceLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
-                    actualSolReceived = (postSellBalanceLamports - preSellBalanceLamports) / 1e9;
+                
+                const postBal = await executeReadWithFailover('getBalance(PostSell)', async (readConn) => {
+                    return await readConn.getBalance(new PublicKey(globalWalletPublicKey));
+                });
+                
+                if (postBal !== null) {
+                    actualSolReceived = (postBal - preSellBalanceLamports) / 1e9;
                     if (actualSolReceived > 0) sellValueSol = actualSolReceived;
                     console.log(`✅ [Live Check] 實際淨賺: ${actualSolReceived.toFixed(6)} SOL`);
-                } catch (e) { console.warn("⚠️ [Live Check] 無法獲取售後餘額"); }
+                }
             }
         }
     } else {
@@ -423,12 +490,10 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     return false;
 }
 
-// 💀 老幣火化：為了相容性保留此 function 名稱，但直接導向 executeSell
 async function executeSellRaydium(mintAddress, marketRefPriceSol, reason, sellFraction = 1.0) {
     return await executeSell(mintAddress, marketRefPriceSol, reason, sellFraction);
 }
 
-// 💀 假持倉撇帳 (流動性歸零用)
 async function forceWriteOff(mintAddress, reason) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
@@ -449,7 +514,6 @@ async function forceWriteOff(mintAddress, reason) {
     await commitTradeToDb(posIndex, 0, 0, -pos.entry_price_sol * pos.quantity, -100, reason, pos.quantity, 1.0, pos.strategy_type, "FORCE_WRITE_OFF");
 }
 
-// 💾 寫入資料庫
 async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pnlPct, finalReason, sellQuantity, sellFraction, originalStrategyType, txid) {
     const portfolio = getPortfolio();
     const pos = portfolio.positions[posIndex];
@@ -477,10 +541,10 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     let newBalance = currentBalance + Number(sellValueSol);
 
     if (isLive && globalWalletPublicKey) {
-        try {
-            const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
-            newBalance = realLamports / 1e9;
-        } catch (e) {}
+        const realLamports = await executeReadWithFailover('getBalance(CommitDB)', async (readConn) => {
+            return await readConn.getBalance(new PublicKey(globalWalletPublicKey));
+        });
+        if (realLamports !== null) newBalance = realLamports / 1e9;
     }
 
     await supabase.from('system_config')
@@ -500,7 +564,6 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     if(typeof sendTelegramAlert === 'function') {
         const modeTag = isLive ? '🔴 [實盤]' : '🟢 [模擬]';
         const pnlTag = pnlPct >= 0 ? `🟢 +${pnlPct.toFixed(2)}%` : `🔴 ${pnlPct.toFixed(2)}%`;
-        // 👇 加入分類標籤
         const typeTag = safeStrategyType.includes('MEME') ? '🐣 NEW meme' : '🔥 TOP 100 meme';
         sendTelegramAlert(`${modeTag} <b>📦 平倉完成</b>\n🏷️ 類別: ${typeTag}\n🪙 代幣: $${pos.token_symbol}\n📈 PNL: ${pnlTag}\n🔗 TX: ${isLive && !txid.includes('FORCE') ? `<a href="https://solscan.io/tx/${txid}">Solscan</a>` : txid}\n🧠 理由: ${finalReason}`);
     }
@@ -524,10 +587,12 @@ async function handleIncomingFund(address, amount, txid) {
     if (!isInserted) return;
 
     if (globalWalletPublicKey) {
-        try {
-            const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
+        const realLamports = await executeReadWithFailover('getBalance(IncomingFund)', async (readConn) => {
+            return await readConn.getBalance(new PublicKey(globalWalletPublicKey));
+        });
+        if (realLamports !== null) {
             await supabase.from('system_config').update({ live_wallet_balance: realLamports / 1e9 }).eq('id', 1);
-        } catch (e) {}
+        }
     }
 
     const stats = await getContributionStats(personName);
@@ -550,11 +615,13 @@ async function handleOutgoingFund(address, amount, txid) {
     if (!isInserted) return;
 
     if (globalWalletPublicKey) {
-        try {
-            await new Promise(r => setTimeout(r, 2000));
-            const realLamports = await connection.getBalance(new PublicKey(globalWalletPublicKey));
+        await new Promise(r => setTimeout(r, 2000));
+        const realLamports = await executeReadWithFailover('getBalance(OutgoingFund)', async (readConn) => {
+            return await readConn.getBalance(new PublicKey(globalWalletPublicKey));
+        });
+        if (realLamports !== null) {
             await supabase.from('system_config').update({ live_wallet_balance: realLamports / 1e9 }).eq('id', 1);
-        } catch (e) {}
+        }
     }
 
     const stats = await getContributionStats(personName);

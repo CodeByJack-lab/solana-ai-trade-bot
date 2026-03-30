@@ -118,24 +118,23 @@ async function toggleHeliusWebhook(enable = true) {
 }
 
 app.post('/webhook/telegram', async (req, res) => {
-    // 🚨 暴力 Debug：無論邊個敲門、帶咩禮物，第一時間大叫！
-    console.log("=====================================");
-    console.log("🚨 [WEBHOOK 觸發] 有人敲 Telegram 門口！");
-    console.log("📦 收到數據包:", JSON.stringify(req.body, null, 2));
-    console.log("=====================================");
-
+    // 1. 第一時間覆 OK
     res.status(200).send('OK'); 
 
     try {
         if (req.body && req.body.callback_query) {
+            // 提取關鍵資訊，精簡 Log
+            const actionData = req.body.callback_query.data;
+            const userName = req.body.callback_query.from?.first_name || 'Boss';
+            
+            console.log(`📥 [Telegram] 收到 ${userName} 嘅審批指令: ${actionData}`);
+
             const { processTelegramCallback } = require('./telegramService');
-            // 處理按鈕回傳
             processTelegramCallback(req.body.callback_query).catch(err => 
-                console.error("❌ [Telegram Callback背景執行出錯]:", err.message)
+                console.error("❌ [Telegram Callback 出錯]:", err.message)
             );
-        } else {
-            console.log("⚠️ 收到 Webhook，但入面無 callback_query (可能係普通 Message 或格式錯)");
         }
+        // 如果係普通 Message (例如你打字同隻 Bot 傾偈)，就唔出 Log 阻住個畫面
     } catch (err) {
         console.error("❌ [Telegram Webhook 嚴重故障]:", err.message);
     }
