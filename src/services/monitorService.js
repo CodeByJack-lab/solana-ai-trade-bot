@@ -728,7 +728,7 @@ function startOneMinuteMetricsAlert() {
 }
 
 function startMarketMonitor() {
-    app.listen(process.env.PORT || 3000, '0.0.0.0', async () => {
+    app.listen(process.env.PORT || 8080, '0.0.0.0', async () => {
         console.log('🔄 [System] 啟動雙 Webhook 與雙軌防線...');
         await toggleHeliusWebhook(true);
         setTimeout(() => { startPositionMonitor(); }, 2000);
