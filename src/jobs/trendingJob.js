@@ -111,19 +111,25 @@ const trendingJob = {
                 { poolType: 'TRENDING', lastComment: targetToken.last_ai_comment }
             );
 
+            // 🚀 [核心修復] 強制防禦：如果 AI 無俾分數、API Error、或者分數唔係數字，一律當 0 分！
+            const aiScore = (aiDecision.score !== undefined && aiDecision.score !== null && !isNaN(aiDecision.score)) 
+                            ? Number(aiDecision.score) 
+                            : 0;
+
             if (aiDecision.buy) {
-                const buyResult = await executeBuy(mintAddress, secResult.marketData.symbol, 'TRENDING_MOMENTUM', aiDecision.score, aiDecision.reason, config.trending_trade_amount_sol || 0.1);
+                const buyResult = await executeBuy(mintAddress, secResult.marketData.symbol, 'TRENDING_MOMENTUM', aiScore, aiDecision.reason, config.trending_trade_amount_sol || 0.1);
                 if (buyResult) await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
             } else {
-                if (aiDecision.score >= survivalScore || aiDecision.decision === 'ONHOLD' || aiDecision.reason.includes('ONHOLD')) {
-                    console.log(`⏳ [Trending] 潛力仍在 (分數: ${aiDecision.score || 'ONHOLD'} >= ${survivalScore})，重新排隊...`);
+                // 使用清洗過嘅 aiScore 進行判斷
+                if (aiScore >= survivalScore || aiDecision.decision === 'ONHOLD' || (aiDecision.reason && aiDecision.reason.includes('ONHOLD'))) {
+                    console.log(`⏳ [Trending] 潛力仍在 (分數: ${aiScore} >= ${survivalScore})，重新排隊...`);
                     await supabase.from('trending_pool').update({ 
                         last_ai_comment: aiDecision.reason,
-                        ai_score: aiDecision.score || 0,
+                        ai_score: aiScore, // 確保寫入 Database 嘅係數字，唔係 NULL 或 undefined
                         updated_at: new Date().toISOString() 
                     }).eq('mint_address', mintAddress);
                 } else {
-                    console.log(`🗑️ [Trending] 分數低於門檻 (${aiDecision.score} < ${survivalScore})，踢出保溫箱！`);
+                    console.log(`🗑️ [Trending] 分數低於門檻 (${aiScore} < ${survivalScore})，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                 }
             }
