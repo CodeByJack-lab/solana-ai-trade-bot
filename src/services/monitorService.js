@@ -118,16 +118,23 @@ async function toggleHeliusWebhook(enable = true) {
 }
 
 app.post('/webhook/telegram', async (req, res) => {
-    // 🚀 重點 1：第一時間回覆 200 OK，Telegram 就會立刻停止 Loading 轉圈
+    // 🚨 暴力 Debug：無論邊個敲門、帶咩禮物，第一時間大叫！
+    console.log("=====================================");
+    console.log("🚨 [WEBHOOK 觸發] 有人敲 Telegram 門口！");
+    console.log("📦 收到數據包:", JSON.stringify(req.body, null, 2));
+    console.log("=====================================");
+
     res.status(200).send('OK'); 
 
     try {
         if (req.body && req.body.callback_query) {
             const { processTelegramCallback } = require('./telegramService');
-            // 🚀 重點 2：唔好用 await 擋住 res.send，讓佢喺背景慢慢行
+            // 處理按鈕回傳
             processTelegramCallback(req.body.callback_query).catch(err => 
                 console.error("❌ [Telegram Callback背景執行出錯]:", err.message)
             );
+        } else {
+            console.log("⚠️ 收到 Webhook，但入面無 callback_query (可能係普通 Message 或格式錯)");
         }
     } catch (err) {
         console.error("❌ [Telegram Webhook 嚴重故障]:", err.message);
