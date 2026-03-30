@@ -37,17 +37,17 @@ const trendingMonitorService = {
     },
 
     start() {
-        // 🚀 修正 Log：對應 120 分鐘 (2 小時) 嘅真實排程
-        console.log('🦎 [Gecko Crawler] 藍籌熱門榜爬蟲已啟動 (每 2 小時大換血一次)...');
+        console.log('🦎 [Gecko Crawler] 藍籌熱門榜爬蟲已啟動 (開機即時執行 + 每 2 小時大換血)...');
         
-        // 120 分鐘執行一次 (2 * 60 * 60 * 1000)
-        setInterval(async () => {
+        // 🚀 [核心修復] 將邏輯包裝成獨立 Function
+        const runTask = async () => {
             if (isCrawlerRunning) return;
             isCrawlerRunning = true;
 
             try {
                 // 1. 前置倉位檢查：如果 Trending 倉位已滿，爬蟲就休息，慳資源
                 if (!canBuyTrending()) {
+                    console.log('⏸️ [Gecko Crawler] Trending 倉位已滿，跳過本次榜單更新。');
                     isCrawlerRunning = false;
                     return;
                 }
@@ -58,7 +58,7 @@ const trendingMonitorService = {
                     return;
                 }
 
-                // 🚀 V8.2 核心修正：動態讀取 Database 中 Trending (ID=3) 的最新門檻！(現為 15萬美金)
+                // 動態讀取 Database 中 Trending (ID=3) 的最新門檻！(現為 15萬美金)
                 const { data: stratParams } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 3).single();
                 const dynamicMinLiquidity = stratParams?.min_liquidity || 150000;
 
@@ -73,7 +73,7 @@ const trendingMonitorService = {
                 const activePositions = portfolio.positions || [];
                 const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
 
-                let upsertArray = []; // 📦 [新增] 用於儲存批量 Upsert 的陣列
+                let upsertArray = []; 
 
                 for (const pool of pools) {
                     const baseTokenId = pool.relationships?.base_token?.data?.id || '';
@@ -81,10 +81,7 @@ const trendingMonitorService = {
                     
                     if (!mintAddress || mintAddress.length < 32) continue;
 
-                    // 過濾穩定幣與公鏈幣
-                    if (['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'].includes(mintAddress)) {
-                        continue;
-                    }
+                    if (['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'].includes(mintAddress)) continue;
 
                     const attr = pool.attributes || {};
                     const liquidityUsd = parseFloat(attr.reserve_in_usd) || 0;
@@ -92,11 +89,10 @@ const trendingMonitorService = {
                     // 🛡️ RAM 初篩：使用 Master AI 動態設定的門檻！
                     if (liquidityUsd < dynamicMinLiquidity) continue; 
 
-                    // 檢查是否已持倉 (揸緊就唔好再入魚池)
                     const isHolding = activePositions.some(p => p.mint_address === mintAddress);
                     if (isHolding) continue;
 
-                    // 🛡️ 智能冷卻防線：贏錢追擊，輸錢面壁 (24小時 / 7日)
+                    // 🛡️ 智能冷卻防線
                     const { data: tradeHistory } = await supabase
                         .from(`trade_history_${tableSuffix}`)
                         .select('created_at, realized_pnl_pct')
@@ -119,7 +115,6 @@ const trendingMonitorService = {
 
                     if (isOnCooldown) continue;
 
-                    // 📦 將合格的獵物加入批量陣列 (不包含 AI 評論，確保 Upsert 唔會洗走舊有大腦記憶)
                     upsertArray.push({
                         mint_address: mintAddress,
                         token_symbol: attr.name?.split(' /')[0] || 'UNKNOWN', 
@@ -130,11 +125,10 @@ const trendingMonitorService = {
                         updated_at: new Date().toISOString()
                     });
 
-                    // 🚀 放寬至 200 隻
                     if (upsertArray.length >= 200) break; 
                 }
 
-                // 3. 🚀 [核心升級] 一次過批量 Upsert 入 Database！
+                // 3. 一次過批量 Upsert 入 Database！
                 if (upsertArray.length > 0) {
                     const { error } = await supabase.from('trending_pool').upsert(
                         upsertArray, 
@@ -155,7 +149,16 @@ const trendingMonitorService = {
             } finally {
                 isCrawlerRunning = false;
             }
-        }, 2 * 60 * 60 * 1000); // 2 小時大換血一次
+        };
+
+        // 🚀 [核心修復] Bot 著機即刻強迫隻爬蟲行一次！
+        setTimeout(() => {
+            console.log('🦎 [Gecko Crawler] 執行開機首次強制掃描...');
+            runTask();
+        }, 5000); // 畀系統 5 秒鐘 Init Database 連線先
+
+        // 然後先開始每 2 小時嘅循環
+        setInterval(runTask, 2 * 60 * 60 * 1000); 
     }
 };
 
