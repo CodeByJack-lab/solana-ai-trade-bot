@@ -2,6 +2,7 @@
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const { getPortfolio, canBuyTrending } = require('./portfolioService');
+const { healthMonitor } = require('./healthMonitor');
 
 let isCrawlerRunning = false;
 
@@ -142,8 +143,10 @@ const trendingMonitorService = {
                     
                     if (error) {
                         console.error(`❌ [Gecko Crawler] 批量 Upsert 寫入魚池失敗:`, error.message);
+                        healthMonitor.setStatus('Top200_Crawler', '🔴 批量寫入失敗');
                     } else {
-                        console.log(`🦎 [Gecko Crawler] 霸氣掃貨！成功將 ${upsertArray.length} 隻 Top 200 藍籌幣 Upsert 入魚池 (門檻: $${dynamicMinLiquidity})！`);
+                        console.log(`🦎 [Gecko Crawler] 掃貨！成功將 ${upsertArray.length} 隻 Top 200 藍籌幣 Upsert 入魚池 (門檻: $${dynamicMinLiquidity})！`);
+                        healthMonitor.setStatus('Top200_Crawler', `🟢 剛推平 ${upsertArray.length} 隻幣`);
                     }
                 }
 

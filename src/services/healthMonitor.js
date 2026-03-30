@@ -7,7 +7,7 @@ class HealthMonitor {
         this.apiUsage = { requests: 0, errors429: 0 };
         this.oracleQueueSize = 0;
         
-        // 🚀 V8.2 預設清單，確保看板唔會漏嘢
+        // 🚀 V8.9 全面升級清單，確保「真・Top 200」架構無盲區
         this.initStatuses();
     }
 
@@ -16,13 +16,18 @@ class HealthMonitor {
             'Live_Engine',      // 實盤引擎
             'Supabase_DB',      // 數據庫連線
             'Portfolio_Cache',  // 記憶體對齊
-            'Meme_Radar',       // Helius 撈魚
-            'Wallet_Radar',     // Alchemy 錢包監控
             'Trade_Engine',     // 交易執行器
-            'Macro_Radar',      // 🌊 宏觀避險 (漏咗呢個)
-            'AI_Evolution',     // 🧠 自我進化 (漏咗呢個)
-            'Janitor_Service'   // 🧹 自動回收 (漏咗呢個)
+            'Meme_Radar',       // 🎣 Helius 撈魚 (野生 Meme)
+            'Top200_Crawler',   // 🦎 Gecko 兩小時大換血 (新增)
+            'Math_Radar',       // 📡 15分鐘數學雷達 (新增)
+            'Security_Guard',   // 🛡️ 物理與合約安檢 (新增)
+            'Macro_Radar',      // 🌊 宏觀避險
+            'AI_Evolution',     // 🧠 自我進化
+            'Telegram_Webhook', // 💬 HITL 審批中樞 (新增)
+            'Janitor_Service',  // 🧹 自動回收
+            'Wallet_Radar'      // 🏦 Alchemy 錢包監控
         ];
+        // 預設全部顯示「待命中」，等各個 Service 起機後自己覆蓋狀態
         components.forEach(c => this.statuses.set(c, '🟡 待命中'));
     }
 
@@ -62,7 +67,7 @@ class HealthMonitor {
     getHealthReport() {
         let report = '';
         
-        // 將狀態排序，重要嘅排先 (實盤 > 數據庫 > 雷達)
+        // 將狀態排序，確保報告排版整齊
         const sortedKeys = Array.from(this.statuses.keys()).sort();
 
         for (const component of sortedKeys) {

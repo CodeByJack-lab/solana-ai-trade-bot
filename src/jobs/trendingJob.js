@@ -7,6 +7,7 @@ const { executeBuy } = require('../services/tradeService');
 const { consensusService } = require('../services/consensusService');
 const { canBuyTrending } = require('../services/portfolioService'); 
 const configEnv = require('../config/env'); 
+const { healthMonitor } = require('../services/healthMonitor');
 
 // 🚀 [新增] 引入 Redis 以管理 VIP 鎖
 const Redis = require('ioredis');
@@ -132,10 +133,12 @@ const trendingJob = {
             }
 
             console.log(`👑 [Trending VIP] 巡邏完畢 (觸發雷達數: ${triggeredCount} / ${poolTokens.length})。強制冷卻 1 秒後釋放資源...`);
+            healthMonitor.setStatus('Math_Radar', `🟢 剛巡邏 ${poolTokens.length} 隻 (觸發: ${triggeredCount})`);
             await new Promise(r => setTimeout(r, 1000));
 
         } catch (err) {
             console.error(`❌ [Trending Job] 執行異常:`, err.message);
+            healthMonitor.setStatus('Math_Radar', '🔴 巡邏異常');
         } finally {
             // 🔓 [解鎖] 無論成功定失敗，最後一定釋放 VIP 鎖，畀 Meme 行
             await redis.del('dex_priority_lock');
