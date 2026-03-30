@@ -7,10 +7,12 @@ const { aiOrchestrator } = require('../services/aiOrchestrator');
 const { promptManager } = require('../services/promptManager'); 
 
 const retrospectiveJob = {
-    async runEvolutionWithRetry(attempt = 1) {
+    // 🌟 [新增] isEmergency 參數，區分係「每日例行」定係「大市突變警報」
+    async runEvolutionWithRetry(attempt = 1, isEmergency = false) {
         const MAX_ATTEMPTS = 3; 
+        const triggerReason = isEmergency ? "🚨 宏觀大市突變應急" : "🌞 每日例行 (09:00 HKT)";
 
-        console.log(`\n🌞 [Evolution] 啟動每日 00:00 (HKT) Master AI 邏輯與參數進化程序 (第 ${attempt} 次嘗試)...`);
+        console.log(`\n🧠 [Evolution] 啟動 Master AI 邏輯與參數進化程序 [${triggerReason}] (第 ${attempt} 次嘗試)...`);
         healthMonitor.setStatus('AI_Evolution', `🟢 深度分析中 (嘗試 ${attempt}/${MAX_ATTEMPTS})...`);
 
         try {
@@ -27,15 +29,14 @@ const retrospectiveJob = {
             let bestTrades = [];
 
             if (allTrades.length > 0) {
-                // 🛡️ [保留神級邏輯] 實質印鈔狀態防禦！
                 const avgPnlPct = allTrades.reduce((sum, t) => sum + (t.realized_pnl_pct || 0), 0) / allTrades.length;
                 const HURDLE_RATE = 5.0; 
 
-                if (avgPnlPct >= HURDLE_RATE) {
+                // 🌟 [核心修改] 如果係緊急警報，絕對唔可以休眠！必須強制審視！
+                if (avgPnlPct >= HURDLE_RATE && !isEmergency) {
                     const msg = `過去 24 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (跨越 ${HURDLE_RATE}% 及格線)。\n🛡️ 系統處於「實質印鈔狀態」，Master AI 自動休眠，不作任何修改提案！`;
                     console.log(`✅ [Evolution] ${msg}`);
                     
-                    // 照樣入庫留底，但狀態直接 APPROVED (無改動)
                     await supabase.from('ai_proposals').insert([{
                         proposal_type: 'MASTER_AI',
                         report_content: `【實質印鈔戰報】\n當前系統表現極佳（Avg PNL: ${avgPnlPct.toFixed(2)}%）。根據防禦協議，Master AI 已停止對核心參數進行修改，以保護當前高勝率矩陣。`,
@@ -44,7 +45,7 @@ const retrospectiveJob = {
                     }]);
 
                     await sendAdminAlert(`🌞 <b>[戰報模式]</b>\n${msg}`);
-                    healthMonitor.setStatus('AI_Evolution', '🟢 印鈔防禦中 (00:00 執行)');
+                    healthMonitor.setStatus('AI_Evolution', '🟢 印鈔防禦中 (09:00 執行)');
                     return; 
                 }
 
@@ -71,6 +72,11 @@ const retrospectiveJob = {
             let promptText = masterPrompt.content
                 .replace('{{last_audit_record}}', lastAuditText) 
                 .replace('{{loss_trades_data}}', JSON.stringify(tradeDataToAI, null, 2));
+
+            // 🌟 [緊急加壓] 如果係大市突變，加重語氣逼 AI 處理宏觀危機
+            if (isEmergency) {
+                promptText += `\n\n[🚨 MACRO EMERGENCY OVERRIDE] This evolution is triggered by a DRASTIC SHIFT in the Macro Disaster Score. Ignore normal PnL complacency. You MUST adjust 'min_liquidity' and 'min_vol_5m' immediately to either protect capital (if market is crashing) or catch the dip/momentum (if market is booming)!`;
+            }
 
             const { data: param2 } = await supabase.from('ai_strategy_params').select('*').eq('id', 2).single();
             const { data: param3 } = await supabase.from('ai_strategy_params').select('*').eq('id', 3).single();
@@ -108,7 +114,8 @@ const retrospectiveJob = {
             if (insertErr) throw new Error(`寫入 ai_proposals 失敗: ${insertErr.message}`);
 
             const dateStr = new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong', hour12: false });
-            let tgReport = `🧠 <b>[Master AI 每日覆盤與提案]</b>\n📅 <i>${dateStr}</i>\n\n📊 <b>深度分析：</b>\n${report.analysis}\n\n`;
+            // 🌟 標題動態化，等你喺 TG 一眼分得出係咪緊急奏摺
+            let tgReport = `🧠 <b>[Master AI ${isEmergency ? '🚨 宏觀緊急提案' : '每日覆盤與提案'}]</b>\n📅 <i>${dateStr}</i>\n\n📊 <b>深度分析：</b>\n${report.analysis}\n\n`;
 
             if (hasActionableChange) {
                 tgReport += `🎯 <b>建議修改項目：</b>\n`;
@@ -122,14 +129,14 @@ const retrospectiveJob = {
                 await sendAdminAlert(tgReport);
             }
 
-            healthMonitor.setStatus('AI_Evolution', '🟢 待命中 (00:00 執行)');
+            healthMonitor.setStatus('AI_Evolution', '🟢 待命中 (09:00 執行)');
 
         } catch (err) {
             console.error(`❌ [Evolution Error] 執行發生異常:`, err.message);
             if (attempt < MAX_ATTEMPTS) {
                 console.log(`⏳ [Evolution] 系統將於 30 分鐘後重試...`);
                 healthMonitor.setStatus('AI_Evolution', `🟡 異常，30分鐘後重試...`);
-                setTimeout(() => { this.runEvolutionWithRetry(attempt + 1); }, 30 * 60 * 1000); 
+                setTimeout(() => { this.runEvolutionWithRetry(attempt + 1, isEmergency); }, 30 * 60 * 1000); 
             } else {
                 healthMonitor.setStatus('AI_Evolution', '🔴 徹底失敗，等待下個排程');
             }
@@ -137,9 +144,8 @@ const retrospectiveJob = {
     },
 
     start() {
-        // 🚀 改為每日 HKT 早上 09:00 執行 (美國夜晚，大市平靜期)
         cron.schedule('0 0 9 * * *', () => { 
-            this.runEvolutionWithRetry(1); 
+            this.runEvolutionWithRetry(1, false); 
         }, { scheduled: true, timezone: "Asia/Hong_Kong" });
         
         console.log(`🤖 [Evolution] Master AI 每日覆盤排程已啟動 (每日 09:00 執行)...`);

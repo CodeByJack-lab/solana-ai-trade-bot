@@ -28,7 +28,7 @@ const trendingPriceCache = new Map();
 let lastRedisUpdateMs = Date.now();
 let isHttpFallbackActive = false;
 
-// 🌟 [新增] 雙軌參數快取 (0延遲查價用)
+// 🌟 [雙軌參數快取]
 let cachedStrategyParams = { meme: null, trending: null };
 
 const apiCooldowns = { geckoTerminal: 0, jupiterV3: 0, jupiterV6: 0 };
@@ -44,7 +44,7 @@ const cors = require('cors');
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.9 系統正常運行中 (雙軌回測參數聯動版)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.9 系統正常運行中 (宏觀事件驅動版)'));
 
 app.post('/force-evolution', async (req, res) => {
     console.log('🧠 [Admin Command] 收到前端指令：強制喚醒 Master AI 進行進化！');
@@ -118,12 +118,9 @@ async function toggleHeliusWebhook(enable = true) {
 }
 
 app.post('/webhook/telegram', async (req, res) => {
-    // 1. 第一時間覆 OK
     res.status(200).send('OK'); 
-
     try {
         if (req.body && req.body.callback_query) {
-            // 提取關鍵資訊，精簡 Log
             const actionData = req.body.callback_query.data;
             const userName = req.body.callback_query.from?.first_name || 'Boss';
             
@@ -134,7 +131,6 @@ app.post('/webhook/telegram', async (req, res) => {
                 console.error("❌ [Telegram Callback 出錯]:", err.message)
             );
         }
-        // 如果係普通 Message (例如你打字同隻 Bot 傾偈)，就唔出 Log 阻住個畫面
     } catch (err) {
         console.error("❌ [Telegram Webhook 嚴重故障]:", err.message);
     }
@@ -332,7 +328,7 @@ function startDatabaseNurseryMonitor() {
 }
 
 // ========================================================
-// 🎯 核心：0 延遲實時盈虧監控與極速平倉 (V8.9 動態雙核心版)
+// 🎯 核心：0 延遲實時盈虧監控與極速平倉
 // ========================================================
 async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) {
     if (!currentPriceSol || currentPriceSol <= 0) return;
@@ -366,10 +362,8 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
     const isHalfSold = pos.strategy_type && pos.strategy_type.includes('HALF_SOLD');
     const isMeme = pos.strategy_type.includes('MEME');
 
-    // 🌟 [讀取快取參數] 根據魚池類型匹配專屬防線
     const specificParams = isMeme ? cachedStrategyParams.meme : cachedStrategyParams.trending;
     
-    // 如果 Backtest 未產出參數，Fallback 去 system_config 嘅 Dashboard 設定
     const STOP_LOSS_PCT = specificParams?.stop_loss_pct !== undefined && specificParams?.stop_loss_pct !== null
         ? Number(specificParams.stop_loss_pct) 
         : parseFloat(config.stop_loss_pct || -20);
@@ -384,7 +378,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
 
     let action = 'HOLD'; let reason = ''; let sellFraction = 1.0; 
     
-    // 瀑布防線保留少許硬指標防禦閃崩
     let flashCrashThr = isMeme ? -15 : -10;       
     let cliffDropThr = isMeme ? -45 : -30;       
     const takeCapitalThr = isMeme ? 100 : 50; 
@@ -393,13 +386,11 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
     let trailingReason = '';
     const pnlDropPoints = highestPnlPct - pnlPct; 
 
-    // 🏆 [V8.9 動態追蹤止盈]
     if (highestPnlPct >= tpTrigger) {
         if (pnlDropPoints >= pullbackTolerance) { 
             trailingTriggered = true; 
             trailingReason = `動態網格防線: 最高 +${highestPnlPct.toFixed(0)}%，回落 ${pullbackTolerance} 個利潤點鎖潤`; 
         }
-        // 動態放寬瀑布容忍度 (賺緊錢唔好輕易被洗走)
         flashCrashThr = -20;
         cliffDropThr = -50;
     } else if (highestPnlPct >= 50 && isMeme) {
@@ -408,7 +399,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
         if (drawdownFromHigh <= -15) { trailingTriggered = true; trailingReason = `未達防線前保命 (最高 +${highestPnlPct.toFixed(0)}%，現價真實回撤達 15%)`; }
     }
 
-    // 🚨 優先度結算 
     if (!isHalfSold && pnlPct >= takeCapitalThr) {
         action = 'SELL'; 
         sellFraction = 0.5; 
@@ -450,7 +440,6 @@ function startPositionMonitor() {
     let cachedSolPriceUsd = 150; 
     const { getSolPriceInHKD } = require('./priceService');
     
-    // 🌟 [新增] 每 60 秒刷新快取參數
     async function fetchStrategyParams() {
         try {
             cachedSolPriceUsd = (await getSolPriceInHKD()) / 7.8;
@@ -460,7 +449,7 @@ function startPositionMonitor() {
             if (p3) cachedStrategyParams.trending = p3;
         } catch(e) {}
     }
-    fetchStrategyParams(); // 啟動時先跑一次
+    fetchStrategyParams(); 
     setInterval(fetchStrategyParams, 60000);
 
     setInterval(async () => {
@@ -667,6 +656,56 @@ function startPositionMonitor() {
     }, 5 * 60 * 1000);
 }
 
+// ========================================================
+// 🌍 宏觀事件驅動 (Event-Driven) 大市監測系統
+// ========================================================
+let lastMacroScore = null;
+let lastMacroTriggerTime = 0;
+
+function startMacroEnvironmentMonitor() {
+    console.log('🌍 [Macro] 宏觀事件驅動大市監測系統已啟動 (15 分鐘/次)...');
+    
+    setInterval(async () => {
+        try {
+            const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
+            if (!config || config.latest_news_score === null) return;
+
+            const currentScore = config.latest_news_score;
+            
+            // 第一次開機，記住個底線先
+            if (lastMacroScore === null) {
+                lastMacroScore = currentScore;
+                return;
+            }
+
+            // 計算分數波幅
+            const scoreDelta = Math.abs(currentScore - lastMacroScore);
+            const now = Date.now();
+            const cooldownMs = 6 * 60 * 60 * 1000; // 6 小時冷卻期
+
+            // 觸發條件：波幅 >= 20 分，且過咗冷卻期
+            if (scoreDelta >= 20 && (now - lastMacroTriggerTime) > cooldownMs) {
+                console.log(`🚨 [Macro Alert] 大市情緒發生劇變！(由 ${lastMacroScore} 變為 ${currentScore})`);
+                
+                const conditionMsg = currentScore < 30 ? "🔥 市場陷入極度狂熱" : "🥶 市場出現極度恐慌";
+                const telegramMsg = `🚨 <b>大市情緒劇變警告</b>\n${conditionMsg}\n災難指數由 ${lastMacroScore} 突變為 ${currentScore}！\n已強制喚醒 Master AI 進行緊急策略重估...`;
+                
+                await sendAdminAlert(telegramMsg);
+
+                // 強制喚醒 Master AI
+                retrospectiveJob.runEvolutionWithRetry(1, true).catch(err => console.error("宏觀喚醒 AI 失敗:", err));
+
+                // 更新記憶
+                lastMacroScore = currentScore;
+                lastMacroTriggerTime = now;
+            }
+
+        } catch (err) {
+            console.error("❌ 檢查大市情緒出錯:", err.message);
+        }
+    }, 15 * 60 * 1000); // 15 分鐘 Check 一次
+}
+
 function startCommandListener() {
     setInterval(async () => {
         try {
@@ -742,6 +781,7 @@ function startMarketMonitor() {
         setTimeout(() => { startDatabaseNurseryMonitor(); }, 4000);
         setTimeout(() => { startCommandListener(); }, 6000);
         setTimeout(() => { startOneMinuteMetricsAlert(); }, 8000);
+        setTimeout(() => { startMacroEnvironmentMonitor(); }, 10000); // 🌟 啟動宏觀監測
     });
 }
 process.on('SIGINT', async () => { await toggleHeliusWebhook(false); process.exit(0); });
