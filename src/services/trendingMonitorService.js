@@ -3,6 +3,7 @@ const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const { getPortfolio, canBuyTrending } = require('./portfolioService');
 const { healthMonitor } = require('./healthMonitor');
+const { trendingJob } = require('../jobs/trendingJob');
 
 let isCrawlerRunning = false;
 
@@ -26,7 +27,7 @@ const trendingMonitorService = {
 
                 // 🚦 [防 429 護盾] 每爬一頁，強制休息 1.5 秒
                 if (page < 10) {
-                    await new Promise(r => setTimeout(r, 1500));
+                    await new Promise(r => setTimeout(r, 3000));
                 }
             } catch (err) {
                 console.warn(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗，提早結束爬蟲:`, err.message);
@@ -141,6 +142,9 @@ const trendingMonitorService = {
                     } else {
                         console.log(`🦎 [Gecko Crawler] 掃貨！成功將 ${upsertArray.length} 隻 Top 200 藍籌幣 Upsert 入魚池 (門檻: $${dynamicMinLiquidity})！`);
                         healthMonitor.setStatus('Top200_Crawler', `🟢 剛推平 ${upsertArray.length} 隻幣`);
+                        
+                        // 🎯 [核心聯動] 霸氣掃貨完畢，即刻叫醒雷達做嘢，連 1 秒都唔等！
+                        trendingJob.triggerImmediateAndResetClock();
                     }
                 }
 
