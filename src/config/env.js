@@ -21,7 +21,7 @@ const config = {
     solana: {
         walletPrivateKey: getEnv('SOLANA_PRIVATE_KEY'),
         walletPublicKey: getEnv('MY_WALLET_PUBLIC_KEY'),
-        walletWebhookId: getEnv('HELIUS_WALLET_WEBHOOK_ID'),
+        walletWebhookId: getEnv('HELIUS_WALLET_WEBHOOK_ID', false), // Helius Webhook
     },
 
     // 2. 數據庫 (Supabase)
@@ -36,30 +36,20 @@ const config = {
         redisUrl: process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || getEnv('REDIS_URL', true),
     },
 
-    // 4. AI 大腦 (終極白嫖陣型：1 Gemini, 3 Groq, 3 Mistral)
+    // 4. AI 大腦 (終極白嫖陣型)
     ai: {
-        geminiKeys: [
-            getEnv('GEMINI_API_KEY_1', true)
-        ].filter(Boolean),
-        groqKeys: [
-            getEnv('GROQ_API_KEY_1', false),
-            getEnv('GROQ_API_KEY_2', false),
-            getEnv('GROQ_API_KEY_3', false)
-        ].filter(Boolean),
-        mistralKeys: [
-            getEnv('MISTRAL_API_KEY_1', false),
-            getEnv('MISTRAL_API_KEY_2', false),
-            getEnv('MISTRAL_API_KEY_3', false)
-        ].filter(Boolean),
+        geminiKeys: [getEnv('GEMINI_API_KEY_1', true)].filter(Boolean),
+        groqKeys: [getEnv('GROQ_API_KEY_1', false), getEnv('GROQ_API_KEY_2', false), getEnv('GROQ_API_KEY_3', false)].filter(Boolean),
+        mistralKeys: [getEnv('MISTRAL_API_KEY_1', false), getEnv('MISTRAL_API_KEY_2', false), getEnv('MISTRAL_API_KEY_3', false)].filter(Boolean),
     },
 
     // 5. 警報與通知 (Telegram)
     telegram: {
         mainBotToken: getEnv('TELEGRAM_BOT_TOKEN'),
-        // 🚀 修正: 將 required 設為 false，等後面嘅 fallback 真正生效！
         adminBotToken: getEnv('TELEGRAM_ADMIN_BOT_TOKEN', false) || getEnv('TELEGRAM_BOT_TOKEN'),
         chatId: getEnv('TELEGRAM_CHAT_ID'),
         channelId: getEnv('TELEGRAM_CHANNEL_ID'),
+        personalChatId: getEnv('PERSONAL_CHAT_ID', false),
     },
 
     // 6. 外部數據與報價 (Oracle 基建)
@@ -71,12 +61,12 @@ const config = {
         coingeckoApiKey: getEnv('COINGECKO_API_KEY', false),
     },
 
-    // 7. RPC 負載平衡與 Webhooks
+    // 7. 🚀 RPC 負載平衡與 Webhooks (4 條命水喉)
     rpc: {
         helius1: {
-            apiKey: getEnv('HELIUS_API_KEY'),
-            webhookId: getEnv('HELIUS_WEBHOOK_ID'),
-            url: getEnv('HELIUS_RPC_URL'),
+            apiKey: getEnv('HELIUS_API_KEY', false),
+            webhookId: getEnv('HELIUS_WEBHOOK_ID', false),
+            url: getEnv('HELIUS_RPC_URL', false),
         },
         helius2: {
             apiKey: getEnv('HELIUS_API_KEY_2', false),
@@ -84,9 +74,14 @@ const config = {
             url: getEnv('HELIUS_RPC_URL_2', false),
         },
         alchemy: {
-            authToken: getEnv('ALCHEMY_AUTH_TOKEN'),
-            webhookId: getEnv('ALCHEMY_WEBHOOK_ID'),
-            url: getEnv('ALCHEMY_RPC_URL'),
+            authToken: getEnv('ALCHEMY_AUTH_TOKEN', false),
+            apiKey: getEnv('ALCHEMY_API_KEY', false),
+            url: getEnv('ALCHEMY_RPC_URL', false),
+            webhookUrl: getEnv('ALCHEMY_WEBHOOK_URL', false),
+        },
+        alchemy2: { // 預留畀你第 4 條路
+            apiKey: getEnv('ALCHEMY_API_KEY_2', false),
+            url: getEnv('ALCHEMY_RPC_URL_2', false),
         }
     },
 
