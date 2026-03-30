@@ -6,25 +6,40 @@ const { getPortfolio, canBuyTrending } = require('./portfolioService');
 let isCrawlerRunning = false;
 
 const trendingMonitorService = {
-// 🌐 呼叫 GeckoTerminal 獲取「真實交易量 (Volume)」最高嘅 Top 100 池
+    // 🌐 呼叫 GeckoTerminal 獲取「真實交易量 (Volume)」最高嘅 Top 200 池 (Page 1-10)
     async fetchTrendingFromGecko() {
-        try {
-            // 🚀 升級版：直接攞 Solana 鏈上真實 Volume 霸榜嘅 Top 100，無視假點擊！
-            const url = 'https://api.geckoterminal.com/api/v2/networks/solana/pools?page=1';
-            const res = await axios.get(url, { 
-                headers: { 'accept': 'application/json' }, 
-                timeout: 8000 
-            });
-            return res.data?.data || [];
-        } catch (err) {
-            console.warn('⚠️ [Gecko Crawler] 獲取真實交易量榜失敗:', err.message);
-            return [];
+        let allPools = [];
+        console.log('🌐 [Gecko Crawler] 開始分頁抓取 Top 200 真實交易榜單 (Page 1-10)...');
+
+        for (let page = 1; page <= 10; page++) {
+            try {
+                const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools?page=${page}`;
+                const res = await axios.get(url, { 
+                    headers: { 'accept': 'application/json' }, 
+                    timeout: 8000 
+                });
+                
+                if (res.data?.data) {
+                    allPools = allPools.concat(res.data.data);
+                }
+
+                // 🚦 [防 429 護盾] 每爬一頁，強制休息 1.5 秒
+                if (page < 10) {
+                    await new Promise(r => setTimeout(r, 1500));
+                }
+            } catch (err) {
+                console.warn(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗，提早結束爬蟲:`, err.message);
+                break; // 如果中咗 429，就拎住手上現有嘅 Data 繼續去馬，唔好死谷
+            }
         }
+        return allPools;
     },
 
     start() {
-        console.log('🦎 [Gecko Crawler] 熱門榜爬蟲已啟動 (每 10 分鐘出動尋找獵物)...');
+        // 🚀 修正 Log：對應 120 分鐘 (2 小時) 嘅真實排程
+        console.log('🦎 [Gecko Crawler] 藍籌熱門榜爬蟲已啟動 (每 2 小時大換血一次)...');
         
+        // 120 分鐘執行一次 (2 * 60 * 60 * 1000)
         setInterval(async () => {
             if (isCrawlerRunning) return;
             isCrawlerRunning = true;
@@ -42,11 +57,11 @@ const trendingMonitorService = {
                     return;
                 }
 
-                // 🚀 V8.2 核心修正：動態讀取 Database 中 Trending (ID=3) 的最新門檻，拒絕 Hardcode！
+                // 🚀 V8.2 核心修正：動態讀取 Database 中 Trending (ID=3) 的最新門檻！(現為 15萬美金)
                 const { data: stratParams } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 3).single();
-                const dynamicMinLiquidity = stratParams?.min_liquidity || 40000;
+                const dynamicMinLiquidity = stratParams?.min_liquidity || 150000;
 
-                // 2. 獲取熱門池數據
+                // 2. 獲取熱門池數據 (已升級為 1-10 頁批量獲取)
                 const pools = await this.fetchTrendingFromGecko();
                 if (pools.length === 0) {
                     isCrawlerRunning = false;
@@ -57,7 +72,7 @@ const trendingMonitorService = {
                 const activePositions = portfolio.positions || [];
                 const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
 
-                let addedCount = 0;
+                let upsertArray = []; // 📦 [新增] 用於儲存批量 Upsert 的陣列
 
                 for (const pool of pools) {
                     const baseTokenId = pool.relationships?.base_token?.data?.id || '';
@@ -76,13 +91,9 @@ const trendingMonitorService = {
                     // 🛡️ RAM 初篩：使用 Master AI 動態設定的門檻！
                     if (liquidityUsd < dynamicMinLiquidity) continue; 
 
-                    // 檢查是否已持倉
+                    // 檢查是否已持倉 (揸緊就唔好再入魚池)
                     const isHolding = activePositions.some(p => p.mint_address === mintAddress);
                     if (isHolding) continue;
-
-                    // 檢查是否已經在保溫箱中排隊
-                    const { data: existingInPool } = await supabase.from('trending_pool').select('mint_address').eq('mint_address', mintAddress).single();
-                    if (existingInPool) continue;
 
                     // 🛡️ 智能冷卻防線：贏錢追擊，輸錢面壁 (24小時 / 7日)
                     const { data: tradeHistory } = await supabase
@@ -107,22 +118,33 @@ const trendingMonitorService = {
 
                     if (isOnCooldown) continue;
 
-                    // 3. 獵物入池！交由 trendingJob.js 進行安檢與 AI 審判
-                    await supabase.from('trending_pool').insert([{
+                    // 📦 將合格的獵物加入批量陣列 (不包含 AI 評論，確保 Upsert 唔會洗走舊有大腦記憶)
+                    upsertArray.push({
                         mint_address: mintAddress,
                         token_symbol: attr.name?.split(' /')[0] || 'UNKNOWN', 
                         token_name: attr.name || 'UNKNOWN',
                         liquidity: liquidityUsd,
                         volume_24h: parseFloat(attr.volume_usd?.h24) || 0,
-                        price_change_24h: parseFloat(attr.price_change_percentage?.h24) || 0
-                    }]);
+                        price_change_24h: parseFloat(attr.price_change_percentage?.h24) || 0,
+                        updated_at: new Date().toISOString()
+                    });
 
-                    addedCount++;
-                    if (addedCount >= 100) break; 
+                    // 🚀 放寬至 200 隻
+                    if (upsertArray.length >= 200) break; 
                 }
 
-                if (addedCount > 0) {
-                    console.log(`🦎 [Gecko Crawler] 成功將 ${addedCount} 隻潛力熱門幣扔入魚池 (動態過濾門檻: $${dynamicMinLiquidity})！`);
+                // 3. 🚀 [核心升級] 一次過批量 Upsert 入 Database！
+                if (upsertArray.length > 0) {
+                    const { error } = await supabase.from('trending_pool').upsert(
+                        upsertArray, 
+                        { onConflict: 'mint_address' }
+                    );
+                    
+                    if (error) {
+                        console.error(`❌ [Gecko Crawler] 批量 Upsert 寫入魚池失敗:`, error.message);
+                    } else {
+                        console.log(`🦎 [Gecko Crawler] 霸氣掃貨！成功將 ${upsertArray.length} 隻 Top 200 藍籌幣 Upsert 入魚池 (門檻: $${dynamicMinLiquidity})！`);
+                    }
                 }
 
             } catch (err) {
@@ -130,7 +152,7 @@ const trendingMonitorService = {
             } finally {
                 isCrawlerRunning = false;
             }
-        }, 2 * 60 * 60 * 1000); // 🚀 改為每 2 小時大換血一次 Top 100
+        }, 2 * 60 * 60 * 1000); // 2 小時大換血一次
     }
 };
 

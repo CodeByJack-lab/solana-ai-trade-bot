@@ -19,6 +19,23 @@ const BROWSER_HEADERS = {
 // ⏳ 全局 API 節流鎖
 let lastDexRequestTime = 0;
 
+// 🚦 [新增] 輔助函數：檢查並等待 VIP 鎖 (Meme 讓路畀 Top 200)
+async function waitForTrendingVIPLock(strategyType) {
+    // 如果自己就係 TRENDING (VIP)，直行直過，唔使等
+    if (strategyType === 'TRENDING') return;
+
+    // 如果係 NURSERY/MEME，就要睇面色
+    let isLocked = await redis.get('dex_priority_lock');
+    if (isLocked === 'TRENDING') {
+        console.log(`🚦 [API 管制] DexScreener 畀 TOP 200 徵用緊，新 Meme 乖乖排隊等候...`);
+        // 不斷 Loop，直到個鎖解除 (每半秒查一次)
+        while (await redis.get('dex_priority_lock') === 'TRENDING') {
+            await new Promise(r => setTimeout(r, 500));
+        }
+        console.log(`🟢 [API 管制] TOP 200 查閱完畢，新 Meme 獲准放行！`);
+    }
+}
+
 const securityGuard = {
     sanitizeAddress(address) {
         if (!address) return null;
@@ -109,6 +126,68 @@ const securityGuard = {
         }
     },
 
+    // 🌊 [新增] DexScreener 批量查價水喉 (Top 200 巡邏專用)
+    async getBatchMarketData(mintsArray) {
+        const results = {};
+        if (!mintsArray || mintsArray.length === 0) return results;
+
+        // DexScreener 限制每次最多查 30 隻
+        const CHUNK_SIZE = 30;
+        for (let i = 0; i < mintsArray.length; i += CHUNK_SIZE) {
+            const chunk = mintsArray.slice(i, i + CHUNK_SIZE);
+            const addresses = chunk.join(',');
+
+            try {
+                // 必須遵守節流，保護 API
+                const now = Date.now();
+                const timeSinceLast = now - lastDexRequestTime;
+                if (timeSinceLast < 1000) {
+                    await new Promise(r => setTimeout(r, 1000 - timeSinceLast));
+                }
+                lastDexRequestTime = Date.now();
+
+                const url = `https://api.dexscreener.com/latest/dex/tokens/${addresses}`;
+                const res = await axios.get(url, { timeout: 8000, headers: BROWSER_HEADERS });
+
+                if (res.data && res.data.pairs) {
+                    // 將結果按代幣地址分組
+                    const pairsByToken = {};
+                    for (const pair of res.data.pairs) {
+                        if (pair.chainId !== 'solana') continue;
+                        const mint = pair.baseToken?.address;
+                        if (!mint) continue;
+                        if (!pairsByToken[mint]) pairsByToken[mint] = [];
+                        pairsByToken[mint].push(pair);
+                    }
+
+                    // 每隻代幣只挑選 Liquidity 最大嘅 Pair
+                    for (const mint of Object.keys(pairsByToken)) {
+                        const pairs = pairsByToken[mint];
+                        pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
+                        const bestPair = pairs[0];
+
+                        results[mint] = {
+                            symbol: bestPair.baseToken?.symbol || 'UNKNOWN',
+                            name: bestPair.baseToken?.name || 'UNKNOWN',
+                            priceUsd: parseFloat(bestPair.priceUsd) || 0,
+                            priceSol: parseFloat(bestPair.priceNative) || 0,
+                            liquidity: bestPair.liquidity?.usd || 0,
+                            volume5m: bestPair.volume?.m5 || 0, // 缺失時自動補 0，防 Crash
+                            buys5m: bestPair.txns?.m5?.buys || 0,
+                            sells5m: bestPair.txns?.m5?.sells || 0,
+                            h1: parseFloat(bestPair.priceChange?.h1) || 0,
+                            h24: parseFloat(bestPair.priceChange?.h24) || 0,
+                            fdv: bestPair.fdv || 0
+                        };
+                    }
+                }
+            } catch (e) {
+                console.warn(`⚠️ [Security Guard] 批量 DexScreener 查價失敗 (進度 ${i/CHUNK_SIZE + 1}):`, e.message);
+            }
+        }
+        return results;
+    },
+
     async checkAll(mintAddress, poolType = 'NURSERY') {
         try {
             healthMonitor.setStatus('Security_Guard', '🟢 運作中');
@@ -140,6 +219,9 @@ const securityGuard = {
                 minVol: params.min_vol_5m || 500,
                 minRatio: parseFloat(params.min_liq_fdv_ratio || 0.01)
             };
+
+            // 🚦 [新增] 查價前，強制檢查 VIP 鎖！如果 Top 200 巡邏緊，Meme 乖乖等候
+            await waitForTrendingVIPLock(poolType);
 
             let marketData = await this.getProfileFromDexScreener(cleanMint);
             if (!marketData) return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
@@ -183,7 +265,6 @@ const securityGuard = {
                 }
 
                 // 🛑 雷達 C: 完美乒乓波攔截 (對敲洗盤) - 豁免真熱門大藍籌
-                // 🚀 真 Top 100 大量套利 Bot，買賣一定係 1:1，只對 NURSERY (新 Meme) 生效！
                 if (totalTxs > 50 && poolType !== 'TRENDING') {
                     const buyRatio = buys / totalTxs;
                     if (buyRatio > 0.48 && buyRatio < 0.52) {
