@@ -101,9 +101,11 @@ const connection = new Proxy(primaryConnection, {
                 try {
                     return await withTimeout(origMethod.apply(target, args), 5000, propKey);
                 } catch (err) {
-                    const is429 = err.message.includes('429');
+                    const is429 = err.message.includes('429') || err.message.includes('HTTP_429_TOO_MANY_REQUESTS');
                     if (is429) {
                         console.warn(`\n⚠️ 觸發備援機制！原因: 🚦 [429 限流] 主節點爆 Quota，已攔截底層死等！`);
+                        // 🕵️‍♂️ 核心竊聽器：印出係邊度 call 爆 RPC
+                        console.error(`🕵️‍♂️ [RPC 追兇] Error Stack:`, new Error().stack); 
                     } else {
                         console.warn(`\n⚠️ 觸發備援機制！原因: ${err.message}`);
                     }

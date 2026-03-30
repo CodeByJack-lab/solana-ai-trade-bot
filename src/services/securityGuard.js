@@ -33,7 +33,7 @@ const securityGuard = {
         const badPatterns = [
             /\.com/i, /\.io/i, /\.org/i, /\.xyz/i, /t\.me\//i,         
             /test\s*token/i, /testnet/i, /presale/i, /airdrop/i,         
-            /claim/i, /free/i, /scam/i, /fake/i, /honeypot/i
+            /claim/i, /free/i, /scam/i, /fake/i, /honeypot/i, /SOL/i
         ];
         for (const pattern of badPatterns) {
             if (pattern.test(target)) return { isGarbage: true, match: `垃圾字眼: ${pattern.toString()}` };
