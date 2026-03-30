@@ -16,9 +16,9 @@ const trendingMonitorService = {
     // 🌐 呼叫 GeckoTerminal 獲取「真實交易量 (Volume)」最高嘅 Top 200 池 (Page 1-10)
     async fetchTrendingFromGecko() {
         let allPools = [];
-        console.log('🌐 [Gecko Crawler] 開始分頁抓取 Top 200 真實交易榜單 (Page 1-10)...');
+        console.log('🌐 [Gecko Crawler] 開始分頁抓取 Top 150 真實交易榜單 (Page 1-10)...');
 
-        for (let page = 1; page <= 10; page++) {
+        for (let page = 1; page <= 8; page++) {
             try {
                 const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools?page=${page}`;
                 const res = await axios.get(url, { 
@@ -30,16 +30,16 @@ const trendingMonitorService = {
                     allPools = allPools.concat(res.data.data);
                 }
 
-                // 🚦 [防 429 護盾] 每爬一頁，強制休息 3 秒
-                if (page < 10) {
+                if (page < 8) {
                     await new Promise(r => setTimeout(r, 3000));
                 }
             } catch (err) {
                 console.warn(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗，提早結束爬蟲:`, err.message);
-                break; // 如果中咗 429，就拎住手上現有嘅 Data 繼續去馬，唔好死谷
+                break; 
             }
         }
         return allPools;
+
     },
 
     start() {
