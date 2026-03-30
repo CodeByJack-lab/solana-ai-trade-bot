@@ -19,16 +19,13 @@ const BROWSER_HEADERS = {
 // ⏳ 全局 API 節流鎖
 let lastDexRequestTime = 0;
 
-// 🚦 [新增] 輔助函數：檢查並等待 VIP 鎖 (Meme 讓路畀 Top 200)
+// 🚦 輔助函數：檢查並等待 VIP 鎖 (Meme 讓路畀 Top 200)
 async function waitForTrendingVIPLock(strategyType) {
-    // 如果自己就係 TRENDING (VIP)，直行直過，唔使等
     if (strategyType === 'TRENDING') return;
 
-    // 如果係 NURSERY/MEME，就要睇面色
     let isLocked = await redis.get('dex_priority_lock');
     if (isLocked === 'TRENDING') {
         console.log(`🚦 [API 管制] DexScreener 畀 TOP 200 徵用緊，新 Meme 乖乖排隊等候...`);
-        // 不斷 Loop，直到個鎖解除 (每半秒查一次)
         while (await redis.get('dex_priority_lock') === 'TRENDING') {
             await new Promise(r => setTimeout(r, 500));
         }
@@ -45,25 +42,39 @@ const securityGuard = {
     },
 
     isGarbageToken(name, symbol) {
-        const target = `${name} ${symbol}`.toLowerCase();
+        const targetName = name.toLowerCase();
+        const targetSymbol = symbol.toLowerCase();
         
+        // 1. 基礎垃圾字眼攔截
         const badPatterns = [
             /\.com/i, /\.io/i, /\.org/i, /\.xyz/i, /t\.me\//i,         
             /test\s*token/i, /testnet/i, /presale/i, /airdrop/i,         
             /claim/i, /free/i, /scam/i, /fake/i, /honeypot/i, /SOL/i
         ];
         for (const pattern of badPatterns) {
-            if (pattern.test(target)) return { isGarbage: true, match: `垃圾字眼: ${pattern.toString()}` };
+            if (pattern.test(targetName) || pattern.test(targetSymbol)) {
+                return { isGarbage: true, match: `垃圾字眼: ${pattern.toString()}` };
+            }
         }
 
-        const hasStandardChar = /[a-zA-Z0-9]/.test(symbol);
-        if (!hasStandardChar) return { isGarbage: true, match: '無英數純符號代號' };
+        // 🚀 2. 嚴格非英數過濾 (Non-English Scam Filter)
+        // 確保 token_symbol 只能包含 A-Z, a-z, 0-9，或者極少數常見合法符號如 $ 或 -
+        // 只要含有任何其他字元 (包括中日韓文、奇怪 Emoji 等)，一律當作土狗 Scam！
+        const strictSymbolRegex = /^[a-zA-Z0-9$\-]+$/;
+        if (!strictSymbolRegex.test(symbol)) {
+            // 例外情況：有時 DexScreener 會將 UNKNOWN 塞入去，我哋放行 UNKNOWN 等後面數據庫踢
+            if (symbol !== 'UNKNOWN') {
+                return { isGarbage: true, match: '非標準英文代號 (涉嫌地區性土狗/Scam)' };
+            }
+        }
 
+        // 3. 顏文字及不可見字元過濾 (針對 Name)
         const weirdSymbolRegex = /[\u2000-\u3300\uFE00-\uFEFF\uD83C-\uD83E\uDC00-\uDFFF]/;
-        if (weirdSymbolRegex.test(symbol) || weirdSymbolRegex.test(name)) {
-            return { isGarbage: true, match: '偵測到顏文字/古怪符號' };
+        if (weirdSymbolRegex.test(name)) {
+            return { isGarbage: true, match: '代幣名稱含顏文字/古怪符號' };
         }
 
+        // 4. 代號過長攔截
         if (symbol.length > 15) return { isGarbage: true, match: '代號長度異常 (>15字)' };
 
         return { isGarbage: false };
@@ -126,19 +137,17 @@ const securityGuard = {
         }
     },
 
-    // 🌊 [新增] DexScreener 批量查價水喉 (Top 200 巡邏專用)
+    // 🌊 DexScreener 批量查價水喉 (Top 200 巡邏專用)
     async getBatchMarketData(mintsArray) {
         const results = {};
         if (!mintsArray || mintsArray.length === 0) return results;
 
-        // DexScreener 限制每次最多查 30 隻
         const CHUNK_SIZE = 30;
         for (let i = 0; i < mintsArray.length; i += CHUNK_SIZE) {
             const chunk = mintsArray.slice(i, i + CHUNK_SIZE);
             const addresses = chunk.join(',');
 
             try {
-                // 必須遵守節流，保護 API
                 const now = Date.now();
                 const timeSinceLast = now - lastDexRequestTime;
                 if (timeSinceLast < 1000) {
@@ -150,7 +159,6 @@ const securityGuard = {
                 const res = await axios.get(url, { timeout: 8000, headers: BROWSER_HEADERS });
 
                 if (res.data && res.data.pairs) {
-                    // 將結果按代幣地址分組
                     const pairsByToken = {};
                     for (const pair of res.data.pairs) {
                         if (pair.chainId !== 'solana') continue;
@@ -160,7 +168,6 @@ const securityGuard = {
                         pairsByToken[mint].push(pair);
                     }
 
-                    // 每隻代幣只挑選 Liquidity 最大嘅 Pair
                     for (const mint of Object.keys(pairsByToken)) {
                         const pairs = pairsByToken[mint];
                         pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
@@ -172,7 +179,7 @@ const securityGuard = {
                             priceUsd: parseFloat(bestPair.priceUsd) || 0,
                             priceSol: parseFloat(bestPair.priceNative) || 0,
                             liquidity: bestPair.liquidity?.usd || 0,
-                            volume5m: bestPair.volume?.m5 || 0, // 缺失時自動補 0，防 Crash
+                            volume5m: bestPair.volume?.m5 || 0, 
                             buys5m: bestPair.txns?.m5?.buys || 0,
                             sells5m: bestPair.txns?.m5?.sells || 0,
                             h1: parseFloat(bestPair.priceChange?.h1) || 0,
@@ -220,7 +227,7 @@ const securityGuard = {
                 minRatio: parseFloat(params.min_liq_fdv_ratio || 0.01)
             };
 
-            // 🚦 [新增] 查價前，強制檢查 VIP 鎖！如果 Top 200 巡邏緊，Meme 乖乖等候
+            // 🚦 強制檢查 VIP 鎖
             await waitForTrendingVIPLock(poolType);
 
             let marketData = await this.getProfileFromDexScreener(cleanMint);
@@ -230,41 +237,38 @@ const securityGuard = {
             // 🚨 物理秒殺區 (連 AI 都慳返)
             // ==========================================
             
-            // 1. 三無攔截 (無 X / Telegram / 網站)
+            // 1. 三無攔截
             if (!marketData.hasSocials) {
                 return { isSafe: false, reason: '🛑 項目三無 (無社交連結，極高危)' };
             }
 
-            // 2. 敘事空白攔截 (無 Description)
+            // 2. 敘事空白攔截
             if (!marketData.hasDescription) {
-                return { isSafe: false, reason: '🛑 敘事空白 (DexScreener 無項目簡介，拒絕交予 AI 浪費算力)' };
+                return { isSafe: false, reason: '🛑 敘事空白 (DexScreener 無項目簡介)' };
             }
 
-            // 3. 垃圾字眼/顏文字攔截
+            // 3. 垃圾字眼 / 非英數符號攔截 🚀 (發揮作用)
             const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
-            if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 垃圾幣特徵攔截 (${garbageCheck.match})` };
+            if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 ${garbageCheck.match}` };
 
-            // 🚀 [V8.8 新增] 機器人刷量雷達 (Wash Trade Radar)
+            // 4. 機器人刷量雷達 (Wash Trade Radar)
             const buys = marketData.buys5m;
             const sells = marketData.sells5m;
             const totalTxs = buys + sells;
             const m5Volume = marketData.volume5m;
 
             if (totalTxs > 0) {
-                // 🛑 雷達 A: 假 FOMO / 貔貅攔截 (極端單向交易)
                 if (buys >= 15 && sells === 0) {
                     return { isSafe: false, reason: "🛑 貔貅盤特徵 (買單>=15但零賣單，極高危)" };
                 }
 
-                // 🛑 雷達 B: 納米機關槍攔截 (平均單價過低)
                 if (totalTxs > 30) {
                     const avgVolumePerTx = m5Volume / totalTxs;
-                    if (avgVolumePerTx < 15) { // 平均每單少於 $15 美金
+                    if (avgVolumePerTx < 15) { 
                         return { isSafe: false, reason: `🛑 納米刷量機 (均單僅 $${avgVolumePerTx.toFixed(2)}，偽造熱度)` };
                     }
                 }
 
-                // 🛑 雷達 C: 完美乒乓波攔截 (對敲洗盤) - 豁免真熱門大藍籌
                 if (totalTxs > 50 && poolType !== 'TRENDING') {
                     const buyRatio = buys / totalTxs;
                     if (buyRatio > 0.48 && buyRatio < 0.52) {

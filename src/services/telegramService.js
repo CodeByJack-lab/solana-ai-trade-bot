@@ -4,15 +4,10 @@ const path = require('path');
 const configEnv = require('../config/env');
 require('dotenv').config({ path: path.resolve(__dirname, '../../.env'), override: true });
 
-// 📈 交易戰報 Bot (Main / Channel)
 const TRADE_BOT_TOKEN = configEnv.telegram.mainBotToken;
 const TRADE_CHAT_ID = configEnv.telegram.channelId;
-
-// ⚙️ 系統管理員 Bot (Admin / 專收 Approve 掣)
 const ADMIN_BOT_TOKEN = configEnv.telegram.adminBotToken;
 const ADMIN_CHAT_ID = configEnv.telegram.chatId;
-
-// 🌟 Personal Chat ID (你的私人 TG ID，用嚟收系統通知)
 const PERSONAL_CHAT_ID = configEnv.telegram.personalChatId || process.env.PERSONAL_CHAT_ID || ADMIN_CHAT_ID;
 
 function safeHTML(text) {
@@ -30,11 +25,7 @@ async function _send(message, token, chatId) {
 
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
     try {
-        await axios.post(url, { 
-            chat_id: chatId, 
-            text: finalMessage, 
-            parse_mode: 'HTML' 
-        });
+        await axios.post(url, { chat_id: chatId, text: finalMessage, parse_mode: 'HTML' });
     } catch (err) {
         const errMsg = err.response?.data?.description || err.message || "";
         if (errMsg.includes('parse entities') || errMsg.includes('HTML')) {
@@ -50,19 +41,9 @@ async function _send(message, token, chatId) {
     }
 }
 
-// 🔵 買賣戰報：用 Main Bot 去 Channel
-async function sendTelegramAlert(message) {
-    await _send(message, TRADE_BOT_TOKEN, TRADE_CHAT_ID);
-}
+async function sendTelegramAlert(message) { await _send(message, TRADE_BOT_TOKEN, TRADE_CHAT_ID); }
+async function sendAdminAlert(message) { await _send(message, TRADE_BOT_TOKEN, PERSONAL_CHAT_ID); }
 
-// 🟠 系統通知 (Health/Error/Fallback)：用 Main Bot 去你 Personal Chat
-async function sendAdminAlert(message) {
-    await _send(message, TRADE_BOT_TOKEN, PERSONAL_CHAT_ID);
-}
-
-// ==========================================
-// 🛡️ 健康看板 1 分鐘延遲防 Spam 系統
-// ==========================================
 let lastErrorState = "";
 let errorStartTime = 0;
 let hasAlertedError = false;
@@ -101,9 +82,6 @@ function checkSystemHealth() {
 
 setInterval(checkSystemHealth, 20 * 1000);
 
-// ==========================================
-// 📸 參數快照
-// ==========================================
 async function sendParamSnapshot() {
     const { supabase } = require('../config/supabase');
     try {
@@ -111,41 +89,29 @@ async function sendParamSnapshot() {
         const { data: p2 } = await supabase.from('ai_strategy_params').select('*').eq('id', 2).single();
         const { data: cfg } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
 
-        const msg = `\n📋 <b>當前系統參數快照</b>\n━━━━━━━━━━━━━━━━━━\n🏛️ <b>老幣防線 (Bluechip)</b>\n- 最低流動性: $${p1?.min_liquidity || 0}\n- 5分量: $${p1?.min_vol_5m || 0}\n- RSI 門檻: < ${p1?.bluechip_max_rsi || 0}\n\n🔫 <b>新幣盲狙 (Meme)</b>\n- 最低流動性: $${p2?.min_liquidity || 0}\n- 5分量: $${p2?.min_vol_5m || 0}\n- 泡沫比(Liq/FDV): ${((p2?.min_liq_fdv_ratio || 0) * 100).toFixed(1)}%\n\n🌍 <b>宏觀環境</b>\n- AI 災難指數: ${cfg?.latest_news_score || 0}/100\n━━━━━━━━━━━━━━━━━━`;
+        const msg = `\n📋 <b>當前系統參數快照</b>\n━━━━━━━━━━━━━━━━━━\n🏛️ <b>老幣防線 (Bluechip)</b>\n- 最低流動性: $${p1?.min_liquidity || 0}\n- 5分量: $${p1?.min_vol_5m || 0}\n- RSI 門檻: < ${p1?.bluechip_max_rsi || 0}\n\n🔫 <b>新幣盲狙 (Meme)</b>\n- 最低流動性: $${p2?.min_liquidity || 0}\n- 5分量: $${p2?.min_vol_5m || 0}\n- 泡沫比: ${((p2?.min_liq_fdv_ratio || 0) * 100).toFixed(1)}%\n\n🌍 <b>宏觀環境</b>\n- AI 災難指數: ${cfg?.latest_news_score || 0}/100\n━━━━━━━━━━━━━━━━━━`;
         sendAdminAlert(msg);
     } catch (err) {
         console.error("❌ 無法獲取參數快照:", err.message);
     }
 }
 
-// ==========================================
-// 🛡️ V8.9 HITL 審批中樞 (Human-in-the-Loop)
-// ==========================================
-
-// 1. 發送帶有「批准/否決」按鈕的報告 (強制去 Admin Chat)
 async function sendApprovalRequest(reportText, proposalId) {
     const token = ADMIN_BOT_TOKEN;
     const chat = ADMIN_CHAT_ID;
     const { supabase } = require('../config/supabase'); 
     
-    if (!token || !chat) {
-        console.error("❌ [Telegram] 缺少 ADMIN_BOT_TOKEN 或 ADMIN_CHAT_ID");
-        return;
-    }
+    if (!token || !chat) return;
 
     let finalReportText = reportText;
 
-    // 🚀 核心升級：自動查閱 Database，將具體變更數值附加喺 TG 訊息尾段
     try {
         const { data: proposal } = await supabase.from('ai_proposals').select('proposed_changes').eq('id', proposalId).single();
-        
         if (proposal && proposal.proposed_changes) {
             const changes = typeof proposal.proposed_changes === 'string' ? JSON.parse(proposal.proposed_changes) : proposal.proposed_changes;
-            
             let details = "\n━━━━━━━━━━━━━━━━━━\n🔍 <b>【具體變更預覽】</b>\n";
             let hasDetails = false;
 
-            // 處理提示詞變更
             if (changes.target_prompt_id && changes.new_prompt_content) {
                 details += `📝 <b>劇本更新:</b> [<code>${changes.target_prompt_id}</code>]\n`;
                 const snippet = changes.new_prompt_content.replace(/</g, '＜').replace(/>/g, '＞').substring(0, 150);
@@ -153,32 +119,21 @@ async function sendApprovalRequest(reportText, proposalId) {
                 hasDetails = true;
             }
 
-            // 處理參數變更
             if (changes.recommended_params) {
                 if (changes.recommended_params.meme && Object.keys(changes.recommended_params.meme).length > 0) {
                     details += `🐶 <b>MEME 參數即將變更:</b>\n`;
-                    for (const [key, value] of Object.entries(changes.recommended_params.meme)) {
-                        details += `  ▪️ <code>${key}</code> ➡️ <b>${value}</b>\n`;
-                    }
+                    for (const [key, value] of Object.entries(changes.recommended_params.meme)) details += `  ▪️ <code>${key}</code> ➡️ <b>${value}</b>\n`;
                     hasDetails = true;
                 }
-                
                 if (changes.recommended_params.trending && Object.keys(changes.recommended_params.trending).length > 0) {
                     details += `🔥 <b>TRENDING 參數即將變更:</b>\n`;
-                    for (const [key, value] of Object.entries(changes.recommended_params.trending)) {
-                        details += `  ▪️ <code>${key}</code> ➡️ <b>${value}</b>\n`;
-                    }
+                    for (const [key, value] of Object.entries(changes.recommended_params.trending)) details += `  ▪️ <code>${key}</code> ➡️ <b>${value}</b>\n`;
                     hasDetails = true;
                 }
             }
-
-            if (hasDetails) {
-                finalReportText += details;
-            }
+            if (hasDetails) finalReportText += details;
         }
-    } catch (err) {
-        console.error("⚠️ [Telegram] 提取具體變更預覽失敗，將只發送基本報告:", err.message);
-    }
+    } catch (err) {}
 
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
     const keyboard = {
@@ -191,25 +146,17 @@ async function sendApprovalRequest(reportText, proposalId) {
     };
 
     try {
-        await axios.post(url, { 
-            chat_id: chat, 
-            text: finalReportText, 
-            parse_mode: 'HTML',
-            reply_markup: keyboard
-        });
-        console.log(`📨 [Telegram] 審批請求已發送 (Proposal ID: ${proposalId})`);
-    } catch (err) {
-        console.error(`❌ [Telegram] 審批請求發送失敗:`, err.response?.data?.description || err.message);
-    }
+        await axios.post(url, { chat_id: chat, text: finalReportText, parse_mode: 'HTML', reply_markup: keyboard });
+    } catch (err) {}
 }
 
-// 2. 處理 Telegram 傳回來的按鈕點擊 (強制用 Admin Bot 回覆)
 async function processTelegramCallback(callbackQuery) {
     const { supabase } = require('../config/supabase');
     const data = callbackQuery.data; 
     const messageId = callbackQuery.message.message_id;
     const chat = callbackQuery.message.chat.id;
     const token = ADMIN_BOT_TOKEN; 
+    const isAutoSystem = callbackQuery.from?.first_name === "System_Auto"; // 🚀 識別是否為自動執法
 
     if (!data.startsWith('APPROVE_') && !data.startsWith('REJECT_')) return;
 
@@ -220,12 +167,12 @@ async function processTelegramCallback(callbackQuery) {
         const { data: proposal, error } = await supabase.from('ai_proposals').select('*').eq('id', proposalId).single();
         
         if (error || !proposal) {
-            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "⚠️ 找不到該提案。" });
+            if (!isAutoSystem) await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: "⚠️ 找不到該提案。" });
             return;
         }
 
         if (proposal.status !== 'PENDING') {
-            await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: `⚠️ 提案狀態為 ${proposal.status}，無法重複處理。` });
+            if (!isAutoSystem) await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: `⚠️ 提案狀態為 ${proposal.status}，無法重複處理。` });
             return;
         }
 
@@ -235,7 +182,10 @@ async function processTelegramCallback(callbackQuery) {
         } 
         else if (action === 'APPROVE') {
             const changes = typeof proposal.proposed_changes === 'string' ? JSON.parse(proposal.proposed_changes) : proposal.proposed_changes;
-            let successMsg = "✅ <b>提案已批准並套用！</b>\n";
+            // 🚀 根據觸發者改變開場白
+            let successMsg = isAutoSystem 
+                ? "⚡ <b>【系統自動執行】15 分鐘無異議，提案已自動套用！</b>\n"
+                : "✅ <b>提案已批准並套用！</b>\n";
 
             if (proposal.proposal_type === 'MASTER_AI') {
                 if (changes.target_prompt_id && changes.new_prompt_content) {
@@ -248,9 +198,7 @@ async function processTelegramCallback(callbackQuery) {
                         const updates = {};
                         if (params.min_liquidity !== undefined) updates.min_liquidity = Number(params.min_liquidity);
                         if (params.min_vol_5m !== undefined) updates.min_vol_5m = Number(params.min_vol_5m);
-                        if (params.min_drop_pct !== undefined) updates.min_drop_pct = Number(params.min_drop_pct);
                         if (params.stop_loss_pct !== undefined) updates.stop_loss_pct = Number(params.stop_loss_pct);
-                        if (params.min_liq_fdv_ratio !== undefined) updates.min_liq_fdv_ratio = Number(params.min_liq_fdv_ratio);
                         if (params.trailing_pullback !== undefined) updates.trailing_pullback = Number(params.trailing_pullback);
                         if (params.trailing_tp_trigger !== undefined) updates.trailing_tp_trigger = Number(params.trailing_tp_trigger);
                         return updates;
@@ -258,15 +206,11 @@ async function processTelegramCallback(callbackQuery) {
 
                     if (changes.recommended_params.meme) {
                         const memeUpdates = parseAllFields(changes.recommended_params.meme);
-                        if (Object.keys(memeUpdates).length > 0) {
-                            await supabase.from('ai_strategy_params').update(memeUpdates).eq('id', 2);
-                        }
+                        if (Object.keys(memeUpdates).length > 0) await supabase.from('ai_strategy_params').update(memeUpdates).eq('id', 2);
                     }
                     if (changes.recommended_params.trending) {
                         const trendUpdates = parseAllFields(changes.recommended_params.trending);
-                        if (Object.keys(trendUpdates).length > 0) {
-                            await supabase.from('ai_strategy_params').update(trendUpdates).eq('id', 3);
-                        }
+                        if (Object.keys(trendUpdates).length > 0) await supabase.from('ai_strategy_params').update(trendUpdates).eq('id', 3);
                     }
                     successMsg += `\n⚙️ 入場及風險參數已同步更新。`;
                 }
@@ -282,14 +226,15 @@ async function processTelegramCallback(callbackQuery) {
             await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: successMsg, parse_mode: 'HTML' });
         }
 
-        // 移除按鈕
-        await axios.post(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
-            chat_id: chat, message_id: messageId, reply_markup: { inline_keyboard: [] } 
-        });
+        // 移除 TG 按鈕 (如果係真 Message 先除)
+        if (messageId && messageId !== 0) {
+            await axios.post(`https://api.telegram.org/bot${token}/editMessageReplyMarkup`, {
+                chat_id: chat, message_id: messageId, reply_markup: { inline_keyboard: [] } 
+            }).catch(e => {}); // Ignore error if message is old
+        }
 
     } catch (err) {
         console.error("❌ [Telegram Callback Error]:", err.message);
-        await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, { chat_id: chat, text: `❌ 處理出錯: ${err.message}` });
     }
 }
 

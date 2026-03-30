@@ -68,7 +68,7 @@ const trendingJob = {
                     triggeredCount++;
                     console.log(`\n======================================================`);
                     if (isHypeBypass) {
-                        console.log(`🔥 [Hype Radar] 真假美猴王觸發！無條件強制送檢: ${token.token_symbol}`);
+                        console.log(`🔥 [Hype Radar] 潛力幣觸發！無條件強制送檢: ${token.token_symbol}`);
                     } else {
                         console.log(`📡 [Math Radar] 觸發！幣種: ${token.token_symbol}`);
                     }

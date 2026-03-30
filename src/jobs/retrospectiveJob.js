@@ -7,7 +7,6 @@ const { aiOrchestrator } = require('../services/aiOrchestrator');
 const { promptManager } = require('../services/promptManager'); 
 
 const retrospectiveJob = {
-    // 🌟 [新增] isEmergency 參數，區分係「每日例行」定係「大市突變警報」
     async runEvolutionWithRetry(attempt = 1, isEmergency = false) {
         const MAX_ATTEMPTS = 3; 
         const triggerReason = isEmergency ? "🚨 宏觀大市突變應急" : "🌞 每日例行 (09:00 HKT)";
@@ -32,7 +31,6 @@ const retrospectiveJob = {
                 const avgPnlPct = allTrades.reduce((sum, t) => sum + (t.realized_pnl_pct || 0), 0) / allTrades.length;
                 const HURDLE_RATE = 5.0; 
 
-                // 🌟 [核心修改] 如果係緊急警報，絕對唔可以休眠！必須強制審視！
                 if (avgPnlPct >= HURDLE_RATE && !isEmergency) {
                     const msg = `過去 24 小時平均利潤達 +${avgPnlPct.toFixed(2)}% (跨越 ${HURDLE_RATE}% 及格線)。\n🛡️ 系統處於「實質印鈔狀態」，Master AI 自動休眠，不作任何修改提案！`;
                     console.log(`✅ [Evolution] ${msg}`);
@@ -73,7 +71,6 @@ const retrospectiveJob = {
                 .replace('{{last_audit_record}}', lastAuditText) 
                 .replace('{{loss_trades_data}}', JSON.stringify(tradeDataToAI, null, 2));
 
-            // 🌟 [緊急加壓] 如果係大市突變，加重語氣逼 AI 處理宏觀危機
             if (isEmergency) {
                 promptText += `\n\n[🚨 MACRO EMERGENCY OVERRIDE] This evolution is triggered by a DRASTIC SHIFT in the Macro Disaster Score. Ignore normal PnL complacency. You MUST adjust 'min_liquidity' and 'min_vol_5m' immediately to either protect capital (if market is crashing) or catch the dip/momentum (if market is booming)!`;
             }
@@ -104,6 +101,28 @@ const retrospectiveJob = {
                 hasActionableChange = true;
             }
 
+            // 🚀 [核心優化] 決策疲勞過濾：判斷係咪「小修小補」
+            let isMinorFix = false;
+            if (hasActionableChange && !proposedChanges.target_prompt_id && proposedChanges.recommended_params) {
+                try {
+                    const checkDrift = (newVal, oldVal) => {
+                        if (!newVal || !oldVal) return false;
+                        const drift = Math.abs(newVal - oldVal) / oldVal;
+                        return drift <= 0.15; // 容許 15% 內嘅漂移自動套用
+                    };
+
+                    const memeDriftOk = !proposedChanges.recommended_params.meme?.min_liquidity || checkDrift(proposedChanges.recommended_params.meme.min_liquidity, param2.min_liquidity);
+                    const trendDriftOk = !proposedChanges.recommended_params.trending?.min_liquidity || checkDrift(proposedChanges.recommended_params.trending.min_liquidity, param3.min_liquidity);
+
+                    if (memeDriftOk && trendDriftOk) isMinorFix = true;
+                } catch(e) {}
+            }
+
+            if (isMinorFix) {
+                proposedChanges.auto_apply_at = Date.now() + (15 * 60 * 1000); 
+                proposedChanges.is_minor = true;
+            }
+
             const { data: insertedProposal, error: insertErr } = await supabase.from('ai_proposals').insert([{
                 proposal_type: 'MASTER_AI',
                 report_content: report.analysis,
@@ -114,14 +133,18 @@ const retrospectiveJob = {
             if (insertErr) throw new Error(`寫入 ai_proposals 失敗: ${insertErr.message}`);
 
             const dateStr = new Date().toLocaleString('zh-HK', { timeZone: 'Asia/Hong_Kong', hour12: false });
-            // 🌟 標題動態化，等你喺 TG 一眼分得出係咪緊急奏摺
             let tgReport = `🧠 <b>[Master AI ${isEmergency ? '🚨 宏觀緊急提案' : '每日覆盤與提案'}]</b>\n📅 <i>${dateStr}</i>\n\n📊 <b>深度分析：</b>\n${report.analysis}\n\n`;
 
             if (hasActionableChange) {
                 tgReport += `🎯 <b>建議修改項目：</b>\n`;
                 if (proposedChanges.target_prompt_id) tgReport += `📝 劇本: [<code>${proposedChanges.target_prompt_id}</code>]\n`;
-                if (proposedChanges.recommended_params) tgReport += `⚙️ 參數: 檢測到入場參數微調建議\n`;
-                tgReport += `\n請在下方選擇是否套用此 AI 提案：`;
+                if (proposedChanges.recommended_params) tgReport += `⚙️ 參數: 檢測到入場參數調整建議\n`;
+                
+                if (isMinorFix) {
+                    tgReport += `\n⚡ <b>系統判定：微調 (Minor Fix)</b>\n🕒 若 15 分鐘內無人反對，系統將自動套用以跟上市場熱度！`;
+                } else {
+                    tgReport += `\n⚠️ <b>系統判定：核心邏輯變更 (Major Change)</b>\n請在下方選擇是否套用此 AI 提案：`;
+                }
                 
                 await sendApprovalRequest(tgReport, insertedProposal.id);
             } else {

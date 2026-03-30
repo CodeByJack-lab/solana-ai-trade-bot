@@ -22,7 +22,6 @@ const redis = new Redis(configEnv.cache.redisUrl);
 const redisSub = new Redis(configEnv.cache.redisUrl); 
 
 const priceHistory1Min = new Map(); 
-const sellingLocks = new Set(); 
 const trendingPriceCache = new Map(); 
 
 let lastRedisUpdateMs = Date.now();
@@ -44,7 +43,7 @@ const cors = require('cors');
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.9 系統正常運行中 (宏觀事件驅動版)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.9.1 系統正常運行中 (Redis原子鎖 + 宏觀事件驅動版)'));
 
 app.post('/force-evolution', async (req, res) => {
     console.log('🧠 [Admin Command] 收到前端指令：強制喚醒 Master AI 進行進化！');
@@ -328,13 +327,13 @@ function startDatabaseNurseryMonitor() {
 }
 
 // ========================================================
-// 🎯 核心：0 延遲實時盈虧監控與極速平倉
+// 🎯 核心：0 延遲實時盈虧監控與極速平倉 (Redis 原子鎖防護版)
 // ========================================================
 async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) {
     if (!currentPriceSol || currentPriceSol <= 0) return;
     
     const pos = portfolio.positions.find(p => p.mint_address === mint);
-    if (!pos || sellingLocks.has(mint)) return; 
+    if (!pos) return; 
 
     const now = Date.now();
     if (!priceHistory1Min.has(mint)) priceHistory1Min.set(mint, []);
@@ -422,7 +421,15 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
     }
 
     if (action === 'SELL') {
-        sellingLocks.add(pos.mint_address);
+        // 🚀 [核心升級] Redis SET NX 原子鎖，徹底杜絕 Node.js 異步時間差導致嘅重複平倉
+        const lockKey = `sell_lock:${pos.mint_address}`;
+        const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
+        
+        if (!acquired) {
+            console.log(`🔒 [Redis Lock] 偵測到 ${pos.token_symbol} 已經處於平倉進程中，自動攔截重複觸發信號！`);
+            return; 
+        }
+
         priceHistory1Min.delete(pos.mint_address);
         runSellPipeline(pos, currentPriceSol, reason, sellFraction).then(sellResult => {
             if (sellResult && sellFraction === 0.5) {
@@ -431,12 +438,16 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
                     : `🌟 <b>分批鎖定利潤</b>\n🪙 代幣: $${pos.token_symbol}\n賣出 50% 鎖定利潤！`;
                 sendTelegramAlert(telegramMsg);
             }
-        }).catch(err => console.error(`❌ [Zero Latency Sell Error]`, err.message)).finally(() => sellingLocks.delete(pos.mint_address));
+        }).catch(err => console.error(`❌ [Zero Latency Sell Error]`, err.message))
+          .finally(() => {
+              // 交易完成或失敗後，釋放原子鎖
+              redis.del(lockKey);
+          });
     }
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] V8.9 雙軌動態秒斬防線已啟動...');
+    console.log('👁️ [Radar] V8.9.1 雙軌動態秒斬防線 (Redis防護版) 已啟動...');
     let cachedSolPriceUsd = 150; 
     const { getSolPriceInHKD } = require('./priceService');
     
@@ -482,20 +493,14 @@ function startPositionMonitor() {
         const portfolio = getPortfolio();
         const hasPositions = portfolio?.positions?.length > 0;
         
-        // 🧠 [核心修正：無人機 Wake-up 寬限期]
-        // 如果現時係空倉，不斷將「最後報價時間」重置為當下。
-        // 確保一旦買入第一隻幣，計時器先正式開始，畀足無人機 60 秒時間啟動同連線！
         if (!hasPositions) {
             lastRedisUpdateMs = Date.now();
         }
         
         const timeSinceLastRedis = Date.now() - lastRedisUpdateMs;
         
-        // 🎯 唯一觸發條件：超過 1 分鐘無收到無人機報價 && 手上仲有倉位
         if (timeSinceLastRedis > 60000 && hasPositions) {
-            
             console.log(`🚨 [Fallback] 無人機逾時，大本營直接執行 HTTP 備援查價...`);
-            
             try {
                 const config = (await supabase.from('system_config').select('*').eq('id', 1).single()).data;
                 if (!config?.is_running) return;
@@ -504,7 +509,6 @@ function startPositionMonitor() {
                 let fetchedPrices = {};
                 let fetchSuccess = false;
 
-                // 備援一：GeckoTerminal
                 if (!fetchSuccess && isApiAvailable('geckoTerminal')) {
                     try {
                         const res = await axios.get(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints}`, { timeout: 3000 });
@@ -516,7 +520,6 @@ function startPositionMonitor() {
                     } catch (e) { markApiFailed('geckoTerminal'); }
                 }
 
-                // 備援二：Jupiter V6
                 if (!fetchSuccess && isApiAvailable('jupiterV6')) {
                     try {
                         const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
@@ -527,7 +530,6 @@ function startPositionMonitor() {
                     } catch (e) { markApiFailed('jupiterV6'); }
                 }
 
-                // 將攞到嘅備援價錢掟入防線
                 if (fetchSuccess) {
                     for (const pos of portfolio.positions) {
                         if (fetchedPrices[pos.mint_address]) {
@@ -538,7 +540,6 @@ function startPositionMonitor() {
                 }
             } catch (err) {}
         } 
-        
     }, 10000);
 
     setInterval(async () => {
@@ -597,7 +598,10 @@ function startPositionMonitor() {
             for (const mint of aiReviewCooldowns.keys()) if (!currentMints.has(mint)) aiReviewCooldowns.delete(mint);
 
             for (const pos of positions) {
-                if (sellingLocks.has(pos.mint_address)) continue;
+                // 檢查 Redis 鎖取代舊有的本地 Set 鎖
+                const isLocked = await redis.get(`sell_lock:${pos.mint_address}`);
+                if (isLocked) continue;
+
                 const nowMs = Date.now();
                 const lastReviewMs = aiReviewCooldowns.get(pos.mint_address) || 0;
                 if ((nowMs - lastReviewMs) / 60000 < 3) continue; 
@@ -637,9 +641,16 @@ function startPositionMonitor() {
                     }
 
                     if (reviewResult.decision === 'EXIT' || reviewResult.decision === 'SELL') {
-                        sellingLocks.add(pos.mint_address);
+                        // AI 決定平倉，同樣需要攞 Redis 原子鎖
+                        const lockKey = `sell_lock:${pos.mint_address}`;
+                        const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
+                        if (!acquired) continue;
+
                         runSellPipeline(pos, currentPrice, `AI 指示: ${reviewResult.reason}`, 1.0)
-                            .finally(() => { aiReviewCooldowns.delete(pos.mint_address); sellingLocks.delete(pos.mint_address); });
+                            .finally(() => { 
+                                aiReviewCooldowns.delete(pos.mint_address); 
+                                redis.del(lockKey); 
+                            });
                     }
                 } catch (aiErr) { aiReviewCooldowns.set(pos.mint_address, nowMs - (4 * 60 * 1000)); }
             }
@@ -683,18 +694,15 @@ function startMacroEnvironmentMonitor() {
 
             const currentScore = config.latest_news_score;
             
-            // 第一次開機，記住個底線先
             if (lastMacroScore === null) {
                 lastMacroScore = currentScore;
                 return;
             }
 
-            // 計算分數波幅
             const scoreDelta = Math.abs(currentScore - lastMacroScore);
             const now = Date.now();
-            const cooldownMs = 6 * 60 * 60 * 1000; // 6 小時冷卻期
+            const cooldownMs = 6 * 60 * 60 * 1000; 
 
-            // 觸發條件：波幅 >= 20 分，且過咗冷卻期
             if (scoreDelta >= 20 && (now - lastMacroTriggerTime) > cooldownMs) {
                 console.log(`🚨 [Macro Alert] 大市情緒發生劇變！(由 ${lastMacroScore} 變為 ${currentScore})`);
                 
@@ -702,11 +710,8 @@ function startMacroEnvironmentMonitor() {
                 const telegramMsg = `🚨 <b>大市情緒劇變警告</b>\n${conditionMsg}\n災難指數由 ${lastMacroScore} 突變為 ${currentScore}！\n已強制喚醒 Master AI 進行緊急策略重估...`;
                 
                 await sendAdminAlert(telegramMsg);
-
-                // 強制喚醒 Master AI
                 retrospectiveJob.runEvolutionWithRetry(1, true).catch(err => console.error("宏觀喚醒 AI 失敗:", err));
 
-                // 更新記憶
                 lastMacroScore = currentScore;
                 lastMacroTriggerTime = now;
             }
@@ -714,7 +719,7 @@ function startMacroEnvironmentMonitor() {
         } catch (err) {
             console.error("❌ 檢查大市情緒出錯:", err.message);
         }
-    }, 15 * 60 * 1000); // 15 分鐘 Check 一次
+    }, 15 * 60 * 1000); 
 }
 
 function startCommandListener() {
@@ -731,7 +736,12 @@ function startCommandListener() {
                     const { getPortfolio } = require('./portfolioService');
                     const positions = getPortfolio().positions;
                     for (const pos of positions) {
-                        await runSellPipeline(pos, pos.highest_price_sol, "🚨 緊急拔線，無腦市價平倉", 1.0);
+                        const lockKey = `sell_lock:${pos.mint_address}`;
+                        const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
+                        if (!acquired) continue;
+
+                        await runSellPipeline(pos, pos.highest_price_sol, "🚨 緊急拔線，無腦市價平倉", 1.0)
+                            .finally(() => redis.del(lockKey));
                         await new Promise(r => setTimeout(r, 1500)); 
                     }
                 } 
@@ -740,19 +750,24 @@ function startCommandListener() {
                     const pos = getPortfolio().positions.find(p => p.mint_address === cmd.mint_address);
                     
                     if (pos) {
-                        let currentPrice = pos.entry_price_sol;
-                        if (pos.strategy_type.includes('MEME')) {
-                            const priceUsdStr = await redis.get(`price_usd:${pos.mint_address}`);
-                            if (priceUsdStr) {
-                                const { getSolPriceInHKD } = require('./priceService');
-                                let liveSolUsd = 150;
-                                try { liveSolUsd = (await getSolPriceInHKD()) / 7.8; } catch(e) {}
-                                currentPrice = parseFloat(priceUsdStr) / liveSolUsd;
+                        const lockKey = `sell_lock:${pos.mint_address}`;
+                        const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
+                        if (acquired) {
+                            let currentPrice = pos.entry_price_sol;
+                            if (pos.strategy_type.includes('MEME')) {
+                                const priceUsdStr = await redis.get(`price_usd:${pos.mint_address}`);
+                                if (priceUsdStr) {
+                                    const { getSolPriceInHKD } = require('./priceService');
+                                    let liveSolUsd = 150;
+                                    try { liveSolUsd = (await getSolPriceInHKD()) / 7.8; } catch(e) {}
+                                    currentPrice = parseFloat(priceUsdStr) / liveSolUsd;
+                                }
+                            } else {
+                                currentPrice = trendingPriceCache.get(pos.mint_address) || pos.entry_price_sol;
                             }
-                        } else {
-                            currentPrice = trendingPriceCache.get(pos.mint_address) || pos.entry_price_sol;
+                            await runSellPipeline(pos, currentPrice, "👨‍💻 管理員手動市價平倉", 1.0)
+                                .finally(() => redis.del(lockKey));
                         }
-                        await runSellPipeline(pos, currentPrice, "👨‍💻 管理員手動市價平倉", 1.0);
                     }
                 }
                 else if (cmd.command_type === 'PAUSE_BUY') {
@@ -794,7 +809,7 @@ function startMarketMonitor() {
         setTimeout(() => { startDatabaseNurseryMonitor(); }, 4000);
         setTimeout(() => { startCommandListener(); }, 6000);
         setTimeout(() => { startOneMinuteMetricsAlert(); }, 8000);
-        setTimeout(() => { startMacroEnvironmentMonitor(); }, 10000); // 🌟 啟動宏觀監測
+        setTimeout(() => { startMacroEnvironmentMonitor(); }, 10000); 
     });
 }
 process.on('SIGINT', async () => { await toggleHeliusWebhook(false); process.exit(0); });

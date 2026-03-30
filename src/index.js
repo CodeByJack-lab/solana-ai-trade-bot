@@ -1,4 +1,4 @@
-// src/index.js - V8.2 Protocol-level Diagnosis
+// src/index.js - V8.9.1
 const configEnv = require('./config/env'); 
 const { supabase } = require('./config/supabase'); 
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
@@ -8,16 +8,15 @@ const { weeklyBacktestJob } = require('./jobs/weeklyBacktestJob');
 const { macroMonitorService } = require('./services/macroMonitorService'); 
 const { retrospectiveJob } = require('./jobs/retrospectiveJob');           
 const { healthMonitor } = require('./services/healthMonitor');             
-
 const { graveyardJob } = require('./jobs/graveyardJob');                   
 const { janitorJob } = require('./jobs/janitorJob');   
-
 const { trendingMonitorService } = require('./services/trendingMonitorService');
 const { trendingJob } = require('./jobs/trendingJob');
-
-// 👇 [V8.2] 引入 Macro Job 與 RAM Prompt Manager
 const { macroJob } = require('./jobs/macroJob');
 const { promptManager } = require('./services/promptManager');
+
+// 🚀 引入自動微調執法官
+const { autoApplyJob } = require('./jobs/autoApplyJob');
 
 async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
     try {
@@ -56,13 +55,10 @@ async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
 
 async function startApp() {
     console.log("======================================================");
-    console.log("🚀 SOL_Trade V8.2 雙核防彈版啟動...");
+    console.log("🚀 SOL_Trade V8.9.1 (Redis 原子鎖 + 自動進化版) 啟動...");
     console.log("======================================================");
 
-    // 🚀 [V8.2] 第一時間載入 AI RAM 劇本
     await promptManager.init();
-
-    // 🚀 [核心修復] 第一時間 Bind Port，滿足 Railway Healthcheck
     startMarketMonitor(); 
 
     let isFirstLoad = true; 
@@ -110,26 +106,22 @@ async function startApp() {
         .subscribe();
 
     const portfolio = await initPortfolio();
-    if (!portfolio) {
-        process.exit(1);
-    }
+    if (!portfolio) process.exit(1);
     
     global.isRunning = true;
     global.tradeMode = portfolio.mode;
 
-    // ==========================================
-    // Phase 5: 啟動各路背景雷達與排程 (🚀 錯峰啟動版)
-    // ==========================================
     console.log("⚙️ [Boot] 正在錯峰喚醒背景雷達與排程任務...");
     
-    setTimeout(() => { macroMonitorService.start(); }, 12000);  // 12s: 大盤即時預警
-    setTimeout(() => { macroJob.start(); }, 14000);             // 14s: 恐懼貪婪指數
-    setTimeout(() => { trendingMonitorService.start(); }, 16000); // 16s: Gecko 爬蟲
-    setTimeout(() => { trendingJob.start(); }, 18000);          // 18s: 熱門幣追擊
-    setTimeout(() => { janitorJob.start(); }, 20000);           // 20s: 清道夫
-    setTimeout(() => { graveyardJob.start(); }, 22000);         // 22s: 墓地火化
-    setTimeout(() => { retrospectiveJob.start(); }, 24000);     // 24s: 大腦進化
-    setTimeout(() => { weeklyBacktestJob.start(); }, 26000);    // 26s: 回測引擎
+    setTimeout(() => { macroMonitorService.start(); }, 12000);  
+    setTimeout(() => { macroJob.start(); }, 14000);             
+    setTimeout(() => { trendingMonitorService.start(); }, 16000); 
+    setTimeout(() => { trendingJob.start(); }, 18000);          
+    setTimeout(() => { janitorJob.start(); }, 20000);           
+    setTimeout(() => { graveyardJob.start(); }, 22000);         
+    setTimeout(() => { retrospectiveJob.start(); }, 24000);     
+    setTimeout(() => { autoApplyJob.start(); }, 25000);         // 🚀 啟動自動套用執法官
+    setTimeout(() => { weeklyBacktestJob.start(); }, 26000);    
 
     async function backgroundReportLoop() {
         if (global.isRunning === false) {
