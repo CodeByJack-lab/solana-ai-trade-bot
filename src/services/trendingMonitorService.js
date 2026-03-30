@@ -6,17 +6,18 @@ const { getPortfolio, canBuyTrending } = require('./portfolioService');
 let isCrawlerRunning = false;
 
 const trendingMonitorService = {
-    // 🌐 呼叫 GeckoTerminal 免費 API 獲取熱門池
+// 🌐 呼叫 GeckoTerminal 獲取「真實交易量 (Volume)」最高嘅 Top 100 池
     async fetchTrendingFromGecko() {
         try {
-            const url = 'https://api.geckoterminal.com/api/v2/networks/solana/trending_pools';
+            // 🚀 升級版：直接攞 Solana 鏈上真實 Volume 霸榜嘅 Top 100，無視假點擊！
+            const url = 'https://api.geckoterminal.com/api/v2/networks/solana/pools?page=1';
             const res = await axios.get(url, { 
                 headers: { 'accept': 'application/json' }, 
                 timeout: 8000 
             });
             return res.data?.data || [];
         } catch (err) {
-            console.warn('⚠️ [Gecko Crawler] 獲取熱門榜失敗:', err.message);
+            console.warn('⚠️ [Gecko Crawler] 獲取真實交易量榜失敗:', err.message);
             return [];
         }
     },
@@ -129,7 +130,7 @@ const trendingMonitorService = {
             } finally {
                 isCrawlerRunning = false;
             }
-        }, 10 * 60 * 1000); // 🚀 每 10 分鐘爬一次
+        }, 2 * 60 * 60 * 1000); // 🚀 改為每 2 小時大換血一次 Top 100
     }
 };
 

@@ -182,10 +182,10 @@ const securityGuard = {
                     }
                 }
 
-                // 🛑 雷達 C: 完美乒乓波攔截 (對敲洗盤)
-                if (totalTxs > 50) {
+                // 🛑 雷達 C: 完美乒乓波攔截 (對敲洗盤) - 豁免真熱門大藍籌
+                // 🚀 真 Top 100 大量套利 Bot，買賣一定係 1:1，只對 NURSERY (新 Meme) 生效！
+                if (totalTxs > 50 && poolType !== 'TRENDING') {
                     const buyRatio = buys / totalTxs;
-                    // 真實散戶盤買單數量通常遠超賣單，如果比例極度接近 1:1，必為 Bot 左手交右手
                     if (buyRatio > 0.48 && buyRatio < 0.52) {
                         return { isSafe: false, reason: `🛑 乒乓波對敲刷量 (買賣單數比例 ${buyRatio.toFixed(2)} 極度不自然)` };
                     }
