@@ -13,7 +13,6 @@ const ADMIN_BOT_TOKEN = configEnv.telegram.adminBotToken;
 const ADMIN_CHAT_ID = configEnv.telegram.chatId;
 
 // 🌟 Personal Chat ID (你的私人 TG ID，用嚟收系統通知)
-// 既然同 Admin ID 一樣，如果無特別 set personalChatId，就直接用 ADMIN_CHAT_ID 嘅數字
 const PERSONAL_CHAT_ID = configEnv.telegram.personalChatId || process.env.PERSONAL_CHAT_ID || ADMIN_CHAT_ID;
 
 function safeHTML(text) {
@@ -127,10 +126,58 @@ async function sendParamSnapshot() {
 async function sendApprovalRequest(reportText, proposalId) {
     const token = ADMIN_BOT_TOKEN;
     const chat = ADMIN_CHAT_ID;
+    const { supabase } = require('../config/supabase'); 
     
     if (!token || !chat) {
         console.error("❌ [Telegram] 缺少 ADMIN_BOT_TOKEN 或 ADMIN_CHAT_ID");
         return;
+    }
+
+    let finalReportText = reportText;
+
+    // 🚀 核心升級：自動查閱 Database，將具體變更數值附加喺 TG 訊息尾段
+    try {
+        const { data: proposal } = await supabase.from('ai_proposals').select('proposed_changes').eq('id', proposalId).single();
+        
+        if (proposal && proposal.proposed_changes) {
+            const changes = typeof proposal.proposed_changes === 'string' ? JSON.parse(proposal.proposed_changes) : proposal.proposed_changes;
+            
+            let details = "\n━━━━━━━━━━━━━━━━━━\n🔍 <b>【具體變更預覽】</b>\n";
+            let hasDetails = false;
+
+            // 處理提示詞變更
+            if (changes.target_prompt_id && changes.new_prompt_content) {
+                details += `📝 <b>劇本更新:</b> [<code>${changes.target_prompt_id}</code>]\n`;
+                const snippet = changes.new_prompt_content.replace(/</g, '＜').replace(/>/g, '＞').substring(0, 150);
+                details += `<i>"...${snippet}..."</i>\n\n`;
+                hasDetails = true;
+            }
+
+            // 處理參數變更
+            if (changes.recommended_params) {
+                if (changes.recommended_params.meme && Object.keys(changes.recommended_params.meme).length > 0) {
+                    details += `🐶 <b>MEME 參數即將變更:</b>\n`;
+                    for (const [key, value] of Object.entries(changes.recommended_params.meme)) {
+                        details += `  ▪️ <code>${key}</code> ➡️ <b>${value}</b>\n`;
+                    }
+                    hasDetails = true;
+                }
+                
+                if (changes.recommended_params.trending && Object.keys(changes.recommended_params.trending).length > 0) {
+                    details += `🔥 <b>TRENDING 參數即將變更:</b>\n`;
+                    for (const [key, value] of Object.entries(changes.recommended_params.trending)) {
+                        details += `  ▪️ <code>${key}</code> ➡️ <b>${value}</b>\n`;
+                    }
+                    hasDetails = true;
+                }
+            }
+
+            if (hasDetails) {
+                finalReportText += details;
+            }
+        }
+    } catch (err) {
+        console.error("⚠️ [Telegram] 提取具體變更預覽失敗，將只發送基本報告:", err.message);
     }
 
     const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -146,7 +193,7 @@ async function sendApprovalRequest(reportText, proposalId) {
     try {
         await axios.post(url, { 
             chat_id: chat, 
-            text: reportText, 
+            text: finalReportText, 
             parse_mode: 'HTML',
             reply_markup: keyboard
         });
