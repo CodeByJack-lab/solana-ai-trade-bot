@@ -12,7 +12,7 @@ const Redis = require('ioredis');
 const redis = new Redis(configEnv.cache.redisUrl);
 
 let isTrendingRunning = false;
-let radarTimer = null; // 🚀 [新增] 數學雷達專屬節拍器
+let radarTimer = null; // 數學雷達專屬節拍器
 
 const apiCooldowns = { geckoTerminal: 0, jupiterV3: 0, jupiterV6: 0 };
 function isApiAvailable(apiName) { return Date.now() > apiCooldowns[apiName]; }
@@ -37,7 +37,7 @@ const trendingJob = {
             const { data: poolTokens } = await supabase.from('trending_pool').select('*');
             if (!poolTokens || poolTokens.length === 0) return; 
 
-            // 🔒 [VIP 機制] 霸佔 DexScreener 資源，掛上 TRENDING 鎖，叫 Meme 讓路 (鎖定 120 秒)
+            // 🔒 [VIP 機制] 霸佔 DexScreener 資源，掛上 TRENDING 鎖
             await redis.set('dex_priority_lock', 'TRENDING', 'EX', 120);
             console.log(`👑 [Trending VIP] 已鎖定 DexScreener 資源，全面掃描 TOP 200 (共 ${poolTokens.length} 隻)...`);
 
@@ -61,17 +61,26 @@ const trendingJob = {
                 const isVolSurge = liq > 0 && (vol5m / liq) > 0.05; 
                 const isBuyPressure = buys > (sells * 1.5) && buys > 5; 
 
-                if (isPriceSurge || isVolSurge || isBuyPressure) {
+                // 🐵 [新增] 真假美猴王直通車：只要有 Hype 標記，無視數學條件，直接觸發打尖！
+                const isHypeBypass = token.is_hype === true;
+
+                if (isPriceSurge || isVolSurge || isBuyPressure || isHypeBypass) {
                     triggeredCount++;
                     console.log(`\n======================================================`);
-                    console.log(`📡 [Math Radar] 觸發！幣種: ${token.token_symbol}`);
+                    if (isHypeBypass) {
+                        console.log(`🔥 [Hype Radar] 真假美猴王觸發！無條件強制送檢: ${token.token_symbol}`);
+                    } else {
+                        console.log(`📡 [Math Radar] 觸發！幣種: ${token.token_symbol}`);
+                    }
                     console.log(`   - 1H 升幅: ${h1}% | 5m 量/池比: ${liq > 0 ? ((vol5m/liq)*100).toFixed(2) : 0}% | 買/賣: ${buys}/${sells}`);
                     console.log(`======================================================\n`);
 
                     const secResult = await securityGuard.checkAll(mintAddress, 'TRENDING');
                     if (!secResult.isSafe) {
-                        console.log(`🗑️ [Trending Security] 動能衰退/防線失敗: ${secResult.reason}`);
+                        console.log(`🗑️ [Trending Security] 觸發安檢防線，判定為 Scam: ${secResult.reason}`);
                         await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+                        // 🚀 [新增] 打入 24 小時天牢 (86400 秒)
+                        await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
                         continue; 
                     }
 
@@ -86,8 +95,10 @@ const trendingJob = {
                             console.log(`⏳ [Trending] 潛力仍在 (分數: ${aiScore} >= ${survivalScore})，保留數據...`);
                             await supabase.from('trending_pool').update({ last_ai_comment: aiDecision.reason, ai_score: aiScore, volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
                         } else {
-                            console.log(`🗑️ [Trending] 分數低於門檻 (${aiScore} < ${survivalScore})，踢出保溫箱！`);
+                            console.log(`🗑️ [Trending] 分數低於門檻 (${aiScore} < ${survivalScore})，踢出保溫箱並拉黑 24 小時！`);
                             await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+                            // 🚀 [新增] AI 睇完覺得係無敘事嘅垃圾，一樣打入 24 小時天牢
+                            await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
                         }
                     }
                 } else {
@@ -103,28 +114,21 @@ const trendingJob = {
             console.error(`❌ [Trending Job] 執行異常:`, err.message);
             healthMonitor.setStatus('Math_Radar', '🔴 巡邏異常');
         } finally {
-            // 🔓 [解鎖] 無論成功定失敗，最後一定釋放 VIP 鎖，畀 Meme 行
+            // 🔓 無論成功定失敗，最後一定釋放 VIP 鎖
             await redis.del('dex_priority_lock');
             isTrendingRunning = false;
         }
     },
 
-    // 🚀 [核心引擎] 接收大換血完畢信號，即刻開工並重置 15 分鐘時鐘！
+    // 🚀 接收大換血完畢信號，即刻開工並重置 15 分鐘時鐘！
     triggerImmediateAndResetClock() {
         console.log(`⏱️ [System] 接收到大換血完畢信號，重置數學雷達時鐘，立即啟動 VIP 巡邏！`);
-        
-        // 1. 清除舊有嘅鬧鐘，防止相撞
         if (radarTimer) clearInterval(radarTimer);
-        
-        // 2. 即刻跑一次雷達 (零等待！)
         this.runRoutine();
-        
-        // 3. 重新設定 15 分鐘嘅 metronome 節拍器
         radarTimer = setInterval(() => { this.runRoutine(); }, 15 * 60 * 1000);
     },
 
     start() {
-        // 開機時設定一個預設鬧鐘 (防止爬蟲意外死火時雷達停擺)
         radarTimer = setInterval(() => { this.runRoutine(); }, 15 * 60 * 1000);
         console.log(`🔥 [Trending Incubator] 真・Top 200 數學雷達已待命，將由 Gecko 爬蟲全權指揮節拍...`);
     }
