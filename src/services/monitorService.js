@@ -476,59 +476,62 @@ function startPositionMonitor() {
         }
     });
 
-    setInterval(async () => {
-        const timeSinceLastRedis = Date.now() - lastRedisUpdateMs;
-        const { getPortfolio } = require('./portfolioService');
-        const portfolio = getPortfolio();
+// 🛡️ 無狀態備援查價 (每 10 秒執行一次)
+setInterval(async () => {
+    const timeSinceLastRedis = Date.now() - lastRedisUpdateMs;
+    const { getPortfolio } = require('./portfolioService');
+    const portfolio = getPortfolio();
+    
+    // 🎯 唯一觸發條件：超過 1 分鐘無收到無人機報價 && 手上仲有倉位
+    if (timeSinceLastRedis > 60000 && portfolio?.positions?.length > 0) {
         
-        if (timeSinceLastRedis > 60000 && portfolio?.positions?.length > 0) {
-            if (!isHttpFallbackActive) {
-                isHttpFallbackActive = true;
-                sendAdminAlert(`⚠️ <b>[情報源中斷]</b>\n超過 1 分鐘未收到 Koyeb 報價！大本營已啟動 HTTP 備援。`);
+        console.log(`🚨 [Fallback] 無人機逾時，大本營直接執行 HTTP 備援查價...`);
+        
+        try {
+            const config = (await supabase.from('system_config').select('*').eq('id', 1).single()).data;
+            if (!config?.is_running) return;
+            
+            const mints = portfolio.positions.map(p => p.mint_address).join(',');
+            let fetchedPrices = {};
+            let fetchSuccess = false;
+
+            // 備援一：GeckoTerminal
+            if (!fetchSuccess && isApiAvailable('geckoTerminal')) {
+                try {
+                    const res = await axios.get(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints}`, { timeout: 3000 });
+                    const pricesObj = res.data?.data?.attributes?.token_prices;
+                    if (pricesObj) {
+                        for (const [mint, priceStr] of Object.entries(pricesObj)) if (priceStr) fetchedPrices[mint] = parseFloat(priceStr);
+                        fetchSuccess = true;
+                    }
+                } catch (e) { markApiFailed('geckoTerminal'); }
             }
-            try {
-                const config = (await supabase.from('system_config').select('*').eq('id', 1).single()).data;
-                if (!config?.is_running) return;
-                const mints = portfolio.positions.map(p => p.mint_address).join(',');
-                let fetchedPrices = {};
-                let fetchSuccess = false;
 
-                if (!fetchSuccess && isApiAvailable('geckoTerminal')) {
-                    try {
-                        const res = await axios.get(`https://api.geckoterminal.com/api/v2/simple/networks/solana/token_price/${mints}`, { timeout: 3000 });
-                        const pricesObj = res.data?.data?.attributes?.token_prices;
-                        if (pricesObj) {
-                            for (const [mint, priceStr] of Object.entries(pricesObj)) if (priceStr) fetchedPrices[mint] = parseFloat(priceStr);
-                            fetchSuccess = true;
-                        }
-                    } catch (e) { markApiFailed('geckoTerminal'); }
-                }
+            // 備援二：Jupiter V6
+            if (!fetchSuccess && isApiAvailable('jupiterV6')) {
+                try {
+                    const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
+                    if (res.data?.data) {
+                        for (const [mint, info] of Object.entries(res.data.data)) if (info.price) fetchedPrices[mint] = parseFloat(info.price);
+                        fetchSuccess = true;
+                    }
+                } catch (e) { markApiFailed('jupiterV6'); }
+            }
 
-                if (!fetchSuccess && isApiAvailable('jupiterV6')) {
-                    try {
-                        const res = await axios.get(`https://price.jup.ag/v6/price?ids=${mints}`, { timeout: 3000 });
-                        if (res.data?.data) {
-                            for (const [mint, info] of Object.entries(res.data.data)) if (info.price) fetchedPrices[mint] = parseFloat(info.price);
-                            fetchSuccess = true;
-                        }
-                    } catch (e) { markApiFailed('jupiterV6'); }
-                }
-
-                if (fetchSuccess) {
-                    for (const pos of portfolio.positions) {
-                        if (fetchedPrices[pos.mint_address]) {
-                            const solPrice = fetchedPrices[pos.mint_address] / cachedSolPriceUsd;
-                            await handleZeroLatencyCheck(pos.mint_address, solPrice, config, portfolio);
-                        }
+            // 將攞到嘅備援價錢掟入防線
+            if (fetchSuccess) {
+                for (const pos of portfolio.positions) {
+                    if (fetchedPrices[pos.mint_address]) {
+                        const solPrice = fetchedPrices[pos.mint_address] / cachedSolPriceUsd;
+                        await handleZeroLatencyCheck(pos.mint_address, solPrice, config, portfolio);
                     }
                 }
-            } catch (err) {}
-
-        } else if (timeSinceLastRedis <= 60000 && isHttpFallbackActive) {
-            isHttpFallbackActive = false;
-            sendAdminAlert(`✅ <b>[情報源恢復]</b>\nRedis 報價連線恢復，切換回 0 延遲模式！`);
-        }
-    }, 10000); 
+            }
+        } catch (err) {}
+    } 
+    // 💡 如果 (timeSinceLastRedis <= 60000) 或者 (空倉)，個 Code 會自然略過上面嘅 if，咩都唔會做，亦唔會煩你。
+    
+}, 10000);
 
     setInterval(async () => {
         try {

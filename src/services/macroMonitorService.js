@@ -69,7 +69,7 @@ const macroMonitorService = {
         return { currentPrice, highestPrice, dropPct };
     },
 
-    // 🔄 智能分流與備援獲取器
+    // 🔄 智能分流與備援獲取器 (用到 Failed 先切換)
     async getMarketData() {
         let btcData, solData, sourceName;
 
@@ -87,10 +87,13 @@ const macroMonitorService = {
             }
             return { btcData, solData, sourceName };
         } catch (err) {
-            // 如果主源失敗或被限流，立刻嘗試另一個
-            console.warn(`⚠️ [Macro] ${sourceName} 獲取失敗: ${err.message}，切換備援...`);
+            // 🚨 只有喺失敗嗰陣，先至觸發切換開關
+            console.warn(`⚠️ [Macro] ${sourceName} 獲取失敗: ${err.message}，切換至備援 API...`);
+            
+            // 狀態反轉，確保下次入嚟會繼續用備援
             useCoinGeckoNext = !useCoinGeckoNext; 
             
+            // 即時執行備援
             const fallbackSource = useCoinGeckoNext ? 'CoinGecko' : 'KuCoin';
             if (fallbackSource === 'CoinGecko') {
                 return {
@@ -160,8 +163,7 @@ const macroMonitorService = {
 
                 const { btcData, solData, sourceName } = await this.getMarketData();
                 
-                // 每次成功獲取後切換下次數據源，分散負載
-                useCoinGeckoNext = !useCoinGeckoNext;
+                // 🛑 移除了原本這裡的 `useCoinGeckoNext = !useCoinGeckoNext;`，讓它一直用到 Failed 為止！
                 healthMonitor.setStatus('Macro_Radar', `🟢 正常 (${sourceName})`);
 
                 let isPriceTriggered = false;
