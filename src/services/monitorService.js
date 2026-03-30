@@ -767,9 +767,11 @@ function startOneMinuteMetricsAlert() {
 
         const currentWebhooks = webhooksThisMinute;
         webhooksThisMinute = 0; 
-        const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
-        console.log(`[${timeStr}] 📊 Minute Heartbeat -> AI Call: ${aiThisMinute} | Webhook: ${currentWebhooks}`);
-    }, 60000); 
+        if (aiThisMinute > 0 || currentWebhooks > 0) {
+            const timeStr = new Date().toLocaleTimeString('zh-HK', { hour12: false });
+            console.log(`[${timeStr}] 📊 Minute Heartbeat -> AI Call: ${aiThisMinute} | Webhook: ${currentWebhooks}`);
+        }
+    }, 60000);
 }
 
 function startMarketMonitor() {

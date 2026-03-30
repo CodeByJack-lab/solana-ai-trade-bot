@@ -117,7 +117,7 @@ const trendingMonitorService = {
                     }]);
 
                     addedCount++;
-                    if (addedCount >= 5) break; 
+                    if (addedCount >= 100) break; 
                 }
 
                 if (addedCount > 0) {
