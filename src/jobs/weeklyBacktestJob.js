@@ -207,13 +207,11 @@ Output JSON:
             const evaluation = aiDecision?.evaluation_report || "AI 評估超時，僅提供數學最佳解。";
 
             // 4. 寫入 ai_proposals 提案表 (PENDING 狀態)，交由 autoApplyJob 執行 60 分鐘倒數
-            // ⚠️ 必須與 telegramService.js 內的鍵名匹配 (meme_params, trending_params)
             const proposedChanges = { 
                 meme_params: finalBestMeme, 
                 trending_params: finalBestTrending 
             };
             
-            // ⚠️ 必須與 telegramService.js 內的 proposal_type 匹配 ('BACKTEST')
             const { data: proposalInsert } = await supabase.from('ai_proposals').insert([{
                 proposal_type: 'BACKTEST',
                 report_content: evaluation,
@@ -238,8 +236,14 @@ Output JSON:
     },
 
     start() {
-        cron.schedule('0 2 * * 0', () => { this.runBacktest(); }); // 逢週日凌晨 2 點執行
-        console.log('🕒 [Evolution Engine] 每週雙軌高精度回測排程已啟動 (排定於週日 02:00，帶 60mins HITL 防丟失審批)');
+        // 🚀 強制設定時區為香港時間 (Asia/Hong_Kong)，逢週日 09:00 執行 ('0 9 * * 0')
+        cron.schedule('0 9 * * 0', () => { 
+            this.runBacktest(); 
+        }, {
+            scheduled: true,
+            timezone: "Asia/Hong_Kong"
+        });
+        console.log('🕒 [Evolution Engine] 每週雙軌高精度回測排程已啟動 (排定於週日 09:00 HKT，帶 60mins HITL 防丟失審批)');
     }
 };
 
