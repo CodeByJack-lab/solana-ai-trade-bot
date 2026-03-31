@@ -1,4 +1,6 @@
 // src/services/aiService.js
+// 📝 檔案功能及用途：持倉巡邏監軍。定時讓 AI 審視活動倉位，雙軌獨立巡邏，注入歷史記憶加強破位平倉判斷。
+
 const { supabase } = require('../config/supabase');
 const { aiOrchestrator } = require('./aiOrchestrator');
 const { promptManager } = require('./promptManager');
@@ -43,30 +45,37 @@ const reviewerQueue = new TaskQueue('Reviewer_Overseer', 2);
 
 const aiService = {
     /**
-     * 👁️ 持倉巡邏 (Overseer) - 物理死線與雙核 AI 審查
+     * 👁️ 持倉巡邏 (Overseer) - 雙軌 AI 審查與歷史記憶注入
      */
     async reviewActivePosition(mintAddress, posData) {
         return reviewerQueue.add(async () => {
             const shortMint = posData.token_symbol || mintAddress.substring(0,6);
-            console.log(`\n👁️‍🗨️ [Overseer] 分配 Worker 巡邏持倉: ${shortMint}`);
+            const isTrending = posData.strategy_type && posData.strategy_type.includes('TRENDING');
+            const roleName = isTrending ? '趨勢監軍' : 'Meme 監軍';
+            
+            console.log(`\n👁️‍🗨️ [${roleName}] 分配 Worker 巡邏持倉: ${shortMint}`);
 
             try {
                 // 1. 物理級硬止損前置防線
                 const { data: config } = await supabase.from('system_config').select('latest_news_score, stop_loss_pct').eq('id', 1).single();
                 const currentNewsScore = config?.latest_news_score || 0;
-                const dbStopLoss = parseFloat(config?.stop_loss_pct || -20); 
+                
+                // 動態讀取策略專屬的止損線 (若無則用系統預設)
+                const stratId = isTrending ? 3 : 2;
+                const { data: stratParams } = await supabase.from('ai_strategy_params').select('stop_loss_pct').eq('id', stratId).single();
+                const dbStopLoss = parseFloat(stratParams?.stop_loss_pct || config?.stop_loss_pct || -15); 
 
                 if (posData.pnlPct <= dbStopLoss) {
                     return { decision: 'EXIT', reason: `🚨 觸發物理硬止損 (${dbStopLoss}% 熔斷)：當前虧損 ${posData.pnlPct.toFixed(2)}%` };
                 }
 
-                // 2. 決定劇本種類
-                let promptId = posData.strategy_type && posData.strategy_type.includes('TRENDING') ? 'reviewer_trending' : 'reviewer_overseer';
+                // 2. 雙軌決策：決定劇本種類
+                let promptId = isTrending ? 'reviewer_trending' : 'reviewer_overseer';
 
-                // 3. 解包歷史記憶
+                // 3. 解包歷史記憶 (Memory Injection)
                 let memoryText = "無歷史記憶（這是首次巡邏）。";
                 if (posData.previous_ai_thoughts && posData.previous_ai_thoughts.length > 0) {
-                    memoryText = posData.previous_ai_thoughts.map((msg, idx) => `[歷史記憶 ${idx + 1}] ${msg}`).join('\n');
+                    memoryText = posData.previous_ai_thoughts.map((msg, idx) => `[記憶 ${idx + 1}] ${msg}`).join('\n');
                 }
 
                 const promptData = {
@@ -78,14 +87,14 @@ const aiService = {
                     ai_memory: memoryText         
                 };
 
-                const promptText = promptManager.getPrompt(promptId, promptData); // ⚡ 直讀 RAM
+                const promptText = promptManager.getPrompt(promptId, promptData); 
 
-                // 4. 派單畀 AI (配備強制 Cooldown)
-                const result = await aiOrchestrator.executeTask('OVERSEER', 'GEMINI', promptText);
-                await new Promise(r => setTimeout(r, 1000)); // 🛑 強制 1 秒 Cooldown
+                // 4. 派單畀 AI (強制使用 GROQ 處理高頻微觀審查)
+                const result = await aiOrchestrator.executeTask('OVERSEER', 'GROQ', promptText);
+                await new Promise(r => setTimeout(r, 1000)); // 強制 1 秒 Cooldown 防限流
 
                 const cleanDecision = (result.decision || result.verdict || '').trim().toUpperCase();
-                console.log(`🤖 監軍判決 (${promptId}): ${cleanDecision} | 理由: ${result.reason}`);
+                console.log(`🤖 ${roleName}判決 (${promptId}): ${cleanDecision} | 理由: ${result.reason}`);
 
                 if (cleanDecision.includes('SELL') || cleanDecision.includes('EXIT')) {
                     return { decision: 'EXIT', reason: result.reason };
@@ -94,13 +103,7 @@ const aiService = {
 
             } catch (error) {
                 console.error(`❌ [AI Service] 持倉審查失敗:`, error.message);
-                const { data: configRetry } = await supabase.from('system_config').select('stop_loss_pct').eq('id', 1).single();
-                const emergencyLimit = parseFloat(configRetry?.stop_loss_pct || -20);
-
-                if (posData.pnlPct <= emergencyLimit) {
-                    return { decision: "EXIT", reason: `🛠️ AI 離線自癒：PNL (${posData.pnlPct.toFixed(2)}%) 已觸發資料庫止損死線 (${emergencyLimit}%)，強制撤退` };
-                }
-                return { decision: "HOLD", reason: "AI 服務暫時無回應，PNL 尚在安全區，暫且持有" };
+                return { decision: "HOLD", reason: "AI 服務暫時無回應，暫且持有" };
             }
         });
     }

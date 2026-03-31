@@ -1,161 +1,245 @@
 // src/jobs/weeklyBacktestJob.js
-const cron = require('node-cron');
+// 📝 檔案功能用途：雙軌高精度回測引擎。極限壓榨 Node.js 算力，實裝 1355 組兩階段無縫網格。計算完畢後生成 BACKTEST 提案，交由 autoApplyJob 進行 60 分鐘審批倒數。
+
 const { supabase } = require('../config/supabase');
 const { aiOrchestrator } = require('../services/aiOrchestrator');
-const { sendApprovalRequest, sendAdminAlert } = require('../services/telegramService');
+const cron = require('node-cron');
+const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
-
-async function runGridSearch(trades, categoryName) {
-    if (!trades || trades.length < 3) {
-        console.log(`ℹ️ [Backtest] ${categoryName} 樣本過少 (${trades?.length || 0} 宗)，跳過運算。`);
-        return null;
-    }
-
-    const currentTotalPnl = trades.reduce((sum, t) => sum + (t.realized_pnl_pct || 0), 0);
-    const simData = trades.map(t => ({
-        actual_pnl: t.realized_pnl_pct || 0,
-        max_pnl: t.realized_pnl_pct > 0 ? t.realized_pnl_pct : 0
-    }));
-
-    console.log(`🧮 [Backtest] 正在對 ${categoryName} (${simData.length} 宗) 進行網格運算...`);
-
-    let bestCombo = null;
-    let bestPnl = -999999;
-    let comboCount = 0;
-
-    for (let sl = 10; sl <= 30; sl += 1) {
-        for (let tp = 50; tp <= 200; tp += 10) {
-            for (let pb = 20; pb <= 50; pb += 1) {
-                let simTotalPnl = 0;
-                for (const trade of simData) {
-                    if (trade.max_pnl >= tp) {
-                        simTotalPnl += (trade.max_pnl - pb);
-                    } else if (trade.actual_pnl < 0) {
-                        simTotalPnl += (trade.actual_pnl <= -sl ? -sl : trade.actual_pnl);
-                    } else {
-                        simTotalPnl += trade.actual_pnl;
-                    }
-                }
-
-                if (simTotalPnl > bestPnl) {
-                    bestPnl = simTotalPnl;
-                    bestCombo = { sl: -sl, tp_trigger: tp, pullback: pb };
-                }
-
-                comboCount++;
-                if (comboCount % 500 === 0) await new Promise(r => setTimeout(r, 5));
-            }
-        }
-    }
-    
-    if (bestPnl > currentTotalPnl + 5) {
-        return { bestCombo, bestPnl, currentTotalPnl, count: trades.length };
-    }
-    return null; 
-}
+const { sendTelegramAlert } = require('../services/telegramService');
 
 const weeklyBacktestJob = {
+    /**
+     * 📏 第一階段：粗網格生成器 (撒大網 - 750 組組合)
+     */
+    generateCoarseGrid(trades, isMeme) {
+        const losses = trades.map(t => t.realized_pnl_pct).filter(p => p < 0);
+        const peakGains = trades.map(t => {
+            if (t.highest_price_sol && t.entry_price_sol) {
+                return ((t.highest_price_sol - t.entry_price_sol) / t.entry_price_sol) * 100;
+            }
+            return 0;
+        }).filter(p => p > 0);
+
+        const defaultWorstLoss = isMeme ? -80 : -30;
+        const defaultBestLoss = isMeme ? -15 : -5;
+        const defaultMaxGain = isMeme ? 200 : 50;
+        const defaultMinGain = isMeme ? 30 : 15;
+
+        let worstLoss = losses.length > 0 ? Math.min(...losses) : defaultWorstLoss;
+        let bestLoss = losses.length > 0 ? Math.max(...losses) : defaultBestLoss;
+        let maxGain = peakGains.length > 0 ? Math.max(...peakGains) : defaultMaxGain;
+        let minGain = peakGains.length > 0 ? Math.min(...peakGains) : defaultMinGain;
+
+        if (worstLoss === bestLoss) worstLoss = bestLoss - 10;
+        if (maxGain === minGain) maxGain = minGain + 20;
+
+        const minPb = isMeme ? 15 : 5;
+        const maxPb = isMeme ? 50 : 20;
+
+        const createSteps = (min, max, steps) => {
+            const stepSize = (max - min) / (steps - 1);
+            return {
+                values: Array.from({length: steps}, (_, i) => parseFloat((min + (stepSize * i)).toFixed(2))),
+                stepSize: stepSize 
+            };
+        };
+
+        const slData = createSteps(worstLoss, bestLoss, 10); 
+        const tpData = createSteps(minGain, maxGain, 15);  
+        const pbData = createSteps(minPb, maxPb, 5);       
+
+        return {
+            stopLoss: slData.values, 
+            tpTrigger: tpData.values,   
+            pullback: pbData.values,
+            meta: { slStep: slData.stepSize, tpStep: tpData.stepSize, pbStep: pbData.stepSize }
+        };
+    },
+
+    /**
+     * 🎯 第二階段：精細網格生成器 (狙擊鏡 - 605 組組合)
+     */
+    generateFineGrid(bestCoarse, coarseMeta) {
+        const createFineSteps = (center, coarseStep, steps) => {
+            const min = center - coarseStep;
+            const max = center + coarseStep;
+            const fineStepSize = (max - min) / (steps - 1);
+            return Array.from({length: steps}, (_, i) => parseFloat((min + (fineStepSize * i)).toFixed(2)));
+        };
+
+        return {
+            stopLoss: createFineSteps(bestCoarse.stop_loss_pct, coarseMeta.slStep, 11).filter(x => x < -1), 
+            tpTrigger: createFineSteps(bestCoarse.trailing_tp_trigger, coarseMeta.tpStep, 11).filter(x => x > 5), 
+            pullback: createFineSteps(bestCoarse.trailing_pullback, coarseMeta.pbStep, 5).filter(x => x >= 2)
+        };
+    },
+
+    /**
+     * 🧮 歷史重演模擬器
+     */
+    simulateGridSearch(trades, grid) {
+        let bestParams = null;
+        let maxNetPnl = -Infinity;
+        let bestWinRate = 0;
+
+        for (let slIdx = 0; slIdx < grid.stopLoss.length; slIdx++) {
+            const sl = grid.stopLoss[slIdx];
+            for (let tpIdx = 0; tpIdx < grid.tpTrigger.length; tpIdx++) {
+                const tp = grid.tpTrigger[tpIdx];
+                for (let pbIdx = 0; pbIdx < grid.pullback.length; pbIdx++) {
+                    const pb = grid.pullback[pbIdx];
+                    
+                    let simulatedPnl = 0;
+                    let wins = 0;
+                    let totalValid = 0;
+
+                    for (let i = 0; i < trades.length; i++) {
+                        const t = trades[i];
+                        if (!t.entry_price_sol || !t.highest_price_sol || !t.quantity) continue;
+                        totalValid++;
+
+                        const maxGainPct = ((t.highest_price_sol - t.entry_price_sol) / t.entry_price_sol) * 100;
+                        const actualPnlPct = t.realized_pnl_pct || 0;
+
+                        let simTradePnlPct = actualPnlPct;
+
+                        if (maxGainPct >= tp) {
+                            simTradePnlPct = tp - pb; 
+                        } else if (actualPnlPct <= sl) {
+                            simTradePnlPct = sl; 
+                        }
+
+                        if (simTradePnlPct > 0) wins++;
+                        simulatedPnl += (simTradePnlPct / 100) * t.total_value_sol; 
+                    }
+
+                    if (totalValid > 0 && simulatedPnl > maxNetPnl) {
+                        maxNetPnl = simulatedPnl;
+                        bestWinRate = (wins / totalValid) * 100;
+                        bestParams = { 
+                            stop_loss_pct: parseFloat(sl.toFixed(2)), 
+                            trailing_tp_trigger: parseFloat(tp.toFixed(2)), 
+                            trailing_pullback: parseFloat(pb.toFixed(2)), 
+                            net_pnl_sol: simulatedPnl, 
+                            win_rate: bestWinRate 
+                        };
+                    }
+                }
+            }
+        }
+        return bestParams;
+    },
+
+    /**
+     * 🚀 執行兩階段高精度雙軌回測主程序
+     */
     async runBacktest() {
-        console.log(`\n🔬 [Backtest] 啟動每週雙軌高精度網格回測引擎...`);
-        healthMonitor.setStatus('Macro_Radar', '🟢 雙軌回測運算中'); 
+        console.log('\n🧬 [Evolution Engine] 啟動雙軌【1355組 兩階段高精度回測】與參數結算...');
+        healthMonitor.setStatus('Evolution_Engine', '🟢 正在進行回測計算');
 
         try {
-            const { data: config } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
-            const tradeMode = config?.trade_mode || 'PAPER';
-            const tableName = `trade_history_${tradeMode.toLowerCase()}`;
-            
-            console.log(`📡 [Backtest] 當前系統模式為 ${tradeMode}，正在讀取 ${tableName} 數據...`);
-
+            const portfolio = getPortfolio();
+            const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
             const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
-            const { data: allTrades, error } = await supabase
-                .from(tableName)
+
+            const { data: trades, error: fetchErr } = await supabase
+                .from(`trade_history_${tableSuffix}`)
                 .select('*')
                 .gte('created_at', sevenDaysAgo)
-                .in('action', ['SELL', 'SELL_HALF', 'FORCE_WRITE_OFF']);
+                .in('action', ['SELL', 'SELL_HALF']);
 
-            if (error) throw error;
+            if (fetchErr) throw fetchErr;
 
-            const memeTrades = allTrades.filter(t => t.strategy_type && t.strategy_type.includes('MEME'));
-            const trendTrades = allTrades.filter(t => t.strategy_type && t.strategy_type.includes('TRENDING'));
-
-            const memeResult = await runGridSearch(memeTrades, "🐣 NEW meme");
-            const trendResult = await runGridSearch(trendTrades, "🔥 TOP 100 meme");
-
-            if (!memeResult && !trendResult) {
-                console.log(`ℹ️ [Backtest] 運算完成。目前雙軌參數均處於最佳狀態，無需發送提案。`);
-                await sendAdminAlert(`📊 <b>[每週數據回測]</b>\n運算完成。NEW meme 與 TOP 100 meme 策略之表現皆已達最佳化區間，本週無需調整參數！`);
+            if (!trades || trades.length < 5) {
+                console.log('📉 [Evolution Engine] 過去 7 天交易樣本不足 (< 5 單)，維持現有參數。');
+                healthMonitor.setStatus('Evolution_Engine', '🟡 樣本不足跳過');
                 return;
             }
 
-            let promptContext = "I ran dual-core matrix backtests for our crypto trading bot. Here are the optimized findings:\n\n";
-            let proposedChanges = {};
-            let tgDisplayParams = "";
+            const memeTrades = trades.filter(t => t.strategy_type && t.strategy_type.includes('MEME'));
+            const trendingTrades = trades.filter(t => t.strategy_type && t.strategy_type.includes('TRENDING'));
 
-            if (memeResult) {
-                promptContext += `[MEME Strategy (High Risk)]: Over ${memeResult.count} trades, Current PnL: ${memeResult.currentTotalPnl.toFixed(2)}%. Optimized PnL: ${memeResult.bestPnl.toFixed(2)}% using StopLoss: ${memeResult.bestCombo.sl}%, TakeProfit Trigger: +${memeResult.bestCombo.tp_trigger}%, Pullback: ${memeResult.bestCombo.pullback} pts.\n`;
-                proposedChanges.meme_params = {
-                    stop_loss_pct: -Math.abs(memeResult.bestCombo.sl),
-                    trailing_tp_trigger: memeResult.bestCombo.tp_trigger,
-                    trailing_pullback: memeResult.bestCombo.pullback
-                };
-                tgDisplayParams += `\n🐣 <b>NEW meme 建議參數修改：</b>\n止損 (SL): <code>-${memeResult.bestCombo.sl}%</code> | 追蹤啟動: <code>+${memeResult.bestCombo.tp_trigger}%</code> | 回撤容忍: <code>${memeResult.bestCombo.pullback}點</code>\n`;
+            console.log(`📊 歷史數據分流: Meme 策略 ${memeTrades.length} 單 | Trending 策略 ${trendingTrades.length} 單`);
+
+            // 1. 階段 1：粗網格搜索
+            const memeCoarseGrid = this.generateCoarseGrid(memeTrades, true);
+            const trendingCoarseGrid = this.generateCoarseGrid(trendingTrades, false);
+
+            const bestMemeCoarse = memeTrades.length >= 3 ? this.simulateGridSearch(memeTrades, memeCoarseGrid) : null;
+            const bestTrendingCoarse = trendingTrades.length >= 3 ? this.simulateGridSearch(trendingTrades, trendingCoarseGrid) : null;
+
+            // 2. 階段 2：精細微調搜索
+            let finalBestMeme = bestMemeCoarse;
+            if (bestMemeCoarse) {
+                const memeFineGrid = this.generateFineGrid(bestMemeCoarse, memeCoarseGrid.meta);
+                finalBestMeme = this.simulateGridSearch(memeTrades, memeFineGrid);
+                console.log(`🎯 Meme 極限微調完畢: SL ${finalBestMeme.stop_loss_pct}%, TP ${finalBestMeme.trailing_tp_trigger}%, PB ${finalBestMeme.trailing_pullback}%`);
             }
 
-            if (trendResult) {
-                promptContext += `[TRENDING Strategy (Mid Risk)]: Over ${trendResult.count} trades, Current PnL: ${trendResult.currentTotalPnl.toFixed(2)}%. Optimized PnL: ${trendResult.bestPnl.toFixed(2)}% using StopLoss: ${trendResult.bestCombo.sl}%, TakeProfit Trigger: +${trendResult.bestCombo.tp_trigger}%, Pullback: ${trendResult.bestCombo.pullback} pts.\n`;
-                proposedChanges.trending_params = {
-                    stop_loss_pct: -Math.abs(trendResult.bestCombo.sl),
-                    trailing_tp_trigger: trendResult.bestCombo.tp_trigger,
-                    trailing_pullback: trendResult.bestCombo.pullback
-                };
-                tgDisplayParams += `\n🔥 <b>TOP 100 meme 建議參數修改：</b>\n止損 (SL): <code>-${trendResult.bestCombo.sl}%</code> | 追蹤啟動: <code>+${trendResult.bestCombo.tp_trigger}%</code> | 回撤容忍: <code>${trendResult.bestCombo.pullback}點</code>\n`;
+            let finalBestTrending = bestTrendingCoarse;
+            if (bestTrendingCoarse) {
+                const trendingFineGrid = this.generateFineGrid(bestTrendingCoarse, trendingCoarseGrid.meta);
+                finalBestTrending = this.simulateGridSearch(trendingTrades, trendingFineGrid);
+                console.log(`🎯 Trending 極限微調完畢: SL ${finalBestTrending.stop_loss_pct}%, TP ${finalBestTrending.trailing_tp_trigger}%, PB ${finalBestTrending.trailing_pullback}%`);
             }
 
-            console.log(`🧠 [Backtest] 召喚首席精算師 (BOARD_OF_DIRECTORS) 翻譯雙軌報告...`);
+            // 3. 提交 AI 進行「合理性評估」
+            const prompt = `You are the EVOLUTION MASTER of a Quant bot.
+The Backtest Engine has mathematically determined the optimal parameters for next week using a Two-Stage High-Precision Grid Search. 
+
+[MEME STRATEGY (High Volatility)]
+Proposed Params: Stop Loss ${finalBestMeme?.stop_loss_pct || 'N/A'}%, Take Profit Trigger ${finalBestMeme?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestMeme?.trailing_pullback || 'N/A'}%
+Simulated Win Rate: ${finalBestMeme?.win_rate?.toFixed(1) || 'N/A'}%
+
+[TRENDING STRATEGY (Top 100 Momentum)]
+Proposed Params: Stop Loss ${finalBestTrending?.stop_loss_pct || 'N/A'}%, Take Profit Trigger ${finalBestTrending?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestTrending?.trailing_pullback || 'N/A'}%
+Simulated Win Rate: ${finalBestTrending?.win_rate?.toFixed(1) || 'N/A'}%
+
+Task: Provide a critical evaluation of these proposed parameters. Are they reasonable given current market conditions? What are the potential risks? 
+Output JSON: 
+{
+  "evaluation_report": "<Cantonese explanation under 100 words outlining the reasoning, risks, and market context of these parameters>"
+}`;
+
+            console.log(`🧠 [Evolution Engine] 參數計算完畢，正在呼叫 AI 撰寫評估報告...`);
+            const aiDecision = await aiOrchestrator.executeTask('EVOLUTION_MASTER', 'GROQ', prompt, { bypassLimit: true });
+            const evaluation = aiDecision?.evaluation_report || "AI 評估超時，僅提供數學最佳解。";
+
+            // 4. 寫入 ai_proposals 提案表 (PENDING 狀態)，交由 autoApplyJob 執行 60 分鐘倒數
+            // ⚠️ 必須與 telegramService.js 內的鍵名匹配 (meme_params, trending_params)
+            const proposedChanges = { 
+                meme_params: finalBestMeme, 
+                trending_params: finalBestTrending 
+            };
             
-            // 🌟 核心修改：從 bot_prompts 資料表讀取 AI 指令
-            const { data: promptData, error: promptErr } = await supabase
-                .from('bot_prompts')
-                .select('content')
-                .eq('prompt_id', 'backtest_analyst')
-                .single();
+            // ⚠️ 必須與 telegramService.js 內的 proposal_type 匹配 ('BACKTEST')
+            const { data: proposalInsert } = await supabase.from('ai_proposals').insert([{
+                proposal_type: 'BACKTEST',
+                report_content: evaluation,
+                proposed_changes: proposedChanges,
+                status: 'PENDING'
+            }]).select();
 
-            if (promptErr || !promptData) {
-                throw new Error(`無法從 bot_prompts 讀取 backtest_analyst 劇本: ${promptErr?.message}`);
+            const proposalId = proposalInsert[0].id;
+            console.log(`⏳ [Evolution Engine] 提案已生成 (ID: ${proposalId})。已交由 AutoApplyJob 進行 60 分鐘倒數...`);
+            
+            if (typeof sendTelegramAlert === 'function') {
+                const { sendApprovalRequest } = require('../services/telegramService');
+                await sendApprovalRequest(`🧬 <b>每週參數優化提案已生成</b>\n\n💡 <b>AI 評估:</b>\n${evaluation}\n\n⏳ 系統將於 60 分鐘後自動 Apply。你可立即批准或否決！`, proposalId);
             }
 
-            // 將跑出嚟嘅結果 Inject 入去 Prompt
-            const finalAiPrompt = promptData.content.replace('{{promptContext}}', promptContext);
-
-            // 呼叫 BOARD_OF_DIRECTORS 角色
-            const aiResult = await aiOrchestrator.executeTask('BOARD_OF_DIRECTORS', 'GEMINI', finalAiPrompt, { bypassLimit: true });
-
-            if (aiResult && aiResult.report) {
-                const { data: insertedProposal, error: insertErr } = await supabase.from('ai_proposals').insert([{
-                    proposal_type: 'BACKTEST',
-                    report_content: aiResult.report,
-                    proposed_changes: proposedChanges,
-                    status: 'PENDING' 
-                }]).select().single();
-
-                if (insertErr) throw new Error(`寫入提案失敗: ${insertErr.message}`);
-
-                const tgMsg = `📊 <b>[每週雙軌回測引擎報告]</b>\n\n${aiResult.report}\n${tgDisplayParams}\n請在下方選擇是否套用此雙軌最佳化參數：`;
-                await sendApprovalRequest(tgMsg, insertedProposal.id);
-            }
+            healthMonitor.setStatus('Evolution_Engine', '🟢 提案生成，等待審批');
 
         } catch (err) {
-            console.error(`❌ [Backtest Error] 執行發生異常:`, err.message);
-        } finally {
-            healthMonitor.setStatus('Macro_Radar', '🟢 守衛中'); 
+            console.error(`❌ [Evolution Engine] 回測執行失敗:`, err.message);
+            healthMonitor.setStatus('Evolution_Engine', `🔴 回測異常: ${err.message}`);
         }
     },
 
     start() {
-        cron.schedule('0 9 * * 1', () => { 
-            this.runBacktest(); 
-        }, { scheduled: true, timezone: "Asia/Hong_Kong" });
-        console.log(`🧮 [Backtest] 雙軌高精度回測排程已啟動 (每週一 09:00 執行)...`);
+        cron.schedule('0 2 * * 0', () => { this.runBacktest(); }); // 逢週日凌晨 2 點執行
+        console.log('🕒 [Evolution Engine] 每週雙軌高精度回測排程已啟動 (排定於週日 02:00，帶 60mins HITL 防丟失審批)');
     }
 };
 

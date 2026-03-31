@@ -1,4 +1,6 @@
 // src/services/monitorService.js
+// 📝 檔案功能用途：系統核心 API 與實盤雷達中樞。監聽 Webhook、執行零延遲平倉，並提供宏觀避險與管理員手動指令接口。
+
 const express = require('express');
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -14,7 +16,7 @@ const { sendTelegramAlert, sendAdminAlert } = require('./telegramService');
 const { healthMonitor } = require('./healthMonitor');
 const { consensusService, getPendingMemeCount } = require('./consensusService');
 const { reviewActivePosition } = require('./aiService'); 
-const { retrospectiveJob } = require('../jobs/retrospectiveJob');
+const { retrospectiveJob } = require('../jobs/retrospectiveJob'); // 👈 正確引入 retrospectiveJob
 const { aiOrchestrator } = require('./aiOrchestrator');
 
 const Redis = require('ioredis');
@@ -43,14 +45,14 @@ const cors = require('cors');
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V8.9.1 系統正常運行中 (Redis原子鎖 + 宏觀事件驅動版)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_Trade V9.0.0 系統正常運行中 (真假幣防偽 + 宏觀事件驅動版)'));
 
+// 🚀 修正 1：修復 /force-evolution 呼叫錯誤
 app.post('/force-evolution', async (req, res) => {
-    console.log('🧠 [Admin Command] 收到前端指令：強制喚醒 Master AI 進行進化！');
+    console.log('🧠 [Admin Command] 收到前端指令：強制喚醒 Master AI 重構戰術！');
     try {
-        const { retrospectiveJob } = require('../jobs/retrospectiveJob');
-        retrospectiveJob.runEvolutionWithRetry(1).catch(err => console.error("進化失敗:", err));
-        res.status(200).json({ success: true, message: '指令已送達，AI 正在運算中' });
+        retrospectiveJob.runDailyBriefing().catch(err => console.error("強制重構戰術失敗:", err));
+        res.status(200).json({ success: true, message: '指令已送達，AI 總指揮正在重構劇本中' });
     } catch (err) {
         res.status(500).json({ success: false, error: err.message });
     }
@@ -421,7 +423,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
     }
 
     if (action === 'SELL') {
-        // 🚀 [核心升級] Redis SET NX 原子鎖，徹底杜絕 Node.js 異步時間差導致嘅重複平倉
         const lockKey = `sell_lock:${pos.mint_address}`;
         const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
         
@@ -440,14 +441,13 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, config, portfolio) 
             }
         }).catch(err => console.error(`❌ [Zero Latency Sell Error]`, err.message))
           .finally(() => {
-              // 交易完成或失敗後，釋放原子鎖
               redis.del(lockKey);
           });
     }
 }
 
 function startPositionMonitor() {
-    console.log('👁️ [Radar] V8.9.1 雙軌動態秒斬防線 (Redis防護版) 已啟動...');
+    console.log('👁️ [Radar] V9.0.0 雙軌動態秒斬防線 (Redis防護版) 已啟動...');
     let cachedSolPriceUsd = 150; 
     const { getSolPriceInHKD } = require('./priceService');
     
@@ -487,7 +487,6 @@ function startPositionMonitor() {
         }
     });
 
-    // 🛡️ 無狀態備援查價 (每 10 秒執行一次)
     setInterval(async () => {
         const { getPortfolio } = require('./portfolioService');
         const portfolio = getPortfolio();
@@ -598,7 +597,6 @@ function startPositionMonitor() {
             for (const mint of aiReviewCooldowns.keys()) if (!currentMints.has(mint)) aiReviewCooldowns.delete(mint);
 
             for (const pos of positions) {
-                // 檢查 Redis 鎖取代舊有的本地 Set 鎖
                 const isLocked = await redis.get(`sell_lock:${pos.mint_address}`);
                 if (isLocked) continue;
 
@@ -641,7 +639,6 @@ function startPositionMonitor() {
                     }
 
                     if (reviewResult.decision === 'EXIT' || reviewResult.decision === 'SELL') {
-                        // AI 決定平倉，同樣需要攞 Redis 原子鎖
                         const lockKey = `sell_lock:${pos.mint_address}`;
                         const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                         if (!acquired) continue;
@@ -710,7 +707,9 @@ function startMacroEnvironmentMonitor() {
                 const telegramMsg = `🚨 <b>大市情緒劇變警告</b>\n${conditionMsg}\n災難指數由 ${lastMacroScore} 突變為 ${currentScore}！\n已強制喚醒 Master AI 進行緊急策略重估...`;
                 
                 await sendAdminAlert(telegramMsg);
-                retrospectiveJob.runEvolutionWithRetry(1, true).catch(err => console.error("宏觀喚醒 AI 失敗:", err));
+                
+                // 🚀 修正 2：修復大市暴跌觸發的 AI 重構
+                retrospectiveJob.runDailyBriefing().catch(err => console.error("宏觀喚醒 AI 失敗:", err));
 
                 lastMacroScore = currentScore;
                 lastMacroTriggerTime = now;

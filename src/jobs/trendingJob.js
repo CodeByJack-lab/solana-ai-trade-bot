@@ -1,4 +1,6 @@
 // src/jobs/trendingJob.js
+// 📝 檔案功能用途：數學雷達排程器。動態讀取 DB 的 V/L 階梯比例，利用 DexScreener 實時報價精確喚醒 AI。
+
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
 const { securityGuard } = require('../services/securityGuard');
@@ -12,16 +14,31 @@ const Redis = require('ioredis');
 const redis = new Redis(configEnv.cache.redisUrl);
 
 let isTrendingRunning = false;
-let radarTimer = null; // 數學雷達專屬節拍器
-
-const apiCooldowns = { geckoTerminal: 0, jupiterV3: 0, jupiterV6: 0 };
-function isApiAvailable(apiName) { return Date.now() > apiCooldowns[apiName]; }
-function markApiFailed(apiName) {
-    console.warn(`🚨 [Trending Fallback] ${apiName} 發生故障，觸發斷路器！`);
-    apiCooldowns[apiName] = Date.now() + 60000;
-}
+let radarTimer = null; 
 
 const trendingJob = {
+    /**
+     * 🧠 輔助函數：根據流動性，從動態階梯中找出對應的 V/L 目標
+     */
+    getTargetTurnover(liquidity, tiersConfig) {
+        // 防呆預設值 (如果 DB 讀取失敗)
+        const defaultTiers = { "10000000": 0.005, "5000000": 0.01, "2000000": 0.015, "1000000": 0.02, "500000": 0.03, "250000": 0.04, "150000": 0.05, "0": 0.08 };
+        const tiers = tiersConfig || defaultTiers;
+        
+        // 將 JSON 嘅 Key 轉做數字，然後由大至小排序 [10000000, 5000000, 2000000...]
+        const sortedThresholds = Object.keys(tiers).map(Number).sort((a, b) => b - a);
+
+        for (const threshold of sortedThresholds) {
+            if (liquidity >= threshold) {
+                return tiers[threshold.toString()];
+            }
+        }
+        return 0.08; // 終極保底
+    },
+
+    /**
+     * 🕵️ 執行數學雷達巡邏，套用 DB 動態階梯 V/L 動能算法。
+     */
     async runRoutine() {
         if (isTrendingRunning) return;
         isTrendingRunning = true;
@@ -34,12 +51,16 @@ const trendingJob = {
 
             const survivalScore = config.trending_survival_score || 60;
 
+            // 🧠 動態讀取 AI 策略參數內的 V/L 階梯設定
+            const { data: stratParams } = await supabase.from('ai_strategy_params').select('dynamic_vl_tiers').eq('id', 3).single();
+            const dynamicVlTiers = stratParams?.dynamic_vl_tiers;
+
             const { data: poolTokens } = await supabase.from('trending_pool').select('*');
             if (!poolTokens || poolTokens.length === 0) return; 
 
-            // 🔒 [VIP 機制] 霸佔 DexScreener 資源，掛上 TRENDING 鎖
+            // 🔒 掛上 VIP 鎖
             await redis.set('dex_priority_lock', 'TRENDING', 'EX', 120);
-            console.log(`👑 [Trending VIP] 已鎖定 DexScreener 資源，全面掃描 TOP 200 (共 ${poolTokens.length} 隻)...`);
+            console.log(`👑 [Trending VIP] 已鎖定資源，向 DexScreener 查詢 ${poolTokens.length} 隻保溫箱獵物...`);
 
             const mintsArray = poolTokens.map(t => t.mint_address);
             const batchMarketData = await securityGuard.getBatchMarketData(mintsArray);
@@ -57,29 +78,36 @@ const trendingJob = {
                 const buys = mData.buys5m;
                 const sells = mData.sells5m;
 
+                // 📈 [V9.0 核心] 從 DB 讀取動態階梯，決定當前池子的達標門檻
+                const targetTurnover = this.getTargetTurnover(liq, dynamicVlTiers);
+
                 const isPriceSurge = h1 >= 3.0; 
-                const isVolSurge = liq > 0 && (vol5m / liq) > 0.05; 
+                const isVolSurge = liq > 0 && (vol5m / liq) > targetTurnover; 
                 const isBuyPressure = buys > (sells * 1.5) && buys > 5; 
+                
+                // 真假幣攔截
+                const { data: fakeCheck } = await supabase.from('trending_top100').select('mint_address').eq('token_symbol', token.token_symbol).single();
+                const isKnownFake = fakeCheck && fakeCheck.mint_address !== mintAddress;
 
-                // 🐵 [新增] 真假美猴王直通車：只要有 Hype 標記，無視數學條件，直接觸發打尖！
-                const isHypeBypass = token.is_hype === true;
+                if (isKnownFake) {
+                    console.log(`🗑️ [Fake Shield] 攔截仿冒幣！${token.token_symbol} 與真品地址不符，踢出保溫箱！`);
+                    await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+                    await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
+                    continue;
+                }
 
-                if (isPriceSurge || isVolSurge || isBuyPressure || isHypeBypass) {
+                if (isPriceSurge || isVolSurge || isBuyPressure) {
                     triggeredCount++;
                     console.log(`\n======================================================`);
-                    if (isHypeBypass) {
-                        console.log(`🔥 [Hype Radar] 潛力幣觸發！無條件強制送檢: ${token.token_symbol}`);
-                    } else {
-                        console.log(`📡 [Math Radar] 觸發！幣種: ${token.token_symbol}`);
-                    }
-                    console.log(`   - 1H 升幅: ${h1}% | 5m 量/池比: ${liq > 0 ? ((vol5m/liq)*100).toFixed(2) : 0}% | 買/賣: ${buys}/${sells}`);
+                    console.log(`📡 [Math Radar] 動能觸發！幣種: ${token.token_symbol}`);
+                    console.log(`   - 流動性: $${liq.toLocaleString()} | 目標換手率: ${(targetTurnover*100).toFixed(2)}%`);
+                    console.log(`   - 1H 升幅: ${h1}% | 實際 5m 量/池比: ${liq > 0 ? ((vol5m/liq)*100).toFixed(2) : 0}% | 買/賣: ${buys}/${sells}`);
                     console.log(`======================================================\n`);
 
                     const secResult = await securityGuard.checkAll(mintAddress, 'TRENDING');
                     if (!secResult.isSafe) {
-                        console.log(`🗑️ [Trending Security] 觸發安檢防線，判定為 Scam: ${secResult.reason}`);
+                        console.log(`🗑️ [Trending Security] 安檢判定危險: ${secResult.reason}`);
                         await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
-                        // 🚀 [新增] 打入 24 小時天牢 (86400 秒)
                         await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
                         continue; 
                     }
@@ -92,12 +120,11 @@ const trendingJob = {
                         if (buyResult) await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     } else {
                         if (aiScore >= survivalScore || aiDecision.decision === 'ONHOLD' || (aiDecision.reason && aiDecision.reason.includes('ONHOLD'))) {
-                            console.log(`⏳ [Trending] 潛力仍在 (分數: ${aiScore} >= ${survivalScore})，保留數據...`);
+                            console.log(`⏳ [Trending] 潛力仍在 (分數: ${aiScore})，保留於保溫箱...`);
                             await supabase.from('trending_pool').update({ last_ai_comment: aiDecision.reason, ai_score: aiScore, volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
                         } else {
-                            console.log(`🗑️ [Trending] 分數低於門檻 (${aiScore} < ${survivalScore})，踢出保溫箱並拉黑 24 小時！`);
+                            console.log(`🗑️ [Trending] 分數低於門檻 (${aiScore})，踢出並拉黑 24 小時！`);
                             await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
-                            // 🚀 [新增] AI 睇完覺得係無敘事嘅垃圾，一樣打入 24 小時天牢
                             await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
                         }
                     }
@@ -106,7 +133,7 @@ const trendingJob = {
                 }
             }
 
-            console.log(`👑 [Trending VIP] 巡邏完畢 (觸發雷達數: ${triggeredCount} / ${poolTokens.length})。強制冷卻 1 秒後釋放資源...`);
+            console.log(`👑 [Trending VIP] 巡邏完畢 (觸發: ${triggeredCount} / ${poolTokens.length})。`);
             healthMonitor.setStatus('Math_Radar', `🟢 剛巡邏 ${poolTokens.length} 隻 (觸發: ${triggeredCount})`);
             await new Promise(r => setTimeout(r, 1000));
 
@@ -114,15 +141,15 @@ const trendingJob = {
             console.error(`❌ [Trending Job] 執行異常:`, err.message);
             healthMonitor.setStatus('Math_Radar', '🔴 巡邏異常');
         } finally {
-            // 🔓 無論成功定失敗，最後一定釋放 VIP 鎖
             await redis.del('dex_priority_lock');
             isTrendingRunning = false;
         }
     },
 
-    // 🚀 接收大換血完畢信號，即刻開工並重置 15 分鐘時鐘！
+    /**
+     * 🚀 接收爬蟲完畢信號，重置時鐘並即刻開工。
+     */
     triggerImmediateAndResetClock() {
-        console.log(`⏱️ [System] 接收到大換血完畢信號，重置數學雷達時鐘，立即啟動 VIP 巡邏！`);
         if (radarTimer) clearInterval(radarTimer);
         this.runRoutine();
         radarTimer = setInterval(() => { this.runRoutine(); }, 15 * 60 * 1000);
@@ -130,7 +157,7 @@ const trendingJob = {
 
     start() {
         radarTimer = setInterval(() => { this.runRoutine(); }, 15 * 60 * 1000);
-        console.log(`🔥 [Trending Incubator] 真・Top 200 數學雷達已待命，將由 Gecko 爬蟲全權指揮節拍...`);
+        console.log(`🔥 [Trending Incubator] 數學雷達已待命，由 DB 動態 JSON 配置主導換手率門檻...`);
     }
 };
 

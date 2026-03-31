@@ -1,34 +1,32 @@
 // src/config/solana.js
+// 📝 檔案功能用途 ( < 50 字 )：Solana 區塊鏈連線引擎。負責建立 RPC 節點連線、攔截限流錯誤，並提供多車道無縫輪替與 Promise.any 併發廣播機制。
+
 const { Connection, PublicKey, Keypair } = require('@solana/web3.js');
 
-// 🚀 核心急救：直接讀取系統變數，避開循環依賴
+// 🚀 核心急救：直接讀取系統變數，嚴格對齊 V9.0 變數清單
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY;
-const ALCHEMY_API_KEY_2 = process.env.ALCHEMY_API_KEY_2;
 const HELIUS_API_KEY_1 = process.env.HELIUS_API_KEY;
 const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;
 
-// ==========================================
-// 🚀 VIP 專屬節點池 (自動組合最多 4 條命)
-// ==========================================
+// VIP 專屬節點池
 const alchemyUrl = process.env.ALCHEMY_RPC_URL || (ALCHEMY_API_KEY ? `https://solana-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY}` : null);
-const alchemyUrl2 = process.env.ALCHEMY_RPC_URL_2 || (ALCHEMY_API_KEY_2 ? `https://solana-mainnet.g.alchemy.com/v2/${ALCHEMY_API_KEY_2}` : null);
 const heliusUrl = process.env.HELIUS_RPC_URL || (HELIUS_API_KEY_1 ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY_1}` : null);
 const heliusUrl2 = process.env.HELIUS_RPC_URL_2 || (HELIUS_API_KEY_2 ? `https://mainnet.helius-rpc.com/?api-key=${HELIUS_API_KEY_2}` : null);
 
-// ==========================================
-// 🌍 終極免費公共節點池 (Tier 3)
-// ==========================================
+// 終極免費公共節點池
 const PUBLIC_RPCS = [
-    'https://solana.drpc.org',              // dRPC (極高防 429)
-    'https://rpc.ankr.com/solana',          // Ankr Public
-    'https://solana-rpc.publicnode.com'     // PublicNode
+    'https://solana.drpc.org',              
+    'https://rpc.ankr.com/solana',          
+    'https://solana-rpc.publicnode.com'     
 ];
 
-// 篩選出所有有效嘅 VIP 水喉
-let vipUrls = [alchemyUrl, heliusUrl, alchemyUrl2, heliusUrl2].filter(url => url && !url.includes('undefined'));
-if (vipUrls.length === 0) vipUrls = PUBLIC_RPCS; // 如果無 Key，自動降級用公共池
+// 🛠️ 確保只使用認可的 VIP 水喉
+let vipUrls = [alchemyUrl, heliusUrl, heliusUrl2].filter(url => url && !url.includes('undefined'));
+if (vipUrls.length === 0) vipUrls = PUBLIC_RPCS; 
 
-// ⚡ 核心殺招：Fetch 攔截器 (防止 web3.js 儍等)
+/**
+ * ⚡ Fetch 攔截器：自訂 fetch 行為，當遇到 429 狀態碼時立即拋出錯誤，防止儍等。
+ */
 async function smartFetch(url, options) {
     const response = await fetch(url, options);
     if (response.status === 429) {
@@ -37,21 +35,17 @@ async function smartFetch(url, options) {
     return response;
 }
 
-const connectionConfig = { 
-    commitment: 'confirmed', 
-    maxRetries: 0, 
-    disableRetryOnRateLimit: true, 
-    fetch: smartFetch 
-};
+const connectionConfig = { commitment: 'confirmed', maxRetries: 0, disableRetryOnRateLimit: true, fetch: smartFetch };
 
-// 🎯 建立「實體水喉陣列」
 const vipConnections = vipUrls.map(url => new Connection(url, connectionConfig));
 const publicConnections = PUBLIC_RPCS.map(url => new Connection(url, connectionConfig));
 
-// 🔄 輪替指標 (記住目前邊條喉係主力，起步設為第 0 條)
 let currentVipIndex = 0; 
 let currentPublicIndex = 0;
 
+/**
+ * ⏳ 防超時機制：為 Promise 加上強制死亡線，超時即拋出錯誤觸發輪替。
+ */
 const withTimeout = (promise, ms, operationName) => {
     let timeoutId;
     const timeoutPromise = new Promise((_, reject) => {
@@ -62,36 +56,33 @@ const withTimeout = (promise, ms, operationName) => {
 
 const NO_TIMEOUT_METHODS = ['sendTransaction', 'sendRawTransaction', 'confirmTransaction', 'simulateTransaction'];
 
+/**
+ * 🔒 隱藏 API Key：在日誌中遮蔽敏感的 URL 參數，保護金鑰安全。
+ */
 function maskUrl(url) {
     return url.replace(/\?api-key=[^&]*/, '?api-key=***').replace(/\/v2\/[^/]*/, '/v2/***');
 }
 
 console.log(`\n🔌 [System] 初始化 Solana 動態輪替引擎 (掛載 ${vipConnections.length} 條 VIP 水喉)...`);
-console.log(`🎯 [起步主力] 節點 ${currentVipIndex}: ${maskUrl(vipUrls[currentVipIndex])}`);
 
-// ==========================================
-// 🛡️ 智能代理 (Proxy)：動態將 Request 派去「當前主力」
-// ==========================================
 const dummyTarget = vipConnections[0] || publicConnections[0]; 
 
+/**
+ * 🛡️ 智能代理 (Proxy)：動態攔截所有 RPC 請求，若遇到 429 或超時，自動切換至下一個可用節點重試。
+ */
 const connection = new Proxy(dummyTarget, {
     get(target, propKey) {
         const origMethod = target[propKey];
-        
         if (typeof origMethod === 'function') {
             return async function (...args) {
-                
-                // 🔄 執行器：包裝咗「失敗即換喉」嘅邏輯
                 const runWithRetry = async (isVip, attempt = 1) => {
                     const pool = isVip ? vipConnections : publicConnections;
                     if (pool.length === 0) throw new Error("空水喉池");
-                    
                     const activeIndex = isVip ? currentVipIndex : currentPublicIndex;
                     const activeConn = pool[activeIndex];
                     const methodToRun = activeConn[propKey];
 
                     try {
-                        // 防超時機制
                         if (NO_TIMEOUT_METHODS.includes(propKey)) {
                             return await methodToRun.apply(activeConn, args);
                         } else {
@@ -101,22 +92,15 @@ const connection = new Proxy(dummyTarget, {
                         const is429 = err.message.includes('429') || err.message.includes('TOO_MANY_REQUESTS') || err.message.includes('Too Many Requests');
                         const isTimeout = err.message.includes('Timeout');
 
-                        // 🚨 觸發換線條件：429 或 Timeout
                         if (is429 || isTimeout) {
                             if (isVip) {
-                                // 🚀 將指標推向下一條喉，永久生效！
                                 currentVipIndex = (currentVipIndex + 1) % vipConnections.length;
-                                const reason = is429 ? '🚦 429 限流' : '⏳ 超時無反應';
-                                console.warn(`\n⚠️ ${reason}！VIP 節點 ${activeIndex} 癱瘓。已自動將【主力水喉】切換至 ➡️ 節點 ${currentVipIndex} (${maskUrl(vipUrls[currentVipIndex])})`);
+                                console.warn(`\n⚠️ 節點限流/超時！自動切換至 ➡️ 節點 ${currentVipIndex} (${maskUrl(vipUrls[currentVipIndex])})`);
                             } else {
                                 currentPublicIndex = (currentPublicIndex + 1) % publicConnections.length;
-                                console.warn(`\n⚠️ Public 節點 ${activeIndex} 失效，切換至 ➡️ 節點 ${currentPublicIndex}`);
                             }
-                        } else {
-                            console.warn(`\n⚠️ [RPC Error] 節點 ${activeIndex} 異常: ${err.message}`);
                         }
 
-                        // 如果呢個 Request 仲未試勻晒池入面所有喉，即刻用新主力重試！
                         if (attempt < pool.length) {
                             return await runWithRetry(isVip, attempt + 1);
                         } else {
@@ -126,21 +110,11 @@ const connection = new Proxy(dummyTarget, {
                 };
 
                 try {
-                    // 第一防線：用 VIP 池無限輪替
-                    if (vipConnections.length > 0) {
-                        return await runWithRetry(true, 1);
-                    } else {
-                        throw new Error("無 VIP 節點");
-                    }
+                    if (vipConnections.length > 0) return await runWithRetry(true, 1);
+                    else throw new Error("無 VIP 節點");
                 } catch (vipErr) {
-                    console.warn(`🚨 [致命警告] ${vipConnections.length} 條 VIP 水喉全面癱瘓！緊急下降至 Tier 3 公共免 Key 節點群...`);
-                    // 第二防線：用 Public 池無限輪替
-                    try {
-                        return await runWithRetry(false, 1);
-                    } catch (pubErr) {
-                        console.error(`💀 [末日] 所有 Solana 節點均無法使用！`);
-                        throw new Error(`[Fatal RPC Error] Network offline.`);
-                    }
+                    try { return await runWithRetry(false, 1); } 
+                    catch (pubErr) { throw new Error(`[Fatal RPC Error] Network offline.`); }
                 }
             };
         }
@@ -148,11 +122,35 @@ const connection = new Proxy(dummyTarget, {
     }
 });
 
-// 向下兼容匯出
+/**
+ * 🚀 多路並發廣播 (Multicast)：同時向所有可用節點發射已簽名交易，最先成功回傳者勝出，極限防擁堵。
+ */
+async function broadcastWithPromiseAny(serializedTx) {
+    if (vipConnections.length === 0 && publicConnections.length === 0) throw new Error("❌ 無任何可用嘅 RPC 節點！");
+
+    const allEndpoints = [...vipConnections, ...publicConnections];
+    console.log(`\n🌐 [Multicast] 啟動多路併發廣播，同時向 ${allEndpoints.length} 個節點發射 Signed Tx！`);
+
+    const broadcastPromises = allEndpoints.map(conn => {
+        // skipPreflight 設為 true 節省時間，直接推入 Mempool
+        return conn.sendRawTransaction(serializedTx, { skipPreflight: true, maxRetries: 0 });
+    });
+
+    try {
+        const fastestSignature = await Promise.any(broadcastPromises);
+        console.log(`✅ [Multicast] 競速成功！最快上鏈 Signature: ${fastestSignature}`);
+        return fastestSignature;
+    } catch (aggregateError) {
+        console.error(`❌ [Multicast] 所有節點廣播均失敗！`);
+        throw new Error("多路併發廣播全數陣亡");
+    }
+}
+
 module.exports = { 
     connection, 
     primaryConnection: vipConnections[0] || publicConnections[0], 
     fallbackConnection: vipConnections[1] || publicConnections[1] || publicConnections[0], 
     PublicKey, 
-    Keypair 
+    Keypair,
+    broadcastWithPromiseAny
 };

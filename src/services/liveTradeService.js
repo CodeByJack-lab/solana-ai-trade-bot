@@ -1,6 +1,8 @@
 // src/services/liveTradeService.js
+// 📝 檔案功能用途：實盤簽名與上鏈引擎。對接 Jito Block Engine 進行 Bundle 拍賣，實裝動態小費，並具備 Promise.any 絕命公鏈廣播備援。
+
 const { Keypair, VersionedTransaction, Transaction, SystemProgram, PublicKey } = require('@solana/web3.js');
-const { connection } = require('../config/solana');
+const { connection, broadcastWithPromiseAny } = require('../config/solana'); // 👈 引入 Promise.any 引擎
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
 const { healthMonitor } = require('./healthMonitor'); 
@@ -23,7 +25,7 @@ const JITO_TIP_ACCOUNTS = [
     "3AVi9Tg9Uao68XNwNmtcwEdqvLhATCq0MExeb1Z51vtv"
 ];
 
-// 🚀 [V8.9 機構級升級] Jito 全球多節點廣播
+// 🚀 Jito 全球多節點廣播
 const JITO_ENDPOINTS = [
     'https://mainnet.block-engine.jito.wtf/api/v1/bundles',
     'https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles',
@@ -94,7 +96,7 @@ async function getJupiterSwapTransaction(quoteResponse) {
     }
 }
 
-// 🎯 接收 reason 參數，啟動智能環境感知
+// 🎯 接收 reason 參數，啟動智能環境感知與多路備援
 async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
     if (!wallet) return { success: false, txid: null };
 
@@ -122,37 +124,37 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
         
         console.log(`✅ [Pre-flight Success] 模擬通過，準備進入 Jito 動態拍賣場...`);
 
-        // 讀取基礎 Tip (預設 150,000)
+        // 讀取基礎 Tip
         let baseTip = 150000; 
         try {
             const { data: config } = await supabase.from('system_config').select('jito_tip_lamports').eq('id', 1).single();
             if (config && config.jito_tip_lamports) baseTip = Number(config.jito_tip_lamports);
         } catch (dbErr) {}
 
-        // 🚀 [智能環境感知] 根據不同戰況，動態調整起步價
+        // 🚀 [智能環境感知] 動態調整起步價
         let currentTip = baseTip;
         let isEmergency = false;
 
         if (action === 'BUY') {
-            currentTip = baseTip * 2; // 搶貨稍為加價
+            currentTip = baseTip * 2; 
         } else if (action === 'SELL' && reason) {
-            if (reason.includes('瀑布') || reason.includes('硬止損') || reason.includes('崩盤') || reason.includes('拔線')) {
-                currentTip = baseTip * 4; // 🚨 緊急逃生，4 倍起跳
+            if (reason.includes('瀑布') || reason.includes('硬止損') || reason.includes('崩盤') || reason.includes('拔線') || reason.includes('EXIT')) {
+                currentTip = baseTip * 4; 
                 isEmergency = true;
                 console.log(`🚨 [環境感知] 偵測到極端危險，Jito 起步價直接拉升至 ${(currentTip/1e9).toFixed(5)} SOL！`);
             }
         }
 
         const maxRetries = isEmergency ? 4 : 3; 
-        const serializedSwapTx = bs58.encode(transaction.serialize());
+        const serializedSwapTx = transaction.serialize();
+        const base58SwapTx = bs58.encode(serializedSwapTx);
         const txid = bs58.encode(transaction.signatures[0]);
 
-        // 階梯式加注迴圈
+        // 階梯式加注迴圈 (Jito)
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
             console.log(`💸 [Jito 拍賣 - 第 ${attempt}/${maxRetries} 輪] 出價: ${(currentTip / 1e9).toFixed(5)} SOL`);
             healthMonitor.setStatus('Live_Engine', `🟢 Jito 第 ${attempt} 輪競價...`); 
 
-            // 確保每次 retry 都攞最新 Blockhash，防止過期
             const latestBlockHash = await connection.getLatestBlockhash();
             const tipAccount = new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]);
             
@@ -170,13 +172,11 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
             const serializedTipTx = bs58.encode(tipTx.serialize());
             const bundlePayload = {
                 jsonrpc: "2.0", id: 1, method: "sendBundle",
-                params: [ [serializedSwapTx, serializedTipTx] ]
+                params: [ [base58SwapTx, serializedTipTx] ]
             };
 
-            // 🌐 全球同步廣播 Bundle
             const sendPromises = JITO_ENDPOINTS.map(url => 
-                axios.post(url, bundlePayload, { headers: { 'Content-Type': 'application/json' }, timeout: 3000 })
-                .catch(() => null) 
+                axios.post(url, bundlePayload, { headers: { 'Content-Type': 'application/json' }, timeout: 3000 }).catch(() => null) 
             );
             await Promise.all(sendPromises);
 
@@ -184,7 +184,6 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
             console.log(`⏳ 等待區塊鏈確認 (最大等候 5 秒)...`);
 
             try {
-                // ⚡ 極速探測：5 秒無反應即視為被踢出區塊，準備加注
                 await pollSignatureStatus(txid, 5000); 
                 console.log(`🎉 [Live Trade] ${action} 交易已在鏈上確認！成交 Tip: ${(currentTip / 1e9).toFixed(5)} SOL`);
                 healthMonitor.setStatus('Live_Engine', `🟢 交易確認成功`); 
@@ -193,13 +192,28 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
             } catch (e) {
                 console.log(`⚠️ [Jito 拍賣失敗] 交易超時或被擠出。`);
                 if (attempt < maxRetries) {
-                    currentTip = currentTip * 2; // 失敗就 Double
+                    currentTip = currentTip * 2; 
                     console.log(`🔥 準備加碼保護費，重新發送...`);
                 }
             }
         }
 
-        console.error(`❌ [Live Execution] 交易徹底失敗，已達最大重試次數 (${maxRetries}次)。請檢查網絡或手動平倉！`);
+        // 🚨 [V9.0 絕命備援] 如果 Jito 徹底失敗，且為賣出逃生，呼叫 Promise.any 多路廣播！
+        if (action === 'SELL') {
+            console.error(`❌ [Jito 拍賣失敗] 已達最大重試次數。啟動 V9.0 絕命公鏈廣播 (Promise.any)...`);
+            try {
+                const fastestSig = await broadcastWithPromiseAny(serializedSwapTx);
+                await pollSignatureStatus(fastestSig, 15000); // 畀公鏈多啲時間確認
+                console.log(`🎉 [Live Trade] 絕命廣播成功！公鏈上鏈 Signature: ${fastestSig}`);
+                healthMonitor.setStatus('Live_Engine', `🟢 絕命廣播成功`);
+                return { success: true, txid: fastestSig };
+            } catch (broadcastErr) {
+                console.error(`💥 [Live Execution] 絕命廣播亦全數陣亡:`, broadcastErr.message);
+            }
+        } else {
+            console.error(`❌ [Live Execution] Jito 拍賣失敗，買單放棄 (不追高)。`);
+        }
+
         healthMonitor.setStatus('Live_Engine', '🔴 交易多次丟包失敗'); 
         return { success: false, txid: null };
 

@@ -1,9 +1,11 @@
 // src/services/portfolioService.js
+// 📝 檔案功能用途：倉位與資產大管家。維護 RAM 中的持倉狀態，控制 Meme 與 Trending 雙軌額度，防止資金互相擠佔。
+
 const { supabase } = require('../config/supabase'); 
 const { connection } = require('../config/solana');
 const { PublicKey, Keypair } = require('@solana/web3.js'); 
 const { healthMonitor } = require('./healthMonitor');
-const configEnv = require('../config/env'); // 👈 引入彈藥庫
+const configEnv = require('../config/env'); 
 
 let bs58 = require('bs58');
 if (bs58.default) {
@@ -24,8 +26,6 @@ try {
     console.error("⚠️ [Portfolio] 無法解析 Private Key，實盤餘額將無法同步");
 }
 
-// ... (保留上面嘅 imports 同 wallet 處理) ...
-
 let my_portfolio = {
     mode: 'PAPER',
     cash_sol: 0,
@@ -35,11 +35,10 @@ let my_portfolio = {
     last_sync: null
 };
 
-// 🌟 V8.2 新增：全域保存 Database 設定嘅倉位上限
+// 🌟 全域保存 Database 設定嘅倉位上限
 let limitsCache = {
     maxMeme: 2,
-    maxTrending: 3,
-    maxBluechip: 0 // 永久歸零
+    maxTrending: 3
 };
 
 async function updateSystemStatus(msg) {
@@ -64,14 +63,13 @@ async function initPortfolio() {
 
         my_portfolio.mode = config ? (config.trade_mode || 'PAPER') : 'PAPER';
         
-        // 🌟 V8.2 升級：直接讀取 Dashboard 設定嘅倉位上限 (上帝視角)
+        // 🌟 直接讀取 Dashboard 設定嘅倉位上限 (上帝視角)
         limitsCache.maxMeme = config?.max_meme_positions || 2;
         limitsCache.maxTrending = config?.max_trending_positions || 3;
 
         const tableName = my_portfolio.mode === 'PAPER' ? 'active_positions_paper' : 'active_positions_live';
 
-        // ⚠️ V8.2 升級：禁止喺平時巡邏/初始化時 Call getBalance 查真倉！
-        // 如果係 LIVE 模式，直接讀取 DB 上次紀錄嘅 live_wallet_balance
+        // ⚠️ 禁止平時巡邏查真倉！直接讀取 DB 上次紀錄
         if (my_portfolio.mode === 'LIVE') {
              my_portfolio.cash_sol = config?.live_wallet_balance || 0;
              my_portfolio.reference_capital = my_portfolio.cash_sol;
@@ -107,7 +105,7 @@ async function initPortfolio() {
     }
 }
 
-// ⚠️ V8.2 升級：廢除平時 Sync Live Balance，只允許喺真正交易後被 TradeService 呼叫
+// ⚠️ 只允許喺真正交易後被 TradeService 呼叫
 async function syncLiveBalanceToDB() {
     if (walletPublicKey) {
         try {
@@ -126,14 +124,11 @@ async function syncLiveBalanceToDB() {
 
 function getPortfolio() { return my_portfolio; }
 
-// 🌟 獲取全域倉位限制
-function getPositionLimits() {
-    return limitsCache;
-}
+function getPositionLimits() { return limitsCache; }
 
 function getMemeCount() {
     return my_portfolio.positions.filter(p => 
-        p.strategy_type && (p.strategy_type.includes('MEME_SNIPE') || p.strategy_type.includes('MEME_BLIND'))
+        p.strategy_type && (p.strategy_type.includes('MEME_SNIPE') || p.strategy_type.includes('MEME_BLIND') || p.strategy_type === 'MEME')
     ).length;
 }
 
@@ -143,11 +138,6 @@ function getTrendingCount() {
     ).length;
 }
 
-function getBlueChipCount() {
-    return 0; // 老幣已火化
-}
-
-// ... (保留 updateCache 函數) ...
 function updateCache(action, solAmount, positionData = null) {
     if (action === 'BUY') {
         my_portfolio.cash_sol -= solAmount;
@@ -174,9 +164,7 @@ module.exports = {
     updateSystemStatus,
     getMemeCount,
     getTrendingCount, 
-    getBlueChipCount,
     getPositionLimits,
     canBuyMeme: () => getMemeCount() < limitsCache.maxMeme,
-    canBuyTrending: () => getTrendingCount() < limitsCache.maxTrending,
-    canBuyBluechip: () => false // 永久禁止買入
+    canBuyTrending: () => getTrendingCount() < limitsCache.maxTrending
 };

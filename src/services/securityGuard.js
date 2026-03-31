@@ -1,35 +1,37 @@
 // src/services/securityGuard.js
+// 📝 檔案功能用途：物理與合約安檢中樞。實裝「狀態指針輪替」，雙源獲取微觀 OFI 數據，精確溯源環境變數名稱，安全防洩漏。
+
 const axios = require('axios');
 const { PublicKey } = require('@solana/web3.js');
 const { connection } = require('../config/solana');
 const { supabase } = require('../config/supabase');
 const { healthMonitor } = require('./healthMonitor');
 const configEnv = require('../config/env');
+const { sendAdminAlert } = require('./telegramService');
 
-// 🚀 [V8.2] 引入 Redis 快取，拯救 RPC 免受 429 之災
 const Redis = require('ioredis');
 const redis = new Redis(configEnv.cache.redisUrl);
 
-// 🛡️ 偽裝 Header
 const BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
     'Accept': 'application/json'
 };
 
-// ⏳ 全局 API 節流鎖
 let lastDexRequestTime = 0;
 
-// 🚦 輔助函數：檢查並等待 VIP 鎖 (Meme 讓路畀 Top 200)
+// 🔄 狀態指針系統 (Stateful Pointer Rotation)
+const MARKET_DATA_PROVIDERS = ['DEXSCREENER', 'BIRDEYE'];
+let activeProviderIdx = 0; 
+const providerErrorCounts = { DEXSCREENER: 0, BIRDEYE: 0 };
+
 async function waitForTrendingVIPLock(strategyType) {
     if (strategyType === 'TRENDING') return;
-
     let isLocked = await redis.get('dex_priority_lock');
     if (isLocked === 'TRENDING') {
-        console.log(`🚦 [API 管制] DexScreener 畀 TOP 200 徵用緊，新 Meme 乖乖排隊等候...`);
+        console.log(`🚦 [API 管制] 查價 API 畀 TOP 100 徵用緊，請稍候...`);
         while (await redis.get('dex_priority_lock') === 'TRENDING') {
             await new Promise(r => setTimeout(r, 500));
         }
-        console.log(`🟢 [API 管制] TOP 200 查閱完畢，新 Meme 獲准放行！`);
     }
 }
 
@@ -44,120 +46,131 @@ const securityGuard = {
     isGarbageToken(name, symbol) {
         const targetName = name.toLowerCase();
         const targetSymbol = symbol.toLowerCase();
-        
-        // 1. 基礎垃圾字眼攔截
-        const badPatterns = [
-            /\.com/i, /\.io/i, /\.org/i, /\.xyz/i, /t\.me\//i,         
-            /test\s*token/i, /testnet/i, /presale/i, /airdrop/i,         
-            /claim/i, /free/i, /scam/i, /fake/i, /honeypot/i, /SOL/i
-        ];
+        const badPatterns = [ /\.com/i, /\.io/i, /\.org/i, /\.xyz/i, /t\.me\//i, /test\s*token/i, /testnet/i, /presale/i, /airdrop/i, /claim/i, /free/i, /scam/i, /fake/i, /honeypot/i, /SOL/i ];
         for (const pattern of badPatterns) {
-            if (pattern.test(targetName) || pattern.test(targetSymbol)) {
-                return { isGarbage: true, match: `垃圾字眼: ${pattern.toString()}` };
-            }
+            if (pattern.test(targetName) || targetName.includes(pattern.source.replace(/\\/g, ''))) return { isGarbage: true, match: `垃圾字眼/網址` };
         }
-
-        // 🚀 2. 嚴格非英數過濾 (Non-English Scam Filter)
-        // 確保 token_symbol 只能包含 A-Z, a-z, 0-9，或者極少數常見合法符號如 $ 或 -
-        // 只要含有任何其他字元 (包括中日韓文、奇怪 Emoji 等)，一律當作土狗 Scam！
         const strictSymbolRegex = /^[a-zA-Z0-9$\-]+$/;
-        if (!strictSymbolRegex.test(symbol)) {
-            // 例外情況：有時 DexScreener 會將 UNKNOWN 塞入去，我哋放行 UNKNOWN 等後面數據庫踢
-            if (symbol !== 'UNKNOWN') {
-                return { isGarbage: true, match: '非標準英文代號 (涉嫌地區性土狗/Scam)' };
-            }
-        }
-
-        // 3. 顏文字及不可見字元過濾 (針對 Name)
-        const weirdSymbolRegex = /[\u2000-\u3300\uFE00-\uFEFF\uD83C-\uD83E\uDC00-\uDFFF]/;
-        if (weirdSymbolRegex.test(name)) {
-            return { isGarbage: true, match: '代幣名稱含顏文字/古怪符號' };
-        }
-
-        // 4. 代號過長攔截
+        if (!strictSymbolRegex.test(symbol) && symbol !== 'UNKNOWN') return { isGarbage: true, match: '非標準英文代號 (涉嫌 Scam)' };
         if (symbol.length > 15) return { isGarbage: true, match: '代號長度異常 (>15字)' };
-
         return { isGarbage: false };
     },
 
-    async getProfileFromDexScreener(mint) {
+    async _fetchFromDexScreener(mint) {
+        const url = `https://api.dexscreener.com/latest/dex/tokens/${mint}`;
         try {
-            const now = Date.now();
-            const timeSinceLast = now - lastDexRequestTime;
-            if (timeSinceLast < 1000) {
-                const waitTime = 1000 - timeSinceLast;
-                console.log(`⏳ [Security Guard] 魚群擁擠，觸發 Dex API 節流等待 ${waitTime}ms...`);
-                await new Promise(r => setTimeout(r, waitTime));
-            }
-            lastDexRequestTime = Date.now();
-
-            const url = `https://api.dexscreener.com/latest/dex/tokens/${mint}`;
             const res = await axios.get(url, { timeout: 5000, headers: BROWSER_HEADERS });
-
             if (res.data && res.data.pairs) {
                 const pairs = res.data.pairs.filter(p => p.chainId === 'solana' && p.baseToken.address === mint);
                 if (pairs.length > 0) {
                     pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
                     const pair = pairs[0];
-
                     const socials = pair.info?.socials || [];
                     const websites = pair.info?.websites || [];
-                    const priceSol = parseFloat(pair.priceNative) || 0;
-
                     const hasSocials = socials.length > 0 || websites.length > 0;
-                    const socialLabels = [...socials.map(s => s.type), ...(websites.length > 0 ? ['website'] : [])];
-
-                    const rawDescription = (pair.info?.description || pair.info?.header || '').trim();
-                    const cleanDescription = rawDescription.substring(0, 300); 
-                    const hasDescription = cleanDescription.length >= 5; 
+                    const cleanDesc = (pair.info?.description || pair.info?.header || '').trim().substring(0, 300); 
 
                     return {
-                        symbol: pair.baseToken?.symbol || 'UNKNOWN',
-                        name: pair.baseToken?.name || 'UNKNOWN',
-                        priceUsd: parseFloat(pair.priceUsd) || 0,
-                        priceSol: priceSol,
-                        liquidity: pair.liquidity?.usd || 0,
-                        volume5m: pair.volume?.m5 || 0,
-                        fdv: pair.fdv || 0,
-                        buys5m: pair.txns?.m5?.buys || 0,
-                        sells5m: pair.txns?.m5?.sells || 0,
-                        h1: parseFloat(pair.priceChange?.h1) || 0,
-                        h24: parseFloat(pair.priceChange?.h24) || 0,
-                        hasSocials: hasSocials,
-                        socials: hasSocials ? `有 (${socialLabels.join('/')})` : '無',
-                        hasDescription: hasDescription, 
-                        description: hasDescription ? cleanDescription : '無'
+                        symbol: pair.baseToken?.symbol || 'UNKNOWN', name: pair.baseToken?.name || 'UNKNOWN',
+                        priceUsd: parseFloat(pair.priceUsd) || 0, priceSol: parseFloat(pair.priceNative) || 0,
+                        liquidity: pair.liquidity?.usd || 0, volume5m: pair.volume?.m5 || 0,
+                        buys5m: pair.txns?.m5?.buys || 0, sells5m: pair.txns?.m5?.sells || 0,
+                        h1: parseFloat(pair.priceChange?.h1) || 0, h24: parseFloat(pair.priceChange?.h24) || 0,
+                        fdv: pair.fdv || 0, hasSocials: hasSocials, socials: hasSocials ? '有 (DexScreener 驗證)' : '無',
+                        description: cleanDesc.length >= 5 ? cleanDesc : '無'
                     };
                 }
             }
             return null;
         } catch (e) {
-            console.warn(`⚠️ [Security Guard] DexScreener 查價失敗 (${mint.substring(0,6)}...):`, e.message);
-            return null;
+            const err = new Error(e.message);
+            err.usedKeyName = '無 (DexScreener 公開 API)'; // 🎯 安全標識
+            throw err;
         }
     },
 
-    // 🌊 DexScreener 批量查價水喉 (Top 200 巡邏專用)
+    async _fetchFromBirdeye(mint) {
+        const apiKey = configEnv.external.birdeyeApiKey;
+
+        if (!apiKey) {
+            const err = new Error("未配置 Birdeye API Key");
+            err.usedKeyName = 'BIRDEYE_API_KEY'; // 🎯 安全標識
+            throw err;
+        }
+        
+        try {
+            const headers = { 'X-API-KEY': apiKey.replace(/['"]/g, '').trim(), 'accept': 'application/json' };
+            const [marketRes, tradeRes] = await Promise.all([
+                axios.get(`https://public-api.birdeye.so/defi/v3/token/market-data?address=${mint}`, { headers, timeout: 5000 }),
+                axios.get(`https://public-api.birdeye.so/defi/v3/token/trade-data/single?address=${mint}`, { headers, timeout: 5000 })
+            ]);
+
+            const mData = marketRes.data?.data;
+            const tData = tradeRes.data?.data;
+
+            if (!mData || !tData) return null;
+
+            return {
+                symbol: mData.symbol || 'UNKNOWN', name: mData.name || 'UNKNOWN',
+                priceUsd: mData.price || 0, priceSol: 0, liquidity: mData.liquidity || 0,
+                volume5m: tData[0]?.volume_5m || 0, buys5m: tData[0]?.trade_5m_buys || 0, sells5m: tData[0]?.trade_5m_sells || 0,
+                h1: mData.priceChange1h || 0, h24: mData.priceChange24h || 0, fdv: mData.fdv || 0,
+                hasSocials: false, socials: '無 (Birdeye 備援模式)', description: '無 (Birdeye 備援模式)'
+            };
+        } catch (e) {
+            const err = new Error(e.message);
+            err.usedKeyName = 'BIRDEYE_API_KEY'; // 🎯 安全標識
+            throw err;
+        }
+    },
+
+    async getProfileStateful(mint) {
+        const now = Date.now();
+        if (now - lastDexRequestTime < 1000) await new Promise(r => setTimeout(r, 1000 - (now - lastDexRequestTime)));
+        lastDexRequestTime = Date.now();
+
+        for (let i = 0; i < MARKET_DATA_PROVIDERS.length; i++) {
+            const idx = (activeProviderIdx + i) % MARKET_DATA_PROVIDERS.length;
+            const providerName = MARKET_DATA_PROVIDERS[idx];
+
+            try {
+                let data = null;
+                if (providerName === 'DEXSCREENER') data = await this._fetchFromDexScreener(mint);
+                else if (providerName === 'BIRDEYE') data = await this._fetchFromBirdeye(mint);
+
+                if (data) {
+                    activeProviderIdx = idx; 
+                    providerErrorCounts[providerName] = 0; 
+                    return data;
+                }
+            } catch (err) {
+                providerErrorCounts[providerName]++;
+                const deadKeyName = err.usedKeyName || 'UNKNOWN_VAR';
+
+                console.warn(`⚠️ [API Router] ${providerName} 獲取失敗 (${providerErrorCounts[providerName]}/3): ${err.message} (Var: ${deadKeyName})`);
+                
+                if (providerErrorCounts[providerName] === 3) {
+                    sendAdminAlert(`🚨 <b>查價 API 狀態指針輪替</b>\n\n🤖 <b>供應商:</b> ${providerName}\n🔑 <b>陣亡變數:</b> <code>${deadKeyName}</code>\n❌ <b>錯誤:</b> 連續 3 次擷取失敗！\n\n系統已將微觀查價主力切換至下一個備援。`);
+                    providerErrorCounts[providerName] = 0; 
+                }
+            }
+        }
+        return null; 
+    },
+
     async getBatchMarketData(mintsArray) {
         const results = {};
         if (!mintsArray || mintsArray.length === 0) return results;
-
         const CHUNK_SIZE = 30;
         for (let i = 0; i < mintsArray.length; i += CHUNK_SIZE) {
             const chunk = mintsArray.slice(i, i + CHUNK_SIZE);
             const addresses = chunk.join(',');
-
             try {
                 const now = Date.now();
-                const timeSinceLast = now - lastDexRequestTime;
-                if (timeSinceLast < 1000) {
-                    await new Promise(r => setTimeout(r, 1000 - timeSinceLast));
-                }
+                if (now - lastDexRequestTime < 1000) await new Promise(r => setTimeout(r, 1000 - (now - lastDexRequestTime)));
                 lastDexRequestTime = Date.now();
-
                 const url = `https://api.dexscreener.com/latest/dex/tokens/${addresses}`;
                 const res = await axios.get(url, { timeout: 8000, headers: BROWSER_HEADERS });
-
                 if (res.data && res.data.pairs) {
                     const pairsByToken = {};
                     for (const pair of res.data.pairs) {
@@ -167,134 +180,65 @@ const securityGuard = {
                         if (!pairsByToken[mint]) pairsByToken[mint] = [];
                         pairsByToken[mint].push(pair);
                     }
-
                     for (const mint of Object.keys(pairsByToken)) {
                         const pairs = pairsByToken[mint];
                         pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0));
                         const bestPair = pairs[0];
-
                         results[mint] = {
-                            symbol: bestPair.baseToken?.symbol || 'UNKNOWN',
-                            name: bestPair.baseToken?.name || 'UNKNOWN',
-                            priceUsd: parseFloat(bestPair.priceUsd) || 0,
-                            priceSol: parseFloat(bestPair.priceNative) || 0,
-                            liquidity: bestPair.liquidity?.usd || 0,
-                            volume5m: bestPair.volume?.m5 || 0, 
-                            buys5m: bestPair.txns?.m5?.buys || 0,
-                            sells5m: bestPair.txns?.m5?.sells || 0,
-                            h1: parseFloat(bestPair.priceChange?.h1) || 0,
-                            h24: parseFloat(bestPair.priceChange?.h24) || 0,
-                            fdv: bestPair.fdv || 0
+                            symbol: bestPair.baseToken?.symbol || 'UNKNOWN', name: bestPair.baseToken?.name || 'UNKNOWN',
+                            priceUsd: parseFloat(bestPair.priceUsd) || 0, priceSol: parseFloat(bestPair.priceNative) || 0,
+                            liquidity: bestPair.liquidity?.usd || 0, volume5m: bestPair.volume?.m5 || 0, 
+                            buys5m: bestPair.txns?.m5?.buys || 0, sells5m: bestPair.txns?.m5?.sells || 0,
+                            h1: parseFloat(bestPair.priceChange?.h1) || 0, h24: parseFloat(bestPair.priceChange?.h24) || 0, fdv: bestPair.fdv || 0
                         };
                     }
                 }
-            } catch (e) {
-                console.warn(`⚠️ [Security Guard] 批量 DexScreener 查價失敗 (進度 ${i/CHUNK_SIZE + 1}):`, e.message);
-            }
+            } catch (e) { console.warn(`⚠️ [Security Guard] 批量查價失敗:`, e.message); }
         }
         return results;
     },
 
-    async checkAll(mintAddress, poolType = 'NURSERY') {
+    async checkAll(mintAddress, poolType = 'TRENDING') {
         try {
             healthMonitor.setStatus('Security_Guard', '🟢 運作中');
 
             const cleanMint = this.sanitizeAddress(mintAddress);
             if (!cleanMint) return { isSafe: false, reason: '🛑 無效的 Base58 地址格式' };
 
-            const accountCacheKey = `SEC_ACC:${cleanMint}`;
-            let isAccountValid = await redis.get(accountCacheKey);
-
-            if (!isAccountValid) {
-                try {
-                    const accountInfo = await connection.getAccountInfo(new PublicKey(cleanMint));
-                    if (!accountInfo) {
-                        return { isSafe: false, isPurgatory: true, reason: '⏳ 鏈上查無帳戶 (等待廣播中)' };
-                    }
-                    await redis.set(accountCacheKey, 'VALID', 'EX', 86400); 
-                } catch (rpcErr) {
-                    return { isSafe: false, isPurgatory: true, reason: `⏳ RPC連線異常: ${rpcErr.message}` };
-                }
-            }
-
-            const targetParamId = poolType === 'TRENDING' ? 3 : 2;
-            const { data: params, error: dbErr } = await supabase.from('ai_strategy_params').select('*').eq('id', targetParamId).single();
-            if (dbErr) throw new Error(`無法讀取參數 ID ${targetParamId}`);
-
-            const limits = {
-                minLiq: params.min_liquidity || 4000,
-                minVol: params.min_vol_5m || 500,
-                minRatio: parseFloat(params.min_liq_fdv_ratio || 0.01)
-            };
-
-            // 🚦 強制檢查 VIP 鎖
             await waitForTrendingVIPLock(poolType);
 
-            let marketData = await this.getProfileFromDexScreener(cleanMint);
-            if (!marketData) return { isSafe: false, isPurgatory: true, reason: '⏳ Indexer 尚未索引資料 (等待報價中)' };
+            let marketData = await this.getProfileStateful(cleanMint);
+            if (!marketData) return { isSafe: false, isPurgatory: true, reason: '⏳ 查價 API 均無資料 (或全線死機)' };
 
-            // ==========================================
-            // 🚨 物理秒殺區 (連 AI 都慳返)
-            // ==========================================
-            
-            // 1. 三無攔截
-            if (!marketData.hasSocials) {
-                return { isSafe: false, reason: '🛑 項目三無 (無社交連結，極高危)' };
-            }
-
-            // 2. 敘事空白攔截
-            if (!marketData.hasDescription) {
-                return { isSafe: false, reason: '🛑 敘事空白 (DexScreener 無項目簡介)' };
-            }
-
-            // 3. 垃圾字眼 / 非英數符號攔截 🚀 (發揮作用)
             const garbageCheck = this.isGarbageToken(marketData.name, marketData.symbol);
             if (garbageCheck.isGarbage) return { isSafe: false, reason: `🛑 ${garbageCheck.match}` };
 
-            // 4. 機器人刷量雷達 (Wash Trade Radar)
-            const buys = marketData.buys5m;
-            const sells = marketData.sells5m;
-            const totalTxs = buys + sells;
-            const m5Volume = marketData.volume5m;
+            const { data: fakeCheck } = await supabase.from('trending_top100').select('mint_address').eq('token_symbol', marketData.symbol).single();
+            if (fakeCheck && fakeCheck.mint_address !== cleanMint) {
+                return { isSafe: false, reason: `🛑 仿冒幣攔截！與 Top 100 真品 ($${marketData.symbol}) 名稱相同但地址不符。` };
+            }
 
+            const totalTxs = marketData.buys5m + marketData.sells5m;
+            let ofi = 0; let avgTrade = 0;
+            
             if (totalTxs > 0) {
-                if (buys >= 15 && sells === 0) {
-                    return { isSafe: false, reason: "🛑 貔貅盤特徵 (買單>=15但零賣單，極高危)" };
-                }
-
-                if (totalTxs > 30) {
-                    const avgVolumePerTx = m5Volume / totalTxs;
-                    if (avgVolumePerTx < 15) { 
-                        return { isSafe: false, reason: `🛑 納米刷量機 (均單僅 $${avgVolumePerTx.toFixed(2)}，偽造熱度)` };
-                    }
-                }
-
-                if (totalTxs > 50 && poolType !== 'TRENDING') {
-                    const buyRatio = buys / totalTxs;
-                    if (buyRatio > 0.48 && buyRatio < 0.52) {
-                        return { isSafe: false, reason: `🛑 乒乓波對敲刷量 (買賣單數比例 ${buyRatio.toFixed(2)} 極度不自然)` };
-                    }
-                }
+                ofi = (marketData.buys5m - marketData.sells5m) / totalTxs;
+                avgTrade = marketData.volume5m / totalTxs;
+                if (marketData.buys5m >= 15 && marketData.sells5m === 0) return { isSafe: false, reason: "🛑 貔貅盤特徵 (買單>=15但零賣單)" };
+                if (totalTxs > 30 && avgTrade < 15) return { isSafe: false, reason: `🛑 納米刷量機 (均單僅 $${avgTrade.toFixed(2)})` };
             }
 
-            const isBlindSnipe = (marketData.liquidity < 1000 && marketData.volume5m === 0);
+            marketData.ofi = ofi; marketData.avgTrade = avgTrade;
 
-            if (!isBlindSnipe) {
-                if (marketData.liquidity < limits.minLiq) {
-                    if (poolType === 'TRENDING') return { isSafe: false, reason: `📉 流動性未達熱門標準 ($${marketData.liquidity.toFixed(0)} < $${limits.minLiq})` };
-                    
-                    const purgatoryThreshold = limits.minLiq * 0.8;
-                    if (marketData.liquidity >= purgatoryThreshold) {
-                        return { isSafe: false, isPurgatory: true, reason: `⏳ 流動性緩刑 ($${marketData.liquidity.toFixed(0)} < $${limits.minLiq})` };
-                    }
-                    return { isSafe: false, reason: `📉 流動性太窮 ($${marketData.liquidity.toFixed(0)} < $${limits.minLiq})` };
+            try {
+                const jupRes = await axios.get(`https://price.jup.ag/v6/price?ids=${cleanMint}`, { timeout: 3000 });
+                const instantPriceUsd = parseFloat(jupRes.data?.data?.[cleanMint]?.price);
+                if (instantPriceUsd && marketData.priceUsd > 0) {
+                    const spreadDelta = (instantPriceUsd - marketData.priceUsd) / marketData.priceUsd;
+                    marketData.spreadDelta = spreadDelta;
+                    if (spreadDelta > 0.05) return { isSafe: false, reason: `🛑 Spread 偵測：即時價已飆升 ${(spreadDelta*100).toFixed(1)}%，拒絕追高接盤` };
                 }
-
-                if (marketData.volume5m < limits.minVol) return { isSafe: false, reason: `📉 5分量死水 ($${marketData.volume5m.toFixed(0)} < $${limits.minVol})` };
-
-                const currentRatio = marketData.fdv > 0 ? (marketData.liquidity / marketData.fdv) : 0;
-                if (currentRatio < limits.minRatio) return { isSafe: false, reason: `📉 泡沫極大 (比例 ${(currentRatio * 100).toFixed(2)}%)` };
-            }
+            } catch (spreadErr) { marketData.spreadDelta = 0; }
 
             const rugCacheKey = `SEC_RUG:${cleanMint}`;
             const cachedRugResult = await redis.get(rugCacheKey);
@@ -304,16 +248,10 @@ const securityGuard = {
             } else {
                 const rugResult = await this.checkRugPull(cleanMint);
                 if (!rugResult.isSafe) return rugResult; 
-                
                 await redis.set(rugCacheKey, 'SAFE', 'EX', 86400);
             }
 
-            return {
-                isSafe: true,
-                isBlindSnipe: isBlindSnipe,
-                marketData: marketData,
-                reason: '✅ 物理與合約防線全數通過'
-            };
+            return { isSafe: true, marketData: marketData, reason: '✅ 物理與合約防線全數通過' };
 
         } catch (err) {
             console.error(`❌ [Security] Guard 異常:`, err.message);
@@ -325,11 +263,7 @@ const securityGuard = {
     async checkRugPull(mintAddress) {
         try {
             const url = `https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`;
-            const response = await axios.get(url, {
-                timeout: 5000, 
-                headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' }
-            });
-
+            const response = await axios.get(url, { timeout: 5000, headers: { 'Accept': 'application/json' } });
             if (!response.data) throw new Error("RugCheck 無回應");
 
             const report = response.data;
@@ -356,13 +290,11 @@ const securityGuard = {
             const pubKey = new PublicKey(mintAddress);
             const accInfo = await connection.getParsedAccountInfo(pubKey);
             if (!accInfo.value) return { isSafe: false, reason: "🛑 找不到代幣帳戶" };
-
             const info = accInfo.value.data?.parsed?.info;
             if (!info) return { isSafe: false, reason: "🛑 無法解析代幣結構" };
 
-            if (info.mintAuthority !== null && info.mintAuthority !== undefined) return { isSafe: false, reason: "🛑 未放棄 Mint 權限" };
-            if (info.freezeAuthority !== null && info.freezeAuthority !== undefined) return { isSafe: false, reason: "🛑 未放棄 Freeze 權限" };
-
+            if (info.mintAuthority) return { isSafe: false, reason: "🛑 未放棄 Mint 權限 (原生檢查)" };
+            if (info.freezeAuthority) return { isSafe: false, reason: "🛑 未放棄 Freeze 權限 (原生檢查)" };
             return { isSafe: true };
         } catch (err) {
             return { isSafe: false, reason: `🛑 原生 RPC 連線異常` };
