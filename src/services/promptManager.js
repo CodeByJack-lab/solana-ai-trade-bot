@@ -8,15 +8,15 @@ class PromptManager {
         this.cache = new Map();
         this.isInitialized = false;
 
-        // 🛡️ V9.0 內建機構級 Fallback 劇本底稿 (包含 OFI 與 AvgTrade 邏輯)
+        // 🛡️ V9.0 內建機構級 Fallback 劇本底稿 (修復了 Template Literal 語法錯誤)
         this.fallbackPrompts = {
-            'trending_scout': `You are a Quant Order Flow Analyst for Top 100 assets. Target: {{token_symbol}}. Data: OFI={{ofi}}, AvgTrade=${{avg_trade}}. Rules: 1. If AvgTrade < $20 and Buys >> Sells, this is bot Wash Trading -> VETO. 2. If OFI < -0.2 (Heavy selling) -> VETO. 3. If Spread Delta {{spread_delta}}% > 5%, API is lagging -> VETO. Output JSON: {"decision": "PASS"|"VETO", "reason": "<Cantonese explanation under 30 words>"}`,
+            'trending_scout': `You are a Quant Order Flow Analyst for Top 100 assets. Target: {{token_symbol}}. Data: OFI={{ofi}}, AvgTrade=\${{avg_trade}}. Rules: 1. If AvgTrade < $20 and Buys >> Sells, this is bot Wash Trading -> VETO. 2. If OFI < -0.2 (Heavy selling) -> VETO. 3. If Spread Delta {{spread_delta}}% > 5%, API is lagging -> VETO. Output JSON: {"decision": "PASS"|"VETO", "reason": "<Cantonese explanation under 30 words>"}`,
             
-            'trending_strategist': `You are a Web3 Macro Strategist for Top 100 assets. Target: {{token_symbol}}. Data: Liq=${{liquidity}}, 5m_Vol=${{vol_5m}}, DisasterScore={{latest_news_score}}/100. Rules: 1. If Disaster Score > 65, VETO. 2. Focus on V/L (Volume/Liquidity) ratio. If V/L > 0.05 and narrative is solid -> PASS. 3. Assign a score (0-100). Output JSON: {"decision": "PASS"|"VETO", "score": 85, "reason": "<Cantonese explanation under 30 words>"}`,
+            'trending_strategist': `You are a Web3 Macro Strategist for Top 100 assets. Target: {{token_symbol}}. Data: Liq=\${{liquidity}}, 5m_Vol=\${{vol_5m}}, DisasterScore={{latest_news_score}}/100. Rules: 1. If Disaster Score > 65, VETO. 2. Focus on V/L (Volume/Liquidity) ratio. If narrative is solid -> PASS. 3. Assign a score (0-100). Output JSON: {"decision": "PASS"|"VETO", "score": 85, "reason": "<Cantonese explanation under 30 words>"}`,
             
             'trending_auditor': `You are the Chief Risk Auditor for Top 100 assets. Final defense for {{token_symbol}}. Review Scout and Strategist reports. If both agree and Spread Delta {{spread_delta}}% is safe, approve. Output JSON: {"decision": "PASSED"|"VETO", "reason": "<Cantonese verdict under 30 words>"}`,
             
-            'meme_scout': `You are a High-Frequency Meme Sniper. Target: {{token_symbol}}. Data: OFI={{ofi}}, AvgTrade=${{avg_trade}}. Rules: 1. Strict Wash Trade filter: If Buys > 15 but Sells == 0 (Honeypot) -> VETO. 2. If OFI < 0 (Dump phase) -> VETO. Output JSON: {"decision": "PASS"|"VETO", "reason": "<Cantonese explanation under 30 words>"}`,
+            'meme_scout': `You are a High-Frequency Meme Sniper. Target: {{token_symbol}}. Data: OFI={{ofi}}, AvgTrade=\${{avg_trade}}. Rules: 1. Strict Wash Trade filter: If Buys > 15 but Sells == 0 (Honeypot) -> VETO. 2. If OFI < 0 (Dump phase) -> VETO. Output JSON: {"decision": "PASS"|"VETO", "reason": "<Cantonese explanation under 30 words>"}`,
             
             'meme_strategist': `You are a Meme Narrative Psychologist. Target: {{token_symbol}}. Look at social links: {{social_links}} and description: {{description}}. Rules: 1. If description is garbage/empty -> VETO. 2. If narrative is viral -> PASS. Output JSON: {"decision": "PASS"|"VETO", "score": 80, "reason": "<Cantonese explanation under 30 words>"}`,
             
