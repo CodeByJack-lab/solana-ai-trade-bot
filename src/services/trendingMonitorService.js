@@ -1,5 +1,5 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：隱形獵人爬蟲。每小時從 GeckoTerminal 獲取 Top 100，實裝「去重機制」解決 Primary Key 衝突，確保真假幣防偽表成功寫入。
+// 📝 檔案功能用途：隱形獵人爬蟲。每 2 小時從 GeckoTerminal 獲取 Solana 鏈上真實 Volume Top 100，具備防 429 智能重試與去重機制。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -12,45 +12,69 @@ const { sendAdminAlert } = require('./telegramService');
 const redis = new Redis(configEnv.cache.redisUrl);
 
 let isCrawlerRunning = false;
-let geckoErrorCount = 0;
 
 const trendingMonitorService = {
     /**
-     * 🌐 呼叫 GeckoTerminal 獲取 Pool 名單 (加大獲取量以備去重)
+     * 🌐 呼叫 GeckoTerminal 獲取 Solana 真實 Volume 排行榜 (支援智能防 429 重試)
      */
     async fetchTop100FromGecko() {
         let allPools = [];
-        console.log('🌐 [Gecko Crawler] 開始分批抓取 Top 150 榜單 (預留空間去重)...');
+        console.log('🌐 [Gecko Crawler] 開始分批抓取 8 頁 (約 160 個池)，準備過濾 Solana 真・Top 100...');
 
-        // 擴大獲取至 6 頁 (約 180 個 Pool)，確保去重後依然有 100 隻 Token
-        for (let page = 1; page <= 6; page++) {
-            try {
-                const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools?page=${page}`;
-                const res = await axios.get(url, { headers: { 'accept': 'application/json' }, timeout: 8000 });
-                
-                if (res.data?.data) {
-                    allPools = allPools.concat(res.data.data);
-                }
+        const targetPages = 8; // 攞 8 頁，確保去重後有 100 隻幣
 
-                if (page < 6) await new Promise(r => setTimeout(r, 2000)); // 嚴格冷卻防 429
-            } catch (err) {
-                geckoErrorCount++;
-                console.warn(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (${geckoErrorCount}/3):`, err.message);
-                
-                if (geckoErrorCount === 3) {
-                    sendAdminAlert(`🚨 <b>爬蟲 API 連續故障</b>\n\n🦎 <b>供應商:</b> GeckoTerminal\n🔑 <b>陣亡變數:</b> <code>無 (公開 API)</code>\n❌ <b>錯誤:</b> 連續 3 次分頁獲取失敗！\n\nTrending 保溫箱暫時停止更新新幣。`);
-                    geckoErrorCount = 0; 
+        for (let page = 1; page <= targetPages; page++) {
+            let success = false;
+            let retryCount = 0;
+            const maxRetries = 3;
+
+            // 🛡️ 智能重試 Loop：專擋 429 Too Many Requests
+            while (!success && retryCount < maxRetries) {
+                try {
+                    // 🎯 這裡的 /networks/solana/ 已經完美鎖死只拿 Solana 鏈的數據
+                    const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools?page=${page}`;
+                    const res = await axios.get(url, { headers: { 'accept': 'application/json' }, timeout: 10000 });
+                    
+                    if (res.data?.data) {
+                        allPools = allPools.concat(res.data.data);
+                    }
+                    success = true; // 成功攞到，跳出 Retry Loop
+                    console.log(`📑 [Gecko] 第 ${page} 頁抓取成功！`);
+
+                    // 正常成功後，隨機休息 3 - 5 秒，扮真人，極大減低被 WAF 封鎖機會
+                    if (page < targetPages) {
+                        const delay = Math.floor(Math.random() * 2000) + 3000;
+                        await new Promise(r => setTimeout(r, delay));
+                    }
+
+                } catch (err) {
+                    retryCount++;
+                    const is429 = err.response?.status === 429;
+                    console.warn(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (嘗試 ${retryCount}/${maxRetries}):`, err.message);
+                    
+                    if (retryCount >= maxRetries) {
+                        console.error(`🚨 [Gecko Crawler] 第 ${page} 頁徹底陣亡，跳過此頁繼續...`);
+                        sendAdminAlert(`🚨 <b>爬蟲 API 局部故障</b>\n\n🦎 <b>目標:</b> GeckoTerminal 第 ${page} 頁\n❌ <b>錯誤:</b> 連續 3 次獲取失敗，已跳過。`);
+                        break; 
+                    }
+
+                    // 如果係 429，代表被限流，重重地罰息 10-15 秒先再試
+                    if (is429) {
+                        const penaltyDelay = Math.floor(Math.random() * 5000) + 10000; // 10s - 15s
+                        console.log(`⏳ 觸發 API 429 保護，強制冷卻 ${Math.round(penaltyDelay/1000)} 秒後重試...`);
+                        await new Promise(r => setTimeout(r, penaltyDelay));
+                    } else {
+                        await new Promise(r => setTimeout(r, 3000));
+                    }
                 }
-                break; 
             }
         }
         
-        if (allPools.length > 0) geckoErrorCount = 0; 
         return allPools;
     },
 
     start() {
-        console.log('🦎 [Gecko Crawler] 隱形獵人爬蟲已啟動 (每 1 小時大換血，附帶去重機制)...');
+        console.log('🦎 [Gecko Crawler] 真・Top 100 監控啟動 (每 2 小時大換血，附帶智能重試機制)...');
         
         const runTask = async () => {
             if (isCrawlerRunning) return;
@@ -67,7 +91,7 @@ const trendingMonitorService = {
                 if (!config || !config.is_running) { isCrawlerRunning = false; return; }
 
                 const { data: stratParams } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 3).single();
-                const dynamicMinLiquidity = stratParams?.min_liquidity || 20000;
+                const dynamicMinLiquidity = stratParams?.min_liquidity || 150000; // 預設 15萬美金流動性
 
                 const pools = await this.fetchTop100FromGecko();
                 if (pools.length === 0) { isCrawlerRunning = false; return; }
@@ -75,7 +99,7 @@ const trendingMonitorService = {
                 let top100Array = [];
                 let incubatorArray = [];
                 
-                // 🚀 核心修復：使用 Set 追蹤已加入的 Token，防止同一個 Token 的多個 Pool 導致 Primary Key 衝突
+                // 🚀 使用 Set 追蹤已加入的 Token 去重
                 let uniqueMints = new Set();
                 let currentRank = 1;
 
@@ -83,19 +107,26 @@ const trendingMonitorService = {
                 const activePositions = portfolio.positions || [];
                 const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
 
+                // 黑名單：WSOL, USDC, USDT 等
+                const blacklist = [
+                    'So11111111111111111111111111111111111111112', 
+                    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+                    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
+                ];
+
                 for (let i = 0; i < pools.length; i++) {
                     const pool = pools[i];
                     const baseTokenId = pool.relationships?.base_token?.data?.id || '';
                     const mintAddress = baseTokenId.replace('solana_', ''); 
                     
                     if (!mintAddress || mintAddress.length < 32) continue;
-                    if (['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v'].includes(mintAddress)) continue;
+                    if (blacklist.includes(mintAddress)) continue;
 
                     // 🚨 去重過濾：如果這隻幣已經入咗榜，直接 Skip
                     if (uniqueMints.has(mintAddress)) continue;
                     uniqueMints.add(mintAddress);
 
-                    // 如果已經集齊 100 隻不重複代幣，就停止
+                    // 🎯 攞夠 100 隻 Unique Solana Token 就收工
                     if (top100Array.length >= 100) break;
 
                     const attr = pool.attributes || {};
@@ -114,8 +145,8 @@ const trendingMonitorService = {
 
                     top100Array.push({ ...baseData, rank: currentRank });
 
-                    // 🛡️ 過濾 Rank 11-100 且達標的潛力幣進入保溫箱 (Rank 1-10 通常係 SOL, USDC 等)
-                    if (currentRank >= 10 && liquidityUsd >= dynamicMinLiquidity) {
+                    // 🛡️ 過濾 Rank 11-100 且達標的潛力幣進入保溫箱 (Rank 1-10 放棄，太熱門多夾子)
+                    if (currentRank >= 11 && currentRank <= 100 && liquidityUsd >= dynamicMinLiquidity) {
                         const isBlacklisted = await redis.get(`scam_blacklist:${mintAddress}`);
                         if (isBlacklisted) {
                             currentRank++;
@@ -128,6 +159,7 @@ const trendingMonitorService = {
                             continue;
                         }
 
+                        // 檢查冷卻期 (保留你原本優良的防打臉機制)
                         const { data: tradeHistory } = await supabase
                             .from(`trade_history_${tableSuffix}`)
                             .select('created_at, realized_pnl_pct')
@@ -140,6 +172,7 @@ const trendingMonitorService = {
                         if (tradeHistory && tradeHistory.length > 0) {
                             const lastTrade = tradeHistory[0];
                             const timeSinceLastTrade = Date.now() - new Date(lastTrade.created_at).getTime();
+                            // 虧損賣出後 24 小時內不碰
                             if (lastTrade.realized_pnl_pct < 0 && timeSinceLastTrade < 24 * 60 * 60 * 1000) isOnCooldown = true; 
                         }
                         
@@ -149,7 +182,7 @@ const trendingMonitorService = {
                     currentRank++;
                 }
 
-                // 3. 雙表同步 (Sync to Supabase) 增加 Error Logging
+                // 3. 雙表同步 (Sync to Supabase)
                 if (top100Array.length > 0) {
                     await supabase.from('trending_top100').delete().neq('mint_address', 'dummy'); 
                     const { error: insertErr } = await supabase.from('trending_top100').insert(top100Array);
@@ -164,8 +197,8 @@ const trendingMonitorService = {
                 if (incubatorArray.length > 0) {
                     const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
                     if (!error) {
-                        console.log(`🦎 [Gecko Crawler] 成功將 ${incubatorArray.length} 隻潛力幣送入保溫箱！`);
-                        healthMonitor.setStatus('Top200_Crawler', `🟢 剛推平 ${incubatorArray.length} 隻幣`);
+                        console.log(`🦎 [Gecko Crawler] 成功將 ${incubatorArray.length} 隻 Rank 11-100 的藍籌幣送入保溫箱！`);
+                        healthMonitor.setStatus('Top200_Crawler', `🟢 已佈局 ${incubatorArray.length} 隻大藍籌`);
                         
                         if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {
                             trendingJob.triggerImmediateAndResetClock();
@@ -179,8 +212,9 @@ const trendingMonitorService = {
             }
         };
 
+        // 啟動 5 秒後行第一次，之後每 2 小時行一次
         setTimeout(() => { runTask(); }, 5000); 
-        setInterval(runTask, 1 * 60 * 60 * 1000); 
+        setInterval(runTask, 2 * 60 * 60 * 1000); 
     }
 };
 
