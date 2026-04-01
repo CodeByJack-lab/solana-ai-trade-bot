@@ -74,6 +74,7 @@ async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     });
 }
 
+// 🚀 V9.1.4 升級版報價核心：智能路由切換 + 錯誤診斷
 async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageBps = null) {
     try {
         let decimals = 6; 
@@ -93,17 +94,26 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
         const defaultSlippage = isBuying ? 250 : 1500;
         const SLIPPAGE_BPS = customSlippageBps !== null ? customSlippageBps : defaultSlippage; 
 
-        const baseUrl = (configEnv.external.jupiterBaseUrl || 'https://quote-api.jup.ag').replace(/\/$/, '');
-        const endpoint = baseUrl.includes('quote-api') ? '/v6/quote' : '/swap/v1/quote';
-        const url = `${baseUrl}${endpoint}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${SLIPPAGE_BPS}`;
+        // 🛡️ 智能路由切換：有 Key 用 VIP，無 Key 用 Public
+        let baseUrl = 'https://quote-api.jup.ag/v6'; 
+        let endpoint = '/quote';
+        const headers = {};
 
-        const config = { headers: {} };
         if (configEnv.external.jupiterApiKey) {
-            config.headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
+            baseUrl = 'https://api.jup.ag/swap/v1'; 
+            headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
         }
 
-        const response = await axios.get(url, config);
+        // 加入 onlyDirectRoutes=false 強制尋找跨池報價
+        const url = `${baseUrl}${endpoint}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${SLIPPAGE_BPS}&onlyDirectRoutes=false`;
+
+        const response = await axios.get(url, { headers, timeout: 8000 });
         
+        if (!response.data || !response.data.outAmount) {
+             console.warn(`⚠️ [Jupiter] ${tokenMint.substring(0,6)} 報價回傳空數據`);
+             return null;
+        }
+
         let pricePerTokenSol = isBuying 
             ? new BigNumber(amount).div(new BigNumber(response.data.outAmount).div(new BigNumber(10).pow(decimals))).toNumber()
             : new BigNumber(response.data.outAmount).div(1e9).div(amount).toNumber();
@@ -111,7 +121,25 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
         if (!Number.isFinite(pricePerTokenSol)) return null;
 
         return { pricePerToken: pricePerTokenSol, rawResponse: response.data, decimals };
+
     } catch (err) {
+        // 🔍 終極診斷雷達：精確捕捉 Jupiter 報錯原因，不再默默吞噬 Error
+        if (err.response) {
+            const status = err.response.status;
+            const errorMsg = err.response.data?.error || err.response.data?.message || '未知錯誤';
+            
+            if (status === 400) {
+                // 通常是路徑未建立，安靜 return null 等待外層 Retry
+            } else if (status === 429) {
+                console.error(`🚨 [Jupiter] 頻率限制 (429)！API 請求過快或額度爆滿。`);
+            } else if (status === 401 || status === 403) {
+                console.error(`🚨 [Jupiter] API Key 無效或未授權 (Status: ${status})！`);
+            } else {
+                console.error(`❌ [Jupiter Error] Status: ${status} | Msg: ${errorMsg}`);
+            }
+        } else {
+            console.error(`❌ [Jupiter Network Error] 網絡連線異常: ${err.message}`);
+        }
         return null;
     }
 }
@@ -174,11 +202,9 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     // 🚀 V9.1.3 極簡狙擊等候環 (單發點射，告別 429 亂掃射)
     let quoteData = null;
     const maxRetries = 3; 
-    const snipeSlippage = 500; // 🎯 預設使用 5% 滑點盲狙，唔再 Loop 浪費 API
+    const snipeSlippage = 500; // 🎯 預設使用 5% 滑點盲狙
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        
-        // 每次嘗試只問一次
         quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, snipeSlippage);
         
         if (quoteData) {
@@ -193,7 +219,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 嘗試 3 次後 Jupiter 依然無報價，判定為無流動性假池，果斷放棄。`);
+        console.log(`❌ [Execution] 嘗試 ${maxRetries} 次後 Jupiter 依然無報價，判定為無流動性假池，果斷放棄。`);
         
         // 🛡️ 終極防線：無路由假幣打入冷宮 24 小時，防無限 Loop 鞭屍
         try {
