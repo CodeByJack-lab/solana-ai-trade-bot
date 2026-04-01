@@ -40,23 +40,24 @@ const trendingMonitorService = {
                         const delay = Math.floor(Math.random() * 2000) + 3000;
                         await new Promise(r => setTimeout(r, delay));
                     }
-                } catch (err) {
-                    retryCount++;
-                    const is429 = err.response?.status === 429;
-                    console.warn(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (嘗試 ${retryCount}/${maxRetries}):`, err.message);
+                } catch (error) {
+                    retryCount++; // ⚠️ 必須加呢行，否則無限 Loop 永遠卡死
                     
-                    if (retryCount >= maxRetries) {
-                        console.error(`🚨 [Gecko Crawler] 第 ${page} 頁徹底陣亡，跳過此頁繼續...`);
-                        sendAdminAlert(`🚨 <b>爬蟲 API 局部故障</b>\n\n🦎 <b>目標:</b> GeckoTerminal 第 ${page} 頁\n❌ <b>錯誤:</b> 連續 3 次獲取失敗，已跳過。`);
-                        break; 
-                    }
-
+                    const is429 = error.response?.status === 429 || error.message.includes('429');
+                    
+                    console.error(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (嘗試 ${retryCount}/3): ${error.message}`);
+                
                     if (is429) {
+                        // 🛑 429 冷處理：終極靜音，只在後台等候
                         const penaltyDelay = Math.floor(Math.random() * 5000) + 10000; 
-                        console.log(`⏳ 觸發 API 429 保護，強制冷卻 ${Math.round(penaltyDelay/1000)} 秒後重試...`);
+                        console.log(`⏳ 觸發 API 429 保護，後台自動冷卻 ${Math.round(penaltyDelay/1000)} 秒後重試... (已靜音 Telegram)`);
                         await new Promise(r => setTimeout(r, penaltyDelay));
                     } else {
-                        await new Promise(r => setTimeout(r, 3000));
+                        // ⚠️ 真正嚴重錯誤 (如 500/TimeOut)，先至彈 Telegram Alert
+                        if (typeof sendAdminAlert === 'function') {
+                            sendAdminAlert(`⚠️ [Gecko Crawler] 第 ${page} 頁嚴重異常: ${error.message}`);
+                        }
+                        await new Promise(r => setTimeout(r, 3000)); // 普通錯誤等 3 秒
                     }
                 }
             }
@@ -83,7 +84,7 @@ const trendingMonitorService = {
 
                 const { data: stratParams } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 3).single();
                 
-                // 🟢 修正：將預設最低流動性要求由 150,000 改為 50,000 美金
+                // 🟢 預設最低流動性要求由 150,000 改為 50,000 美金
                 const dynamicMinLiquidity = stratParams?.min_liquidity || 50000; 
 
                 const pools = await this.fetchTop100FromGecko();
@@ -134,7 +135,7 @@ const trendingMonitorService = {
 
                     top100Array.push({ ...baseData, rank: currentRank });
 
-                    // 🟢 修正：放寬 Rank 要求，由 Rank 1 至 Rank 100 全數納入考慮
+                    // 🟢 放寬 Rank 要求，由 Rank 1 至 Rank 100 全數納入考慮
                     if (currentRank >= 1 && currentRank <= 100 && liquidityUsd >= dynamicMinLiquidity) {
                         const isBlacklisted = await redis.get(`scam_blacklist:${mintAddress}`);
                         if (isBlacklisted) {
@@ -148,6 +149,7 @@ const trendingMonitorService = {
                             continue;
                         }
 
+                        // 檢查冷卻時間
                         const { data: tradeHistory } = await supabase
                             .from(`trade_history_${tableSuffix}`)
                             .select('created_at, realized_pnl_pct')
