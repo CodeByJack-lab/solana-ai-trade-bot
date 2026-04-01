@@ -14,7 +14,6 @@ const redis = new Redis(config.cache.redisUrl);
 const redisSub = new Redis(config.cache.redisUrl); 
 
 // 引入 V9.1 解耦後的獨立路由
-const { aggregatorRouter } = require('./sourceAggregator');
 const { walletMonitorRouter } = require('./walletMonitor');
 const { securityGuard } = require('./securityGuard');
 const { routerService } = require('./router');
@@ -29,7 +28,6 @@ let cachedSolPriceUsd = 150;
 
 app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.1 系統正常運行中 (高併發優化版)'));
 
-app.use(aggregatorRouter);
 app.use(walletMonitorRouter);
 
 // ========================================================
