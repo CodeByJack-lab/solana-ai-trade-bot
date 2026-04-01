@@ -1,5 +1,5 @@
 // src/services/monitorService.js
-// 📝 檔案功能用途：V9.1.1 大本營樞紐與 0 延遲風控中心。掛載 Webhook 路由，接收 0 延遲報價與動能衰退拔線訊號，實作 Time-Stop 與養魚池熟成。
+// 📝 檔案功能用途：V9.1.9 終極風控樞紐。結合 Telegram Webhook、LP 驟降逃生、100% 強制翻本、1 分鐘瀑布防線、無差別 Time-Stop、滿倉節流，以及「主動清道夫」清除殭屍倉位。
 
 const express = require('express');
 const cors = require('cors');
@@ -24,7 +24,7 @@ app.use(express.json());
 let globalSysConfig = { is_running: true };
 let cachedSolPriceUsd = 150;
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.1 系統正常運行中 (5分鐘養魚池版)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.9 系統正常運行中 (主動清道夫 + 防 Rug 拔線版)'));
 
 app.use(walletMonitorRouter);
 
@@ -81,52 +81,87 @@ app.post('/webhook/telegram', async (req, res) => {
 });
 
 // ========================================================
-// 🎯 核心：0 延遲持倉秒斬與動能衰退防線
+// 🎯 核心風控：0 延遲監控與 LP 拔線邏輯 (記憶體防跳頻版)
 // ========================================================
-const priceHistory1Min = new Map(); 
+const tokenStateRadar = new Map(); 
 
-async function handleZeroLatencyCheck(mint, currentPriceSol, portfolio) {
+async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd, portfolio) {
     if (!currentPriceSol || currentPriceSol <= 0) return;
     
     const pos = portfolio.positions.find(p => p.mint_address === mint);
     if (!pos) {
-        if (priceHistory1Min.has(mint)) priceHistory1Min.delete(mint);
+        tokenStateRadar.delete(mint);
         return; 
     }
 
     const now = Date.now();
-    if (!priceHistory1Min.has(mint)) priceHistory1Min.set(mint, []);
-    const history = priceHistory1Min.get(mint);
-    history.push({ price: currentPriceSol, time: now });
-    while (history.length > 0 && now - history[0].time > 60000) history.shift();
-    priceHistory1Min.set(mint, history);
 
-    const maxPriceLast60s = Math.max(...history.map(h => h.price));
+    // --- 🛡️ 數據初始化與狀態監控 ---
+    if (!tokenStateRadar.has(mint)) {
+        tokenStateRadar.set(mint, { 
+            maxLiquidity: currentLiquidityUsd || 0, 
+            halfSellTriggered: false,
+            priceHistory1Min: []
+        });
+    }
+    const radar = tokenStateRadar.get(mint);
+
+    // 1. 更新歷史最高流動性
+    if (currentLiquidityUsd && currentLiquidityUsd > radar.maxLiquidity) {
+        radar.maxLiquidity = currentLiquidityUsd;
+    }
+
+    // 2. 更新 1 分鐘價格軌跡 (瀑布防線用)
+    radar.priceHistory1Min.push({ price: currentPriceSol, time: now });
+    while (radar.priceHistory1Min.length > 0 && now - radar.priceHistory1Min[0].time > 60000) {
+        radar.priceHistory1Min.shift();
+    }
+    const maxPriceLast60s = Math.max(...radar.priceHistory1Min.map(h => h.price));
     const dropFrom1MinHigh = ((currentPriceSol - maxPriceLast60s) / maxPriceLast60s) * 100;
-    
-    const pnlPct = (((currentPriceSol - pos.entry_price_sol) * pos.quantity) / (pos.entry_price_sol * pos.quantity)) * 100;
-    
-    if (currentPriceSol > pos.highest_price_sol) {
-        if (currentPriceSol / (pos.highest_price_sol || pos.entry_price_sol) < 50) { 
-            pos.highest_price_sol = currentPriceSol;
-            const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
-            supabase.from(`active_positions_${tableSuffix}`).update({ highest_price_sol: currentPriceSol }).eq('mint_address', pos.mint_address).then().catch(()=> {});
+
+    const pnlPct = ((currentPriceSol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
+    const isHalfSold = pos.strategy_type?.includes('HALF_SOLD') || radar.halfSellTriggered;
+
+    let action = 'HOLD';
+    let reason = '';
+    let sellFraction = 1.0;
+
+    // ==========================================
+    // 🚨 優先級 1：Rug Pull 拔線 (LP 抽走 40%)
+    // ==========================================
+    if (currentLiquidityUsd && radar.maxLiquidity > 5000) { 
+        if (currentLiquidityUsd < radar.maxLiquidity * 0.60) {
+            action = 'SELL';
+            sellFraction = 1.0;
+            reason = `🛑 RUG PULL 拔線：流動性由 $${radar.maxLiquidity.toFixed(0)} 暴跌至 $${currentLiquidityUsd.toFixed(0)} (流失 > 40%)`;
         }
     }
 
-    const drawdownFromHigh = ((currentPriceSol - pos.highest_price_sol) / pos.highest_price_sol) * 100;
-    const highestPnlPct = ((pos.highest_price_sol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
-    const isHalfSold = pos.strategy_type && pos.strategy_type.includes('HALF_SOLD');
+    // ==========================================
+    // 🎯 優先級 2：100% 強制翻本 (適用於 ALL 幣種)
+    // ==========================================
+    if (action === 'HOLD' && !isHalfSold && pnlPct >= 100) {
+        action = 'SELL';
+        sellFraction = 0.5; // 賣出 50%
+        radar.halfSellTriggered = true; // 記憶體防跳頻
+        reason = `🎯 翻本機制：PnL 達 +${pnlPct.toFixed(0)}%，回收 50% 本金 (零風險持倉)`;
+    }
 
-    let action = 'HOLD'; let reason = ''; let sellFraction = 1.0; 
-    
+    // ==========================================
+    // 🚨 優先級 3：1 分鐘極速瀑布防線
+    // ==========================================
+    if (action === 'HOLD' && dropFrom1MinHigh <= -15) {
+        action = 'SELL'; 
+        reason = `🚨 觸發瀑布防線：1 分鐘內極速插水 ${dropFrom1MinHigh.toFixed(2)}%`;
+    }
+
+    // ==========================================
+    // ⏱️ 優先級 4：無差別 Time-Stop 時間止損
+    // ==========================================
     const timeStopMins = config?.trade?.timeStopMinutes || 30;
     const timeStopTarget = config?.trade?.timeStopProfitTarget || 15;
-    const stopLossLimit = config?.trade?.stopLossPct || -15; 
-    const tpTrigger = 50;      
-    const pullbackTolerance = 20; 
-    
-    if (pos.strategy_type.includes('TIMESTOP') && pos.created_at) {
+    // 移除了 strategy_type 的限制，所有幣一視同仁
+    if (action === 'HOLD' && pos.created_at) {
         const ageMins = (now - new Date(pos.created_at).getTime()) / 60000;
         if (ageMins >= timeStopMins && pnlPct < timeStopTarget) {
             action = 'SELL';
@@ -134,62 +169,115 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, portfolio) {
         }
     }
 
-    let trailingTriggered = false;
-    let trailingReason = '';
-    const pnlDropPoints = highestPnlPct - pnlPct; 
-
-    if (highestPnlPct >= tpTrigger) {
-        if (pnlDropPoints >= pullbackTolerance) { 
-            trailingTriggered = true; 
-            trailingReason = `動態網格防線: 最高 +${highestPnlPct.toFixed(0)}%，回落 ${pullbackTolerance} 個利潤點鎖潤`; 
-        }
-    }
-
+    // ==========================================
+    // 📉 優先級 5：其他止損/止盈邏輯
+    // ==========================================
     if (action === 'HOLD') {
-        if (!isHalfSold && pnlPct >= 100) {
-            action = 'SELL'; sellFraction = 0.5; 
-            reason = `🎯 觸發硬止盈 (抽回本金)：利潤達 +${pnlPct.toFixed(2)}%，賣出 50% 鎖定本金！`;
-        } 
-        else if (dropFrom1MinHigh <= -15) {
-            action = 'SELL'; 
-            reason = `🚨 觸發瀑布防線：1 分鐘內極速插水 ${dropFrom1MinHigh.toFixed(2)}%`;
-        } 
-        else if (pnlPct <= stopLossLimit) {
-            action = 'SELL'; 
-            reason = `💥 觸發物理硬止損 (${pnlPct.toFixed(2)}% <= ${stopLossLimit}%)`;
-        } 
-        else if (trailingTriggered) {
-            action = 'SELL'; 
-            reason = `💰 ${trailingReason}`;
+        const highestPnlPct = (((pos.highest_price_sol || pos.entry_price_sol) - pos.entry_price_sol) / pos.entry_price_sol) * 100;
+        const stopLossLimit = config?.trade?.stopLossPct || -15;
+        
+        // 物理硬止損
+        if (pnlPct <= stopLossLimit) {
+            action = 'SELL';
+            reason = `💥 硬止損觸發: ${pnlPct.toFixed(1)}% <= ${stopLossLimit}%`;
         }
-        else if (drawdownFromHigh <= -30) {
-            action = 'SELL'; 
-            reason = `🚨 偵測到斷崖式崩盤 (高位回撤 ${drawdownFromHigh.toFixed(2)}%)`;
+        // 動態追蹤止損 (Trailing Stop)
+        else if (highestPnlPct >= 50 && (highestPnlPct - pnlPct) >= 20) {
+            action = 'SELL';
+            reason = `💰 獲利回撤保護: 高位 +${highestPnlPct.toFixed(0)}% 回落 20 點`;
         }
     }
 
+    // ==========================================
+    // ⚡ 執行區：鎖衝突優化
+    // ==========================================
     if (action === 'SELL') {
-        const lockKey = `sell_lock:${pos.mint_address}`;
-        const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
-        
-        if (!acquired) return;
+        const lockKey = `sell_lock:${mint}`;
+        const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
+        if (!acquired) return; 
 
-        priceHistory1Min.delete(pos.mint_address);
-        runSellPipeline(pos, currentPriceSol, reason, sellFraction).then(sellResult => {
-            if (sellResult && sellFraction === 0.5) {
+        try {
+            console.log(`🎬 [ACTION] ${reason}`);
+            await runSellPipeline(pos, currentPriceSol, reason, sellFraction);
+            
+            if (sellFraction === 0.5 && typeof sendTelegramAlert === 'function') {
                 sendTelegramAlert(`🎯 <b>零風險持倉達成！</b>\n🪙 代幣: $${pos.token_symbol}\n🔥 利潤達標，已成功賣出 50% 抽回全數本金！`);
             }
-        }).catch(err => console.error(`❌ [Zero Latency Error]`, err.message))
-          .finally(() => redis.del(lockKey));
+        } finally {
+            await redis.del(lockKey); 
+        }
+    } else {
+        // --- 📝 非同步更新最高價 (發射後不管，絕不阻塞風控) ---
+        if (currentPriceSol > (pos.highest_price_sol || 0)) {
+            pos.highest_price_sol = currentPriceSol;
+            const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
+            supabase.from(`active_positions_${tableSuffix}`)
+                .update({ highest_price_sol: currentPriceSol })
+                .eq('mint_address', mint)
+                .then()
+                .catch(()=>{}); 
+        }
     }
+}
+
+// ========================================================
+// 🧹 獨立主動清道夫 (Active Death Sweeper)
+// ========================================================
+function startActiveSweeper() {
+    console.log('🧹 [Sweeper] 主動清道夫已上線，每 60 秒巡邏清除殭屍倉位。');
+    
+    setInterval(async () => {
+        if (!globalSysConfig.is_running) return;
+        
+        const portfolio = getPortfolio();
+        const now = Date.now();
+        const timeStopMins = config?.trade?.timeStopMinutes || 30;
+        const timeStopTarget = config?.trade?.timeStopProfitTarget || 15;
+
+        for (const pos of portfolio.positions) {
+            if (!pos.created_at) continue;
+            
+            const ageMins = (now - new Date(pos.created_at).getTime()) / 60000;
+            const currentPrice = pos.highest_price_sol || pos.entry_price_sol;
+            const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
+            const isHalfSold = pos.strategy_type?.includes('HALF_SOLD');
+
+            let shouldSell = false;
+            let reason = '';
+
+            // 1. 無差別 Time-Stop (只要超過 30 分鐘，未達標就踢)
+            if (ageMins >= timeStopMins && pnlPct < timeStopTarget) {
+                shouldSell = true;
+                reason = `🧹 [主動清道夫] 滯留過久 (${ageMins.toFixed(0)} 分鐘)，判定為死魚盤，無差別清倉！`;
+            }
+
+            // 2. 終極殭屍防線：超過 120 分鐘 (2小時) 依然未翻本，強制火化！
+            if (ageMins >= 120 && !isHalfSold) {
+                shouldSell = true;
+                reason = `🧟 [主動清道夫] 殭屍幣超時 (${ageMins.toFixed(0)} 分鐘)，強制火化拔線！`;
+            }
+
+            if (shouldSell) {
+                const lockKey = `sell_lock:${pos.mint_address}`;
+                // 使用 Redis 鎖確保唔會同 WebSocket 風控撞車
+                const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
+                if (acquired) {
+                    console.log(`\n🚨 [Sweeper] 發現違規卡死倉位: $${pos.token_symbol} - ${reason}`);
+                    runSellPipeline(pos, currentPrice, reason, 1.0)
+                        .finally(() => redis.del(lockKey));
+                }
+            }
+        }
+    }, 60000); // 每 60 秒無差別巡視一次
 }
 
 // ========================================================
 // 🌐 啟動大本營監控迴圈
 // ========================================================
 function startPositionMonitor() {
-    console.log('👁️ [Monitor] V9.1.1 0 延遲秒斬防線與養魚池熟成機制已啟動...');
+    console.log('👁️ [Monitor] V9.1.9 終極風控啟動：主動清道夫、LP 拔線、100% 翻本、手動斬倉與滿倉節流全數就位。');
     
+    // 定時同步系統狀態
     setInterval(async () => {
         try { 
             cachedSolPriceUsd = (await require('./priceService').getSolPriceInHKD()) / 7.8; 
@@ -197,6 +285,45 @@ function startPositionMonitor() {
             if (data) globalSysConfig.is_running = data.is_running;
         } catch(e) {}
     }, 10000);
+
+    // ========================================================
+    // 🎧 監聽 Dashboard 手動斬倉指令 (command_queue)
+    // ========================================================
+    supabase.channel('dashboard-commands')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'command_queue' }, async (payload) => {
+            const cmd = payload.new;
+            console.log(`\n📥 [Dashboard] 收到前端手動指令: ${cmd.command_type}`);
+            
+            const portfolio = getPortfolio();
+
+            if (cmd.command_type === 'SELL_SINGLE' && cmd.mint_address) {
+                const pos = portfolio.positions.find(p => p.mint_address === cmd.mint_address);
+                if (pos) {
+                    const lockKey = `sell_lock:${pos.mint_address}`;
+                    const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
+                    if (acquired) {
+                        console.log(`⚡ 正在執行手動單獨平倉: ${pos.token_symbol}`);
+                        runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, "🚨 Dashboard 手動平倉拔線", 1.0)
+                            .finally(() => redis.del(lockKey));
+                    }
+                }
+            } 
+            else if (cmd.command_type === 'SELL_ALL') {
+                console.log(`☢️ [核按鈕] 啟動一鍵全平倉！`);
+                const sellPromises = portfolio.positions.map(async (pos) => {
+                    const lockKey = `sell_lock:${pos.mint_address}`;
+                    const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
+                    if (acquired) {
+                        return runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, "🚨 Dashboard 一鍵全平倉", 1.0)
+                            .finally(() => redis.del(lockKey));
+                    }
+                });
+                await Promise.allSettled(sellPromises);
+            }
+            
+            // 執行完畢後清理隊列，保持資料庫乾淨
+            await supabase.from('command_queue').delete().eq('id', cmd.id).then().catch(()=>{});
+        }).subscribe();
 
     redisSub.subscribe('price_updates', 'emergency_sell');
     
@@ -206,17 +333,16 @@ function startPositionMonitor() {
         if (channel === 'price_updates') {
             try {
                 if (!globalSysConfig.is_running) return; 
-                
-                const { mint, priceUsd } = JSON.parse(message);
+                const { mint, priceUsd, liquidity } = JSON.parse(message);
                 const currentPriceSol = priceUsd / cachedSolPriceUsd; 
-                await handleZeroLatencyCheck(mint, currentPriceSol, portfolio);
+                // 傳入流動性數據進行 Rug 檢測
+                await handleZeroLatencyCheck(mint, currentPriceSol, liquidity || 0, portfolio);
             } catch (err) {}
         }
         
         if (channel === 'emergency_sell') {
             try {
                 if (!globalSysConfig.is_running) return;
-
                 const { mint, reason } = JSON.parse(message);
                 const pos = portfolio.positions.find(p => p.mint_address === mint);
                 
@@ -235,7 +361,7 @@ function startPositionMonitor() {
         }
     });
 
-    // 🌟 檢查 Nursery Queue 處理新進標的 (V9.1.1 5分鐘熟成機制)
+    // 🌟 檢查 Nursery Queue 處理新進標的 (V9.1.8 滿倉節流機制)
     let isNurseryRunning = false;
     setInterval(async () => {
         if (isNurseryRunning || !globalSysConfig.is_running) return;
@@ -249,12 +375,25 @@ function startPositionMonitor() {
             const ripeTokens = await redis.zrangebyscore('v9_nursery_queue', 0, fiveMinsAgo, 'LIMIT', 0, 5);
             
             if (ripeTokens.length > 0) {
-                // 從 Queue 中移除
+                // 無論滿唔滿倉，都要將佢哋從 Queue 移除，防止過期垃圾塞爆 Redis
                 await redis.zrem('v9_nursery_queue', ...ripeTokens);
 
-                console.log(`\n🐟 [Nursery] 捕獲 ${ripeTokens.length} 隻新幣已在保溫池養足 5 分鐘，出池進行 100 分量化安檢...`);
+                // 🛑 節流閘口：檢查當前 Meme 倉位是否已滿
+                const portfolio = getPortfolio();
+                const { data: dbConfig } = await supabase.from('system_config').select('max_meme_positions').eq('id', 1).single();
+                const maxMeme = dbConfig?.max_meme_positions || 0;
+                
+                // 計算現有 Meme 數量 (包括 NEWBORN 及 HALF_SOLD 狀態)
+                const currentMemeCount = portfolio.positions.filter(p => p.strategy_type.includes('MEME') || p.strategy_type.includes('NEWBORN')).length;
 
-                // 並行執行 100 分量化安檢
+                if (currentMemeCount >= maxMeme) {
+                    // 滿倉！直接 Return，絕對唔 Call API！
+                    console.log(`🛑 [節流閘口] Meme 倉位已滿 (${currentMemeCount}/${maxMeme})，自動捨棄 ${ripeTokens.length} 隻新幣，節省 API 資源！`);
+                    return; 
+                }
+
+                console.log(`\n🐟 [Nursery] 倉位充足，捕獲 ${ripeTokens.length} 隻新幣已養足 5 分鐘，出池進行安檢...`);
+
                 const evalPromises = ripeTokens.map(async (mint) => {
                     try {
                         const secResult = await securityGuard.calculateQuantScore(mint, 'NEWBORN');
@@ -271,13 +410,14 @@ function startPositionMonitor() {
         } finally {
             isNurseryRunning = false;
         }
-    }, 10000); // 每 10 秒檢查一次是否有熟成的幣
+    }, 10000); 
 }
 
 function startMarketMonitor() {
     app.listen(process.env.PORT || 8080, '0.0.0.0', () => {
-        console.log('🔄 [System] 啟動 V9.1 獨立 Webhook 伺服器與風控中心...');
+        console.log('🔄 [System] 啟動 V9.1.9 獨立 Webhook 伺服器與風控中心...');
         startPositionMonitor();
+        startActiveSweeper(); // 👈 啟動主動清道夫
     });
 }
 

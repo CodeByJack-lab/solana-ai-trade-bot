@@ -1,5 +1,5 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V9.1 100分量化安檢中樞。實作「4 維度文字快篩」、「實體防偽白名單」與「OFI 動能質量驗證」，精準裁決分數。
+// 📝 檔案功能用途：V9.1.7 100分量化安檢中樞。實作「4 維度文字快篩」、「實體防偽白名單」、「藍籌鐵閘過濾」與「OFI 動能質量驗證」，精準裁決分數。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -109,21 +109,32 @@ class SecurityGuard {
     }
 
     /**
-     * 🎯 V9.1 量化 100 分核心引擎
+     * 🎯 V9.1.7 量化 100 分核心引擎 (加入白名單鐵閘)
      */
     async calculateQuantScore(mint, type = 'NEWBORN') {
+        // 🛡️ [新增] V9.1.7 藍籌白名單鐵閘 (只針對 TRENDING 策略，在 Call API 前攔截以節省資源)
+        if (type === 'TRENDING' && config.trade.enableTrendingWhitelist) {
+            const whitelist = config.trade.trendingWhitelist || [];
+            if (!whitelist.includes(mint)) {
+                console.log(`🛡️ [Whitelist Guard] 拒絕進入：${mint.substring(0,6)} 不在藍籌白名單內！`);
+                return { 
+                    numeric_score: 0, 
+                    isSafe: false, 
+                    reason: `🛑 藍籌鐵閘攔截: 不在 Trending 專屬白名單內，已自動過濾。`,
+                    marketData: null
+                };
+            }
+        }
+
         const marketData = await this._fetchMarketData(mint);
         if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取報價數據', marketData: null };
 
-        // 🌟 [V9.1.6 核心加強] 終極實體白名單：針對重災區，指定幣種只認可唯一真品地址
+        // 🌟 [V9.1.6 核心加強] 終極實體防偽：針對重災區，指定幣種只認可唯一真品地址
         const VERIFIED_TOKENS = {
             'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au'
-            // 以後如果你再發現有其他幣被瘋狂 Clone，可以直接加喺度！例如：
-            // 'TRUMP': '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN'
         };
 
         const upperSymbol = marketData.symbol.toUpperCase();
-        // 如果呢個符號喺白名單入面，但地址唔對路 -> 100% 假狗！
         if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) {
             console.log(`🛡️ [Fake Shield] 觸發終極防偽！秒殺假冒 ${upperSymbol} (${mint})`);
             return { 

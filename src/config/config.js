@@ -72,6 +72,15 @@ const config = {
         slippageBuyBps: 250,     // 買入滑點硬鎖死 2.5%
         slippageSellBps: 1500,   // 賣出常規滑點放寬至 15%
         slippagePanicBps: 5000,  // 緊急逃生/崩盤拔線滑點解鎖至 50%
+
+        // 🛡️ V9.1.7 藍籌白名單鐵閘 (僅套用於 TRENDING 策略)
+        enableTrendingWhitelist: true, // true = 開啟白名單模式, false = 關閉
+        trendingWhitelist: [
+            "EKpQGSJtjMFqKZ9KQanUKKcPiUhUhHG23kLfnB2WbfaE", // WIF
+            "7GCihgDB8fe6KNjn2BYbvS1DNgT2XJ1hBAnrJ11qpump", // POPCAT
+            "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", // BONK
+            // 👇 指揮官，請喺度繼續加你想狙擊嘅 Top 100 幣種 Mint Address (注意要加雙引號同逗號)
+        ],
     },
 
     // ==========================================
@@ -96,7 +105,8 @@ const config = {
         alchemy: { apiKey: getEnv('ALCHEMY_API_KEY'), url: getEnv('ALCHEMY_RPC_URL') }
     },
     external: {
-        jupiterApiKey: getEnv('JUPITER_API_KEY'),
+        jupiterApiKey: getEnv('JUPITER_API_KEY', true), // 🛡️ 轉為必要變數，確保防封鎖
+        jupiterBaseUrl: getEnv('JUPITER_URL', false, 'https://quote-api.jup.ag'), // 🛡️ 補回 Base URL 彈性
         birdeyeApiKey: getEnv('BIRDEYE_API_KEY'),
         coingeckoApiKey: getEnv('COINGECKO_API_KEY')
     },

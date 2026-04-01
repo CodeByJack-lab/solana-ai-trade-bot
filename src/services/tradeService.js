@@ -1,5 +1,5 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：交易執行大腦。負責對接報價 API、管理雙軌倉位額度、實裝不對稱滑點並攔截連輸黑名單。
+// 📝 檔案功能及用途：交易執行大腦。實裝 V9.1.7 階梯式盲狙 (5%, 10%, 15%, 20%)、RugCheck 買入前防線與不對稱滑點。
 
 const { getPortfolio, updateCache } = require('./portfolioService');
 const { supabase } = require('../config/supabase'); 
@@ -74,6 +74,28 @@ async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     });
 }
 
+// 🛡️ V9.1.6 買入前最終防線：調用 RugCheck.xyz API
+async function checkRugcheckApi(mintAddress) {
+    try {
+        console.log(`🔍 [RugCheck] 正在對 ${mintAddress.substring(0,6)} 進行買入前最終防線掃描...`);
+        const res = await axios.get(`https://api.rugcheck.xyz/v1/tokens/${mintAddress}/report/summary`, { timeout: 6000 });
+        const report = res.data;
+
+        if (report?.risks && report.risks.length > 0) {
+            const dangerRisks = report.risks.filter(r => r.level === 'danger');
+            if (dangerRisks.length > 0) {
+                console.warn(`🚨 [RugCheck] 攔截！發現致命風險: ${dangerRisks.map(r => r.name).join(', ')}`);
+                return false; 
+            }
+        }
+        console.log(`✅ [RugCheck] 掃描通過，LP 安全，准許放行！`);
+        return true;
+    } catch (err) {
+        console.warn(`⚠️ [RugCheck] API 無回應或超時，為免錯失機會，預設放行 (${err.message})`);
+        return true; 
+    }
+}
+
 // 🚀 V9.1.4 升級版報價核心：智能路由切換 + 錯誤診斷
 async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageBps = null) {
     try {
@@ -94,7 +116,6 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
         const defaultSlippage = isBuying ? 250 : 1500;
         const SLIPPAGE_BPS = customSlippageBps !== null ? customSlippageBps : defaultSlippage; 
 
-        // 🛡️ 智能路由切換：有 Key 用 VIP，無 Key 用 Public
         let baseUrl = 'https://quote-api.jup.ag/v6'; 
         let endpoint = '/quote';
         const headers = {};
@@ -104,7 +125,6 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
             headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
         }
 
-        // 加入 onlyDirectRoutes=false 強制尋找跨池報價
         const url = `${baseUrl}${endpoint}?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${SLIPPAGE_BPS}&onlyDirectRoutes=false`;
 
         const response = await axios.get(url, { headers, timeout: 8000 });
@@ -123,13 +143,12 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
         return { pricePerToken: pricePerTokenSol, rawResponse: response.data, decimals };
 
     } catch (err) {
-        // 🔍 終極診斷雷達：精確捕捉 Jupiter 報錯原因，不再默默吞噬 Error
         if (err.response) {
             const status = err.response.status;
             const errorMsg = err.response.data?.error || err.response.data?.message || '未知錯誤';
             
             if (status === 400) {
-                // 通常是路徑未建立，安靜 return null 等待外層 Retry
+                // 路徑未建立，安靜 return null 等待外層 Retry
             } else if (status === 429) {
                 console.error(`🚨 [Jupiter] 頻率限制 (429)！API 請求過快或額度爆滿。`);
             } else if (status === 401 || status === 403) {
@@ -199,31 +218,36 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🚀 V9.1.5 極簡狙擊等候環 (單發點射，最多等 10 次，防假幣死纏爛打)
+    const isRugSafe = await checkRugcheckApi(mintAddress);
+    if (!isRugSafe) {
+        console.log(`❌ [Execution] ${tokenSymbol} 未能通過 RugCheck 最終防線，取消買入。`);
+        return false;
+    }
+
+    // 🚀 V9.1.7 階梯式盲狙等候環 (最多 4 次，滑點 5% -> 10% -> 15% -> 20%)
     let quoteData = null;
-    const maxRetries = 10; // 👈 延長至 10 次，給予真幣 20 秒建池時間
-    const snipeSlippage = 500; // 🎯 預設使用 5% 滑點盲狙
+    const slippageSteps = [500, 1000, 1500, 2000]; // 🎯 5%, 10%, 15%, 20% 滑點
+    const maxRetries = slippageSteps.length;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const currentSlippage = slippageSteps[attempt - 1];
         
-        // 每次嘗試只問一次
-        quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, snipeSlippage);
+        quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, currentSlippage);
         
         if (quoteData) {
-            if (attempt > 1) console.log(`✅ [Execution] Jupiter 終於載入新池路線！`);
+            if (attempt > 1) console.log(`✅ [Execution] 於 ${currentSlippage / 100}% 滑點成功捕獲 Jupiter 路由！`);
             break; 
         }
 
         if (attempt < maxRetries) {
-            console.log(`⏳ [Execution] Jupiter 尚未建立此幣路由 (嘗試 ${attempt}/${maxRetries})，嚴格等候 2 秒再問...`);
+            console.log(`⏳ [Execution] Jupiter 無報價 (嘗試 ${attempt}/${maxRetries}，滑點 ${currentSlippage / 100}%)，放寬滑點並等候 2 秒...`);
             await new Promise(r => setTimeout(r, 2000));
         }
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 嘗試 ${maxRetries} 次 (共 20 秒) 後 Jupiter 依然無報價，判定為無流動性假池，果斷放棄。`);
+        console.log(`❌ [Execution] 嘗試 4 次階梯滑點 (最高 20%) 後依然無報價，放棄狙擊 (不盲目追高)。`);
         
-        // 🛡️ 終極防線：無路由假幣打入冷宮 24 小時，防無限 Loop 鞭屍
         try {
             const Redis = require('ioredis');
             const tempRedis = new Redis(configEnv.cache.redisUrl);
@@ -358,7 +382,16 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     }
 
     if (!quoteData) {
-        console.error(`❌ [Fatal] 已達極限滑點仍無法取得報價，放棄本次平倉。`);
+        console.error(`❌ [Fatal] 已達極限滑點仍無法取得報價，放棄一般平倉。`);
+        
+        // ☠️ 終極 Rug Pull 判定與撇帳機制
+        // 如果係因為逃生/止損而賣出，但連 50% 滑點都搵唔到一條生路，代表個池已經乾晒 (Rugged)
+        if (isStopLoss || reason.includes('RUG')) {
+            console.log(`☠️ [RUG CONFIRMED] 逃生失敗！Jupiter 無法找到任何退路，判定為資金池已被抽乾！`);
+            // 自動執行 -100% 撇帳，踢出持倉列表
+            await forceWriteOff(mintAddress, `☠️ 慘遭 Rug Pull (流動性歸零)，強制撇帳 -100%`);
+        }
+        
         return false; 
     }
 
