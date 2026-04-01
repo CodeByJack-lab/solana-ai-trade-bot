@@ -1,5 +1,5 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V9.1 降級版 AI 議事廳。對接 keyRotator 資源池，針對 60-89 分區間進行信心度過濾與 ±20 分的微調，若 AI 癱瘓則降級為純量化。
+// 📝 檔案功能用途：V9.1.5 降級防彈版 AI 議事廳。對接 keyRotator 資源池，利用正則提取 JSON 解決 400 報錯。
 
 const { keyRotator } = require('./keyRotator');
 const config = require('../config/config');
@@ -32,7 +32,7 @@ Data Points:
 - 1H Price Change: ${marketData.h1.toFixed(2)}%
 
 Task: Adjust the base score based purely on the data momentum and safety. 
-Output STRICTLY IN JSON FORMAT: 
+Output ONLY a valid JSON object. Do not use markdown formatting, do not explain anything outside the JSON.
 {
     "confidence": <float between 0.0 and 1.0>,
     "adjustment": <integer between -20 and +20>,
@@ -40,7 +40,7 @@ Output STRICTLY IN JSON FORMAT:
 }`;
 
         try {
-// 將請求推入 1秒延遲 與 429輪替 的資源池
+            // 將請求推入 1秒延遲 與 429輪替 的資源池
             const aiResult = await keyRotator.enqueueRequest(async (apiKey) => {
                 
                 // 🛡️ 終極防彈洗底：清走所有單雙引號同前後空格
@@ -49,26 +49,34 @@ Output STRICTLY IN JSON FORMAT:
                 // 自動判別 Groq (gsk_...) 或 Mistral 金鑰
                 const isGroq = cleanKey.startsWith('gsk_');
                 const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
-                // 將 Mistral 降級為免費 API 肯定支援的 mistral-small-latest 或 open-mixtral-8x7b
+                // 將 Mistral 降級為免費 API 肯定支援的 mistral-small-latest
                 // Groq 換成更穩定的 llama3-70b-8192 確保高頻不死
                 const modelName = isGroq ? 'llama3-70b-8192' : 'mistral-small-latest';
 
                 const providerName = isGroq ? 'GROQ' : 'MISTRAL';
                 console.log(`[KeyRotator] 🔫 系統抽中 ${providerName} (${modelName}) 進行審批...`);
 
-                const res = await axios.post(apiUrl, {
+                const payload = {
                     model: modelName,
-                    messages: [{ role: "user", content: prompt }],
-                    response_format: { type: "json_object" }
-                }, {
+                    messages: [{ role: "user", content: prompt }]
+                    // 🚨 移除了 response_format，防止 Mistral 等模型彈 400 Bad Request
+                };
+
+                const res = await axios.post(apiUrl, payload, {
                     headers: { 
-                        'Authorization': `Bearer ${cleanKey}`,  // 👈 用洗乾淨嘅 Key
+                        'Authorization': `Bearer ${cleanKey}`,
                         'Content-Type': 'application/json' 
                     },
                     timeout: 8000 // 8秒極速 Timeout
                 });
 
-                return JSON.parse(res.data.choices[0].message.content);
+                const rawText = res.data.choices[0].message.content;
+                
+                // 🛠️ 暴力正則提取：無視 AI 前後廢話，硬抽 { ... } 出嚟
+                const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+                if (!jsonMatch) throw new Error("AI 未回傳有效 JSON 格式");
+                
+                return JSON.parse(jsonMatch[0]);
             });
 
             const confidence = parseFloat(aiResult.confidence) || 0;
@@ -101,12 +109,12 @@ Output STRICTLY IN JSON FORMAT:
             };
 
         } catch (err) {
-            // 若觸發 ALL_KEYS_ON_COOLDOWN 或網路異常，平滑降級 (Graceful Degradation)
-            console.warn(`⚠️ [Consensus] AI 資源池全數冷卻或超時，降級為純量化分數: ${err.message}`);
+            // 若觸發 ALL_KEYS_ON_COOLDOWN、網路異常或解析失敗，平滑降級 (Graceful Degradation)
+            console.warn(`⚠️ [Consensus] AI 資源池解析異常或全數冷卻，降級為純量化分數: ${err.message}`);
             return { 
                 buy: baseScore >= config.quant.rejectThreshold, 
                 score: baseScore, 
-                reason: "AI 資源池冷卻中，降級採用純量化結果" 
+                reason: "AI 資源池異常或解析失敗，降級採用純量化結果" 
             };
         }
     }
