@@ -181,7 +181,12 @@ class SourceAggregator {
         const targets = [PUMP_FUN_PROGRAM_ID, RAYDIUM_V4_PROGRAM_ID];
         
         // 1. Primary: Helius WebSocket
-        const heliusWsUrl = config.rpc.helius1.apiKey ? `wss://atlas-mainnet.helius-rpc.com?api-key=${config.rpc.helius1.apiKey}` : null;
+        let heliusWsUrl = null;
+        if (config.rpc.helius1.url) {
+            heliusWsUrl = config.rpc.helius1.url.replace('https://', 'wss://');
+        } else if (config.rpc.helius1.apiKey) {
+            heliusWsUrl = `wss://mainnet.helius-rpc.com/?api-key=${config.rpc.helius1.apiKey}`;
+        }
         this.connectWebSocket('Helius', heliusWsUrl, targets);
         
         // 2. Secondary: Official Solana Mainnet WebSocket (Free/Fallback)
