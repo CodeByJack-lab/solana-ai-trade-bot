@@ -199,12 +199,14 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🚀 V9.1.3 極簡狙擊等候環 (單發點射，告別 429 亂掃射)
+    // 🚀 V9.1.5 極簡狙擊等候環 (單發點射，最多等 10 次，防假幣死纏爛打)
     let quoteData = null;
-    const maxRetries = 3; 
+    const maxRetries = 10; // 👈 延長至 10 次，給予真幣 20 秒建池時間
     const snipeSlippage = 500; // 🎯 預設使用 5% 滑點盲狙
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        
+        // 每次嘗試只問一次
         quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, snipeSlippage);
         
         if (quoteData) {
@@ -219,7 +221,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 嘗試 ${maxRetries} 次後 Jupiter 依然無報價，判定為無流動性假池，果斷放棄。`);
+        console.log(`❌ [Execution] 嘗試 ${maxRetries} 次 (共 20 秒) 後 Jupiter 依然無報價，判定為無流動性假池，果斷放棄。`);
         
         // 🛡️ 終極防線：無路由假幣打入冷宮 24 小時，防無限 Loop 鞭屍
         try {

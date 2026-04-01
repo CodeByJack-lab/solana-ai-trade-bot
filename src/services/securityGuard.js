@@ -1,5 +1,5 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V9.1 100分量化安檢中樞。實作「4 維度文字快篩」、「真假撞名打假」、「語系防線」與「OFI 動能質量驗證」。
+// 📝 檔案功能用途：V9.1 100分量化安檢中樞。實作「4 維度文字快篩」、「實體防偽白名單」與「OFI 動能質量驗證」，精準裁決分數。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -11,27 +11,14 @@ let activeProviderIdx = 0;
 
 class SecurityGuard {
     
+    /**
+     * 🕵️ 4 維度制度化文字快篩
+     */
     analyzeTextFeatures(symbol, name, description) {
         const fullText = `${symbol} ${name} ${description}`.toLowerCase();
         let result = { isFatal: false, safetyPenalty: 0, fomoPenalty: 0, requireAuthCheck: false, requireLpCheck: false, reasons: [] };
 
-        // 🛑 [V9.1.2 終極拔線] 全域 Ticker 物理黑名單 (包含常見穩定幣、LST及乞人憎死池)
-        const bannedSymbols = ['VDOR', 'TRUMP', 'USDT', 'USDC', 'DAI', 'PYUSD', 'JITOSOL', 'MSOL']; 
-        if (bannedSymbols.includes((symbol || '').toUpperCase())) {
-            result.isFatal = true;
-            result.reasons.push(`⛔ 系統級物理黑名單封殺 ($${symbol})`);
-            return result; // 只要係黑名單，直接 0 分抬走！
-        }
-
-        // 🛑 [V9.1.3 語系防線] 攔截所有包含 中/日/韓/俄/泰/阿拉伯文 的代幣 (允許 Emoji)
-        // 覆蓋: \u4E00-\u9FFF(中文), \u3040-\u30FF(日文), \uAC00-\uD7AF(韓文), \u0400-\u04FF(俄文) 等
-        const nonEnglishRegex = /[\u0400-\u04FF\u0600-\u06FF\u0E00-\u0E7F\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
-        if (nonEnglishRegex.test(symbol) || nonEnglishRegex.test(name)) {
-            result.isFatal = true;
-            result.reasons.push(`⛔ 小圈子語系封殺: 包含非英文字符 (${symbol} / ${name})`);
-            return result;
-        }
-
+        // 1. 空投/免費 (Airdrop/Promo) -> 直接封殺
         const airdropPatterns = [/free mint/i, /free claim/i, /airdrop/i, /claim now/i, /connect wallet/i];
         for (const p of airdropPatterns) {
             if (p.test(fullText)) {
@@ -41,11 +28,13 @@ class SecurityGuard {
             }
         }
 
+        // 假鎖定聲稱 -> 必須觸發鏈上 LP 驗證
         if (/lp locked/i.test(fullText) || /burned lp/i.test(fullText)) {
             result.requireLpCheck = true;
             result.reasons.push('聲稱鎖定 LP (需鏈上核實)');
         }
 
+        // 2. 供應分配/私募 (Supply/Allocation) -> 扣安全分 30 分
         const allocationPatterns = [/presale/i, /private sale/i, /team token/i, /marketing wallet/i, /seed/i];
         for (const p of allocationPatterns) {
             if (p.test(fullText)) {
@@ -55,6 +44,7 @@ class SecurityGuard {
             }
         }
 
+        // 3. 權限控制 (Authority Control) -> 觸發深層權限檢查
         const authorityPatterns = [/mint authority/i, /freeze authority/i, /update authority/i, /we keep control/i];
         for (const p of authorityPatterns) {
             if (p.test(fullText)) {
@@ -63,11 +53,13 @@ class SecurityGuard {
             }
         }
 
+        // 4. FOMO / 情緒誘騙 (FOMO Marketing) -> 扣動能分 20 分
         const fomoPatterns = [/100x/i, /1000x/i, /to the moon/i, /guaranteed profit/i, /🚀/];
         let hasFomo = false;
         for (const p of fomoPatterns) {
             if (p.test(fullText)) hasFomo = true;
         }
+        // 表情轟炸
         const emojiMatches = fullText.match(/[\u{1F680}\u{1F525}\u{1F4A5}\u{1F4B0}]/gu);
         if (hasFomo || (emojiMatches && emojiMatches.length >= 5)) {
             result.fomoPenalty += 20;
@@ -116,15 +108,37 @@ class SecurityGuard {
         }
     }
 
+    /**
+     * 🎯 V9.1 量化 100 分核心引擎
+     */
     async calculateQuantScore(mint, type = 'NEWBORN') {
         const marketData = await this._fetchMarketData(mint);
         if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取報價數據', marketData: null };
+
+        // 🌟 [V9.1.6 核心加強] 終極實體白名單：針對重災區，指定幣種只認可唯一真品地址
+        const VERIFIED_TOKENS = {
+            'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au'
+            // 以後如果你再發現有其他幣被瘋狂 Clone，可以直接加喺度！例如：
+            // 'TRUMP': '6p6xgHyF7AeE6TZkSmFsko444wqoP15icUSqi2jfGiPN'
+        };
+
+        const upperSymbol = marketData.symbol.toUpperCase();
+        // 如果呢個符號喺白名單入面，但地址唔對路 -> 100% 假狗！
+        if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) {
+            console.log(`🛡️ [Fake Shield] 觸發終極防偽！秒殺假冒 ${upperSymbol} (${mint})`);
+            return { 
+                numeric_score: 0, 
+                isSafe: false, 
+                reason: `🛑 終極防偽攔截: 假冒 ${upperSymbol} 幣`, 
+                marketData 
+            };
+        }
 
         let score = 0;
         let reasons = [];
 
         // ==========================================
-        // 🛡️ Tier-0: 四維度文字快篩與終極打假
+        // 🛡️ Tier-0: 四維度文字快篩
         // ==========================================
         const textAnalysis = this.analyzeTextFeatures(marketData.symbol, marketData.name, marketData.description);
         if (textAnalysis.isFatal) {
@@ -132,26 +146,10 @@ class SecurityGuard {
         }
         if (textAnalysis.reasons.length > 0) reasons.push(...textAnalysis.reasons);
 
-        // 🛑 終極打假防線：撞名碰撞測試 (Fake Ticker Collision)
-        try {
-            const { supabase } = require('../config/supabase');
-            const { data: realCoin } = await supabase.from('trending_top100').select('mint_address').eq('token_symbol', marketData.symbol).maybeSingle();
-            
-            if (realCoin && realCoin.mint_address !== mint) {
-                return { numeric_score: 0, isSafe: false, reason: `🛑 仿冒幣攔截: 撞名真藍籌 $${marketData.symbol}，但合約地址不符！`, marketData };
-            }
-        } catch (dbErr) {}
-
         // ==========================================
         // 🛡️ Part 1: Core Defense (滿分 60 分)
         // ==========================================
         let coreScore = 0;
-
-        // 🛑 社交連結硬性要求 (防土狗)
-        if (!marketData.hasSocials) {
-            reasons.push('無任何社交連結 (極高危假池)');
-            coreScore -= 20; 
-        }
 
         const minLiq = type === 'TRENDING' ? 50000 : 5000; 
         if (marketData.liquidity >= minLiq) coreScore += 20;
@@ -161,7 +159,7 @@ class SecurityGuard {
         if (isContractSafe) coreScore += 20;
         else reasons.push('合約權限未放棄 (高危)');
 
-        coreScore += 20; 
+        coreScore += 20; // 基礎分
         coreScore = Math.max(0, coreScore - textAnalysis.safetyPenalty);
 
         // ==========================================
@@ -172,23 +170,32 @@ class SecurityGuard {
         if (marketData.h1 > 10) momentumScore += 15;
         else if (marketData.h1 > 0) momentumScore += 5;
 
-        if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; 
+        if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; // 5分
 
+        // 🌊 偽 OFI 動能質量檢查 (三道關卡)
         const totalTxs = marketData.buys5m + marketData.sells5m;
         if (totalTxs > 0) {
             const volOFI = (marketData.buys5m - marketData.sells5m) / totalTxs;
             const countRatio = marketData.sells5m > 0 ? (marketData.buys5m / marketData.sells5m) : 2;
             const avgTrade = marketData.volume5m / totalTxs;
 
+            // 1. 🧟 殭屍刷量過濾 (單筆均價極低)
+            if (totalTxs >= 50 && avgTrade < 10) {
+                return { numeric_score: 0, isSafe: false, reason: `🛑 偵測到殭屍刷量行為 (平均單筆 $${avgTrade.toFixed(2)})`, marketData };
+            }
+
+            // 2. 刷量檢測 (Wash Trading)
             if (totalTxs >= 20 && avgTrade < 20) {
                 reasons.push('疑似納米刷量機器人 (動能無效)');
             } 
+            // 3. OFI 質量達標 -> 額外加分
             else if (volOFI > 0.3 && countRatio > 1.5) {
                 momentumScore += 15;
                 reasons.push(`OFI 動能強勁 (VolOFI:${volOFI.toFixed(2)}, Ratio:${countRatio.toFixed(1)})`);
             }
         }
 
+        // 施加 FOMO 懲罰
         momentumScore = Math.max(0, momentumScore - textAnalysis.fomoPenalty);
 
         score = coreScore + momentumScore;

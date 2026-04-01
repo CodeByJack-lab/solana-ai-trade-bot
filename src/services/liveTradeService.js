@@ -70,30 +70,45 @@ async function pollSignatureStatus(signature, timeoutMs = 15000) {
     throw new Error('Jito Bundle 確認超時 (Transaction Dropped or Pending)');
 }
 
+// 🚀 升級版：加入 1.1 秒精確破盾重試 (Micro-Retry) 防 429 斷線
 async function getJupiterSwapTransaction(quoteResponse) {
-    try {
-        if (!wallet) return null;
-        const baseUrl = (configEnv.external.jupiterBaseUrl || 'https://quote-api.jup.ag').replace(/\/$/, '');
-        const endpoint = baseUrl.includes('quote-api') ? '/v6/swap' : '/swap/v1/swap';
-        
-        const config = { headers: {} };
-        if (configEnv.external.jupiterApiKey) {
-            config.headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
-        }
-
-        const response = await axios.post(`${baseUrl}${endpoint}`, {
-            quoteResponse,
-            userPublicKey: wallet.publicKey.toString(),
-            wrapAndUnwrapSol: true, 
-            dynamicComputeUnitLimit: true, 
-            prioritizationFeeLamports: "auto" 
-        }, config);
-
-        return response.data.swapTransaction;
-    } catch (err) {
-        console.error(`❌ [Jupiter Swap] 構建交易失敗:`, err.response?.data?.error || err.message);
-        return null;
+    if (!wallet) return null;
+    const baseUrl = (configEnv.external.jupiterBaseUrl || 'https://quote-api.jup.ag').replace(/\/$/, '');
+    const endpoint = baseUrl.includes('quote-api') ? '/v6/swap' : '/swap/v1/swap';
+    
+    const config = { headers: {} };
+    if (configEnv.external.jupiterApiKey) {
+        config.headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
     }
+
+    const payload = {
+        quoteResponse,
+        userPublicKey: wallet.publicKey.toString(),
+        wrapAndUnwrapSol: true, 
+        dynamicComputeUnitLimit: true, 
+        prioritizationFeeLamports: "auto" 
+    };
+
+    const maxRetries = 3; // 最多死纏爛打 3 次
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            const response = await axios.post(`${baseUrl}${endpoint}`, payload, config);
+            return response.data.swapTransaction;
+        } catch (err) {
+            const status = err.response?.status;
+            console.warn(`⚠️ [Jupiter Swap] 構建交易失敗 (嘗試 ${attempt}/${maxRetries}): Status ${status} - ${err.response?.data?.error || err.message}`);
+            
+            if (attempt === maxRetries) {
+                console.error(`❌ [Jupiter Swap] 已達最大重試次數，徹底放棄構建。`);
+                return null;
+            }
+            
+            // 🛡️ 精確 1.1 秒 (1100 毫秒)，完美跨越 API Rate Limit 懲罰區間！
+            console.log(`⏳ 觸發 1.1 秒精確冷卻以重置 API 視窗...`);
+            await new Promise(r => setTimeout(r, 1100)); 
+        }
+    }
+    return null;
 }
 
 // 🎯 接收 reason 參數，啟動智能環境感知與多路備援
