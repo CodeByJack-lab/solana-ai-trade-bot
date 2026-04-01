@@ -203,7 +203,24 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 等候 40 秒後 Jupiter 依然無報價 (未上線或 API 擁堵)，果斷放棄以保全彈藥。`);
+        console.log(`❌ [Execution] 等候 40 秒後 Jupiter 依然無報價 (可能為無流動性假池)，果斷放棄。`);
+        
+        // 🛡️ 終極防線：無路由假幣打入冷宮 24 小時，防無限 Loop 鞭屍
+        try {
+            const Redis = require('ioredis');
+            const tempRedis = new Redis(configEnv.cache.redisUrl);
+            await tempRedis.set(`scam_blacklist:${mintAddress}`, 'UNROUTABLE', 'EX', 86400);
+            tempRedis.quit();
+            
+            console.log(`🗑️ [Blacklist] 已將 $${tokenSymbol} 加入 24 小時無法路由黑名單，停止盲目追擊。`);
+
+            if (strategyType.includes('TRENDING')) {
+                await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+            }
+        } catch (redisErr) {
+            console.error(`⚠️ [Blacklist Error] 無法寫入黑名單: ${redisErr.message}`);
+        }
+        
         return false;
     }
     

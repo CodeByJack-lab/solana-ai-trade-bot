@@ -99,6 +99,9 @@ class SecurityGuard {
         }
     }
 
+    /**
+     * 🎯 V9.1 量化 100 分核心引擎
+     */
     async calculateQuantScore(mint, type = 'NEWBORN') {
         const marketData = await this._fetchMarketData(mint);
         if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取報價數據', marketData: null };
@@ -133,7 +136,7 @@ class SecurityGuard {
         // 🛑 社交連結硬性要求 (防土狗)
         if (!marketData.hasSocials) {
             reasons.push('無任何社交連結 (極高危假池)');
-            coreScore -= 20; // 重罰 20 分，防止進入 Fast-Track
+            coreScore -= 20; 
         }
 
         const minLiq = type === 'TRENDING' ? 50000 : 5000; 
