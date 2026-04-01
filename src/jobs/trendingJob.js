@@ -1,12 +1,11 @@
 // src/jobs/trendingJob.js
-// 📝 檔案功能用途：數學雷達排程器。動態讀取 DB 的 V/L 階梯比例，利用 DexScreener 實時報價精確喚醒 AI。
+// 📝 檔案功能用途：V9.1 數學雷達排程器。動態讀取 DB 的 V/L 階梯比例，利用 DexScreener 批量查價，精確喚醒 100 分量化漏斗與大腦分流器。
 
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
 const { securityGuard } = require('../services/securityGuard');
-const { executeBuy } = require('../services/tradeService');
-const { consensusService } = require('../services/consensusService');
-const { canBuyTrending } = require('../services/portfolioService'); 
+const { routerService } = require('../services/router');
+const { getPortfolio } = require('../services/portfolioService'); 
 const configEnv = require('../config/config'); 
 const { healthMonitor } = require('../services/healthMonitor');
 
@@ -44,12 +43,13 @@ const trendingJob = {
         isTrendingRunning = true;
 
         try {
-            if (!canBuyTrending()) return; 
+            const portfolio = getPortfolio();
+            if (!portfolio || (portfolio.mode !== 'LIVE' && portfolio.mode !== 'PAPER')) return;
 
-            const { data: config } = await supabase.from('system_config').select('is_running, trending_trade_amount_sol, trending_survival_score').eq('id', 1).single();
-            if (!config || !config.is_running) return;
+            const { data: sysConfig } = await supabase.from('system_config').select('is_running, trending_survival_score').eq('id', 1).single();
+            if (!sysConfig || !sysConfig.is_running) return;
 
-            const survivalScore = config.trending_survival_score || 60;
+            const survivalScore = sysConfig.trending_survival_score || 60;
 
             // 🧠 動態讀取 AI 策略參數內的 V/L 階梯設定
             const { data: stratParams } = await supabase.from('ai_strategy_params').select('dynamic_vl_tiers').eq('id', 3).single();
@@ -62,13 +62,49 @@ const trendingJob = {
             await redis.set('dex_priority_lock', 'TRENDING', 'EX', 120);
             console.log(`👑 [Trending VIP] 已鎖定資源，向 DexScreener 查詢 ${poolTokens.length} 隻保溫箱獵物...`);
 
+            // 🚀 V9.1 新增：自行實作 DexScreener Batch Fetch，每次查 30 隻，完美防 429
             const mintsArray = poolTokens.map(t => t.mint_address);
-            const batchMarketData = await securityGuard.getBatchMarketData(mintsArray);
+            const batchMarketData = {};
+            
+            for (let i = 0; i < mintsArray.length; i += 30) {
+                const batch = mintsArray.slice(i, i + 30);
+                try {
+                    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`, { timeout: 5000 });
+                    if (res.data && res.data.pairs) {
+                        for (const pair of res.data.pairs) {
+                            if (pair.chainId !== 'solana') continue;
+                            const mint = pair.baseToken.address;
+                            // 儲存流動性最高嗰個池嘅數據
+                            if (!batchMarketData[mint] || (pair.liquidity?.usd > batchMarketData[mint].liquidity)) {
+                                batchMarketData[mint] = {
+                                    h1: parseFloat(pair.priceChange?.h1) || 0,
+                                    volume5m: pair.volume?.m5 || 0,
+                                    liquidity: pair.liquidity?.usd || 0,
+                                    buys5m: pair.txns?.m5?.buys || 0,
+                                    sells5m: pair.txns?.m5?.sells || 0
+                                };
+                            }
+                        }
+                    }
+                } catch (err) {
+                    console.warn(`⚠️ [Trending] 批次查價失敗: ${err.message}`);
+                }
+                // 每次查完停 1 秒，防封鎖
+                await new Promise(r => setTimeout(r, 1000));
+            }
 
             let triggeredCount = 0;
 
             for (const token of poolTokens) {
                 const mintAddress = token.mint_address;
+                
+                // 檢查是否已持倉，已持倉則移出保溫箱
+                const isOwned = portfolio.positions.some(p => p.mint_address === mintAddress);
+                if (isOwned) {
+                    await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+                    continue;
+                }
+
                 const mData = batchMarketData[mintAddress];
                 if (!mData) continue; 
 
@@ -104,7 +140,9 @@ const trendingJob = {
                     console.log(`   - 1H 升幅: ${h1}% | 實際 5m 量/池比: ${liq > 0 ? ((vol5m/liq)*100).toFixed(2) : 0}% | 買/賣: ${buys}/${sells}`);
                     console.log(`======================================================\n`);
 
-                    const secResult = await securityGuard.checkAll(mintAddress, 'TRENDING');
+                    // 🛡️ V9.1 核心：呼叫 100 分量化漏斗
+                    const secResult = await securityGuard.calculateQuantScore(mintAddress, 'TRENDING');
+                    
                     if (!secResult.isSafe) {
                         console.log(`🗑️ [Trending Security] 安檢判定危險: ${secResult.reason}`);
                         await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
@@ -112,30 +150,31 @@ const trendingJob = {
                         continue; 
                     }
 
-                    const aiDecision = await consensusService.runMemeConsensus(mintAddress, secResult.marketData, { poolType: 'TRENDING', lastComment: token.last_ai_comment });
-                    const aiScore = (aiDecision.score !== undefined && aiDecision.score !== null && !isNaN(aiDecision.score)) ? Number(aiDecision.score) : 0;
+                    // 🚦 V9.1 核心：送入 Router 分流 (Fast-Track 或 AI 微調)
+                    const isBought = await routerService.routeSignal(mintAddress, 'TRENDING', secResult);
 
-                    if (aiDecision.buy) {
-                        const buyResult = await executeBuy(mintAddress, secResult.marketData.symbol, 'TRENDING_MOMENTUM', aiScore, aiDecision.reason, config.trending_trade_amount_sol || 0.1);
-                        if (buyResult) await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+                    if (isBought) {
+                        // 買入成功，踢出保溫箱
+                        await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     } else {
-                        if (aiScore >= survivalScore || aiDecision.decision === 'ONHOLD' || (aiDecision.reason && aiDecision.reason.includes('ONHOLD'))) {
-                            console.log(`⏳ [Trending] 潛力仍在 (分數: ${aiScore})，保留於保溫箱...`);
-                            await supabase.from('trending_pool').update({ last_ai_comment: aiDecision.reason, ai_score: aiScore, volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
+                        // 沒買入 (可能 AI 否決、環境矩陣攔截 或 倉位滿)
+                        if (secResult.numeric_score >= survivalScore) {
+                            console.log(`⏳ [Trending] 潛力仍在 (分數: ${secResult.numeric_score})，保留於保溫箱...`);
+                            await supabase.from('trending_pool').update({ ai_score: secResult.numeric_score, volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
                         } else {
-                            console.log(`🗑️ [Trending] 分數低於門檻 (${aiScore})，踢出並拉黑 24 小時！`);
+                            console.log(`🗑️ [Trending] 分數低於門檻 (${secResult.numeric_score} < ${survivalScore})，踢出並拉黑！`);
                             await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                             await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
                         }
                     }
                 } else {
+                    // 動能未觸發，更新狀態
                     await supabase.from('trending_pool').update({ volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
                 }
             }
 
             console.log(`👑 [Trending VIP] 巡邏完畢 (觸發: ${triggeredCount} / ${poolTokens.length})。`);
             healthMonitor.setStatus('Math_Radar', `🟢 剛巡邏 ${poolTokens.length} 隻 (觸發: ${triggeredCount})`);
-            await new Promise(r => setTimeout(r, 1000));
 
         } catch (err) {
             console.error(`❌ [Trending Job] 執行異常:`, err.message);
@@ -146,17 +185,15 @@ const trendingJob = {
         }
     },
 
-    /**
-     * 🚀 接收爬蟲完畢信號，重置時鐘並即刻開工。
-     */
     triggerImmediateAndResetClock() {
         if (radarTimer) clearInterval(radarTimer);
         this.runRoutine();
-        radarTimer = setInterval(() => { this.runRoutine(); }, 15 * 60 * 1000);
+        // V9.1 節奏：藍籌池建議每 2 分鐘掃描一次即可，太快會嘥 DexScreener Quota
+        radarTimer = setInterval(() => { this.runRoutine(); }, 120000); 
     },
 
     start() {
-        radarTimer = setInterval(() => { this.runRoutine(); }, 15 * 60 * 1000);
+        radarTimer = setInterval(() => { this.runRoutine(); }, 120000); 
         console.log(`🔥 [Trending Incubator] 數學雷達已待命，由 DB 動態 JSON 配置主導換手率門檻...`);
     }
 };
