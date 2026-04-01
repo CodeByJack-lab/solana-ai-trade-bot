@@ -171,11 +171,11 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🚀 V9.1 階梯式滑點 + 狙擊等候環 (減壓版：解決 429 問題)
+    // 🚀 V9.1.2 配合 5 分鐘養魚池，極速等候環 (最多問 3 次，嚴格等 2 秒)
     const buySlippageSteps = [250, 500, 750, 1000];
     let quoteData = null;
     let actualSlippageUsed = 0;
-    const maxRetries = 8; // 📉 減壓：最多等 40 秒 (8 次 x 5秒)
+    const maxRetries = 3; 
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         for (const stepSlippage of buySlippageSteps) {
@@ -187,23 +187,21 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
                 }
                 break; 
             }
-            // 🛡️ 防奪命連環 Call：每次內部試不同滑點失敗後，微停 500ms
-            await new Promise(r => setTimeout(r, 500));
         }
         
         if (quoteData) {
-            if (attempt > 1) console.log(`✅ [Execution] Jupiter 終於載入新池路線！(等候咗大約 ${(attempt-1)*5} 秒)`);
+            if (attempt > 1) console.log(`✅ [Execution] Jupiter 終於載入新池路線！`);
             break; 
         }
 
         if (attempt < maxRetries) {
-            console.log(`⏳ [Execution] Jupiter 尚未建立此幣路由 (嘗試 ${attempt}/${maxRetries})，等 5 秒再問...`);
-            await new Promise(r => setTimeout(r, 5000));
+            console.log(`⏳ [Execution] Jupiter 尚未建立此幣路由 (嘗試 ${attempt}/${maxRetries})，嚴格等候 2 秒再問...`);
+            await new Promise(r => setTimeout(r, 2000));
         }
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 等候 40 秒後 Jupiter 依然無報價 (可能為無流動性假池)，果斷放棄。`);
+        console.log(`❌ [Execution] 嘗試 3 次後 Jupiter 依然無報價，判定為無流動性假池，果斷放棄。`);
         
         // 🛡️ 終極防線：無路由假幣打入冷宮 24 小時，防無限 Loop 鞭屍
         try {

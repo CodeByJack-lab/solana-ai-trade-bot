@@ -1,5 +1,5 @@
 // src/services/monitorService.js
-// 📝 檔案功能用途：V9.1 大本營樞紐與 0 延遲風控中心。掛載 Webhook 路由，接收 0 延遲報價與動能衰退拔線訊號，實作 Time-Stop。
+// 📝 檔案功能用途：V9.1.1 大本營樞紐與 0 延遲風控中心。掛載 Webhook 路由，接收 0 延遲報價與動能衰退拔線訊號，實作 Time-Stop 與養魚池熟成。
 
 const express = require('express');
 const cors = require('cors');
@@ -13,7 +13,6 @@ const Redis = require('ioredis');
 const redis = new Redis(config.cache.redisUrl);
 const redisSub = new Redis(config.cache.redisUrl); 
 
-// 引入 V9.1 解耦後的獨立路由
 const { walletMonitorRouter } = require('./walletMonitor');
 const { securityGuard } = require('./securityGuard');
 const { routerService } = require('./router');
@@ -22,11 +21,10 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🟢 [優化 1] 建立全域變數緩存，防止高頻轟炸 Database
 let globalSysConfig = { is_running: true };
 let cachedSolPriceUsd = 150;
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.1 系統正常運行中 (高併發優化版)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.1 系統正常運行中 (5分鐘養魚池版)'));
 
 app.use(walletMonitorRouter);
 
@@ -44,7 +42,7 @@ app.post('/webhook/telegram', async (req, res) => {
             console.log(`📥 [Telegram Webhook] 收到 ${userName} 的 0 延遲風控指令: ${actionData}`);
 
             if (actionData === 'PANIC_PAUSE_BUY') {
-                globalSysConfig.is_running = false; // 先改 Memory 擋截
+                globalSysConfig.is_running = false; 
                 await supabase.from('system_config').update({ is_running: false, status_msg: '已手動暫停新開倉' }).eq('id', 1);
                 sendAdminAlert(`⏸️ <b>系統已暫停買入</b>\n操作者: ${userName}`);
                 return;
@@ -61,7 +59,6 @@ app.post('/webhook/telegram', async (req, res) => {
                 sendAdminAlert(`🚨 <b>手動啟動核按鈕</b>\n操作者: ${userName}\n正在全線併發市價強平！`);
 
                 const positions = getPortfolio().positions;
-                // 🟢 [優化 2] 併發執行緊急平倉，不再排隊槍斃
                 const sellPromises = positions.map(async (pos) => {
                     const lockKey = `sell_lock:${pos.mint_address}`;
                     const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
@@ -93,7 +90,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, portfolio) {
     
     const pos = portfolio.positions.find(p => p.mint_address === mint);
     if (!pos) {
-        // 清理殘留 Memory Leak
         if (priceHistory1Min.has(mint)) priceHistory1Min.delete(mint);
         return; 
     }
@@ -114,7 +110,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, portfolio) {
         if (currentPriceSol / (pos.highest_price_sol || pos.entry_price_sol) < 50) { 
             pos.highest_price_sol = currentPriceSol;
             const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
-            // 🟢 [優化 3] 加入 catch 避免 Unhandled Promise Rejection
             supabase.from(`active_positions_${tableSuffix}`).update({ highest_price_sol: currentPriceSol }).eq('mint_address', pos.mint_address).then().catch(()=> {});
         }
     }
@@ -125,7 +120,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, portfolio) {
 
     let action = 'HOLD'; let reason = ''; let sellFraction = 1.0; 
     
-    // 安全讀取 Config (加防呆)
     const timeStopMins = config?.trade?.timeStopMinutes || 30;
     const timeStopTarget = config?.trade?.timeStopProfitTarget || 15;
     const stopLossLimit = config?.trade?.stopLossPct || -15; 
@@ -194,9 +188,8 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, portfolio) {
 // 🌐 啟動大本營監控迴圈
 // ========================================================
 function startPositionMonitor() {
-    console.log('👁️ [Monitor] V9.1 0 延遲秒斬防線與動能接收器已啟動...');
+    console.log('👁️ [Monitor] V9.1.1 0 延遲秒斬防線與養魚池熟成機制已啟動...');
     
-    // 🟢 [優化 1.1] 獨立一個 Worker 每 10 秒更新 DB 狀態，解放 Pub/Sub
     setInterval(async () => {
         try { 
             cachedSolPriceUsd = (await require('./priceService').getSolPriceInHKD()) / 7.8; 
@@ -212,7 +205,7 @@ function startPositionMonitor() {
         
         if (channel === 'price_updates') {
             try {
-                if (!globalSysConfig.is_running) return; // 讀取 Memory，0 延遲
+                if (!globalSysConfig.is_running) return; 
                 
                 const { mint, priceUsd } = JSON.parse(message);
                 const currentPriceSol = priceUsd / cachedSolPriceUsd; 
@@ -242,21 +235,27 @@ function startPositionMonitor() {
         }
     });
 
-    // 🌟 檢查 Nursery Queue 處理新進標的 (併發加速版)
+    // 🌟 檢查 Nursery Queue 處理新進標的 (V9.1.1 5分鐘熟成機制)
     let isNurseryRunning = false;
     setInterval(async () => {
         if (isNurseryRunning || !globalSysConfig.is_running) return;
         isNurseryRunning = true;
 
         try {
-            // 🟢 [優化 2] 每次拉取 5 隻幣，解決大塞車
-            const queueItems = await redis.zrange('v9_nursery_queue', 0, 4);
-            if (queueItems.length > 0) {
+            const now = Date.now();
+            const fiveMinsAgo = now - (5 * 60 * 1000);
+
+            // 拉取 5 分鐘前入池的幣 (最多 5 隻)
+            const ripeTokens = await redis.zrangebyscore('v9_nursery_queue', 0, fiveMinsAgo, 'LIMIT', 0, 5);
+            
+            if (ripeTokens.length > 0) {
                 // 從 Queue 中移除
-                await redis.zrem('v9_nursery_queue', ...queueItems);
+                await redis.zrem('v9_nursery_queue', ...ripeTokens);
+
+                console.log(`\n🐟 [Nursery] 捕獲 ${ripeTokens.length} 隻新幣已在保溫池養足 5 分鐘，出池進行 100 分量化安檢...`);
 
                 // 並行執行 100 分量化安檢
-                const evalPromises = queueItems.map(async (mint) => {
+                const evalPromises = ripeTokens.map(async (mint) => {
                     try {
                         const secResult = await securityGuard.calculateQuantScore(mint, 'NEWBORN');
                         await routerService.routeSignal(mint, 'NEWBORN', secResult);
@@ -272,7 +271,7 @@ function startPositionMonitor() {
         } finally {
             isNurseryRunning = false;
         }
-    }, 5000); // 縮短至每 5 秒執行一次
+    }, 10000); // 每 10 秒檢查一次是否有熟成的幣
 }
 
 function startMarketMonitor() {

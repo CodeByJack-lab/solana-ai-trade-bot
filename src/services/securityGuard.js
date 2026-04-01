@@ -99,9 +99,6 @@ class SecurityGuard {
         }
     }
 
-    /**
-     * 🎯 V9.1 量化 100 分核心引擎
-     */
     async calculateQuantScore(mint, type = 'NEWBORN') {
         const marketData = await this._fetchMarketData(mint);
         if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取報價數據', marketData: null };

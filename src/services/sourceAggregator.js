@@ -1,5 +1,5 @@
 // src/services/sourceAggregator.js
-// 📝 檔案功能用途：V9.1 多路冗餘數據源聚合器。三路 WebSocket 監聽 (Helius/Official/Alchemy) + 60秒緩衝池 + LP/FDV 比例快篩。
+// 📝 檔案功能用途：V9.1.1 多路冗餘數據源聚合器。三路 WebSocket 監聽 (Helius/Official/Alchemy) + 15秒極速緩衝池 + LP/FDV 比例快篩。
 
 const WebSocket = require('ws');
 const axios = require('axios');
@@ -18,9 +18,9 @@ class SourceAggregator {
         this.blacklist = ['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', '11111111111111111111111111111111'];
         this.isProcessingBuffer = false;
         
-        // ⏳ [V9.1 最佳化] 延長至 60 秒一次的批量快篩 (黃金入手窗口)
-        // 避開開盤首 30 秒的 MEV 砸盤與 Jupiter 路由盲區
-        setInterval(() => this._processMintBuffer(), 60000);
+        // 🎣 [V9.1.1 養魚機制] 每 15 秒極速清空緩衝池
+        // 將合格嘅初生幣打上 Timestamp，掉入 Redis 養魚池慢慢等 5 分鐘熟成
+        setInterval(() => this._processMintBuffer(), 15000);
     }
 
     sanitizeAddress(address) {
@@ -30,9 +30,6 @@ class SourceAggregator {
         return clean;
     }
 
-    /**
-     * 🌐 建立 WebSocket 監聽 (升級為主動心跳保活機制)
-     */
     connectWebSocket(name, wsUrl, programIds) {
         if (!wsUrl) return;
 
@@ -162,7 +159,7 @@ class SourceAggregator {
                     }
 
                     if (lpRatioPass) {
-                        console.log(`🎯 [Aggregator] 捕獲合格初生幣: ${pair.baseToken.symbol} (Liq: $${liquidity.toFixed(0)})`);
+                        console.log(`🎯 [Aggregator] 捕獲合格初生幣: ${pair.baseToken.symbol} (Liq: $${liquidity.toFixed(0)})，放入保溫池等待熟成...`);
                         await redis.zadd('v9_nursery_queue', Date.now(), mint);
                         await supabase.from('nursery_pool').upsert([{ mint_address: mint, created_at: new Date().toISOString() }]);
                     }
