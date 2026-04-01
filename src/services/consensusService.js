@@ -40,10 +40,14 @@ Output STRICTLY IN JSON FORMAT:
 }`;
 
         try {
-            // 將請求推入 1秒延遲 與 429輪替 的資源池
+// 將請求推入 1秒延遲 與 429輪替 的資源池
             const aiResult = await keyRotator.enqueueRequest(async (apiKey) => {
-                // 自動判別 Groq (gsk_...) 或 Mistral 金鑰，路由至對應的 OpenAI Compatible Endpoint
-                const isGroq = apiKey.startsWith('gsk_');
+                
+                // 🛡️ 終極防彈洗底：清走所有單雙引號同前後空格
+                const cleanKey = apiKey.replace(/['"]/g, '').trim();
+                
+                // 自動判別 Groq (gsk_...) 或 Mistral 金鑰
+                const isGroq = cleanKey.startsWith('gsk_');
                 const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
                 const modelName = isGroq ? 'llama-3.3-70b-versatile' : 'mistral-large-latest';
 
@@ -53,7 +57,7 @@ Output STRICTLY IN JSON FORMAT:
                     response_format: { type: "json_object" }
                 }, {
                     headers: { 
-                        'Authorization': `Bearer ${apiKey}`, 
+                        'Authorization': `Bearer ${cleanKey}`,  // 👈 用洗乾淨嘅 Key
                         'Content-Type': 'application/json' 
                     },
                     timeout: 8000 // 8秒極速 Timeout

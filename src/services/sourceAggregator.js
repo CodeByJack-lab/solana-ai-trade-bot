@@ -29,26 +29,33 @@ class SourceAggregator {
         return clean;
     }
 
-    /**
-     * 🌐 建立 WebSocket 監聽 (logsSubscribe + mentions 過濾)
-     */
+/**
+ * 🌐 建立 WebSocket 監聽 (升級為主動心跳保活機制)
+ */
     connectWebSocket(name, wsUrl, programIds) {
         if (!wsUrl) return;
 
         let ws = new WebSocket(wsUrl);
-        let pingTimeout;
+        let pingInterval;
+        let pongTimeout;
 
-        const heartbeat = () => {
-            clearTimeout(pingTimeout);
-            pingTimeout = setTimeout(() => {
-                console.warn(`⚠️ [WS-${name}] 心跳超時，強制重連...`);
-                ws.terminate();
-            }, 35000);
+        const startHeartbeat = () => {
+            // 💓 每 30 秒主動向 Server 發送 Ping，保持連線活躍
+            pingInterval = setInterval(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                    ws.ping();
+                }
+                // 如果 10 秒內收唔到 Server 回覆 Pong，就當佢死咗，準備重連
+                pongTimeout = setTimeout(() => {
+                    console.warn(`⚠️ [WS-${name}] 伺服器無回應 Pong，強制重連...`);
+                    ws.terminate();
+                }, 10000);
+            }, 30000);
         };
 
         ws.on('open', () => {
             console.log(`🟢 [WS-${name}] 已連線，啟動 logsSubscribe 監聽...`);
-            heartbeat();
+            startHeartbeat();
             
             // 🎯 精確訂閱：只聽 Pump.fun 與 Raydium V4 相關的日誌
             ws.send(JSON.stringify({
@@ -57,7 +64,10 @@ class SourceAggregator {
             }));
         });
 
-        ws.on('ping', heartbeat);
+        // 🛡️ 當收到 Server 的 Pong 回覆，清除斷線倒數
+        ws.on('pong', () => {
+            clearTimeout(pongTimeout);
+        });
         
         ws.on('message', async (data) => {
             try {
@@ -71,11 +81,11 @@ class SourceAggregator {
                     const signature = response.params.result.context.signature || response.params.result.value.signature;
                     if (!signature) return;
 
-                    // 1. Redis 原子去重 (Signature 級別)
+                    // 1. Redis 原子去重
                     const isSeen = await redis.set(`seen_sig:${signature}`, '1', 'EX', 3600, 'NX');
                     if (!isSeen) return; 
 
-                    // 2. 透過 RPC 獲取 Transaction 提取 Mint Address
+                    // 2. RPC 獲取 Mint
                     const txInfo = await axios.post(config.rpc.helius1.url || config.rpc.alchemy.url, {
                         jsonrpc: "2.0", id: 1, method: "getTransaction",
                         params: [signature, { maxSupportedTransactionVersion: 0, encoding: "jsonParsed" }]
@@ -93,7 +103,8 @@ class SourceAggregator {
         });
 
         ws.on('close', () => {
-            clearTimeout(pingTimeout);
+            clearInterval(pingInterval);
+            clearTimeout(pongTimeout);
             console.warn(`🔴 [WS-${name}] 斷線，5 秒後嘗試重連...`);
             setTimeout(() => this.connectWebSocket(name, wsUrl, programIds), 5000);
         });
