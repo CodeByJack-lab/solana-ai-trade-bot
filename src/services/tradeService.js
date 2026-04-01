@@ -570,24 +570,37 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
 async function handleIncomingFund(address, amount, txid) {
     console.log(`🚀 [Process] 處理新入帳: ${amount} SOL from ${address}`);
-    const personName = await getPersonNameByAddress(address);
-    if (!personName) return;
+    
+    let personName = await getPersonNameByAddress(address);
+    
+    // 🛡️ 防漏機制：如果是全新地址，不要 Ignore，給他一個預設名字！
+    if (!personName) {
+        console.log(`⚠️ [Process] 發現未知入金地址: ${address}，將以「未命名金主」記錄`);
+        personName = `未命名_${address.substring(0, 4)}`;
+    }
 
     const isInserted = await logNewDeposit(address, personName, amount, txid);
-    if (!isInserted) return;
+    if (!isInserted) {
+        console.log(`❌ [Process] 寫入入金紀錄失敗 (TX: ${txid})`);
+        return;
+    }
 
     if (globalWalletPublicKey) {
         const realLamports = await executeReadWithFailover('getBalance(IncomingFund)', async (readConn) => {
             return await readConn.getBalance(new PublicKey(globalWalletPublicKey));
         });
-        if (realLamports !== null) await supabase.from('system_config').update({ live_wallet_balance: realLamports / 1e9 }).eq('id', 1);
+        if (realLamports !== null) {
+            await supabase.from('system_config').update({ live_wallet_balance: realLamports / 1e9 }).eq('id', 1);
+        }
     }
 
     const stats = await getContributionStats(personName);
     if (stats) {
         const percentage = parseFloat(stats.percentage) || 0;
         const currentBalance = parseFloat(stats.current_balance) || 0;
-        if (typeof sendTelegramAlert === 'function') sendTelegramAlert(`💰 <b>資金到帳</b>\n👤 來源: ${stats.person_name}\n💵 入帳: <code>${amount}</code> SOL\n📊 佔比: <code>${percentage.toFixed(2)}%</code>\n🏛️ 資產: <code>${currentBalance.toFixed(4)}</code> SOL`);
+        if (typeof sendTelegramAlert === 'function') {
+            sendTelegramAlert(`💰 <b>資金到帳</b>\n👤 來源: ${stats.person_name}\n💵 入帳: <code>${amount}</code> SOL\n📊 佔比: <code>${percentage.toFixed(2)}%</code>\n🏛️ 資產: <code>${currentBalance.toFixed(4)}</code> SOL`);
+        }
     }
 }
 

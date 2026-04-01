@@ -1,6 +1,7 @@
 // src/index.js
-// 📝 檔案功能用途：V9.1 系統啟動核心 (Bootloader)。喚醒多路聚合器、啟動各類防禦排程，並實時監聽 DB 的全域狀態。
+// 📝 檔案功能用途：V9.1.9 系統啟動核心 (Bootloader)。喚醒多路聚合器、啟動各類防禦排程、實時監聽 DB，並啟動 Webhook 伺服器接收出入金通知。
 
+const express = require('express'); // 👈 新增 Express 模組
 const config = require('./config/config');
 const { supabase } = require('./config/supabase');
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
@@ -9,6 +10,7 @@ const { getSolPriceInHKD } = require('./services/priceService');
 const { sourceAggregator } = require('./services/sourceAggregator');
 const { healthMonitor } = require('./services/healthMonitor');
 const { environmentService } = require('./services/environmentService');
+const { walletMonitorRouter } = require('./services/walletMonitor'); // 👈 引入 Wallet Monitor 路由器
 
 // 背景排程 (Jobs)
 const { weeklyBacktestJob } = require('./jobs/weeklyBacktestJob');
@@ -59,7 +61,7 @@ async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
 
 async function startApp() {
     console.log("======================================================");
-    console.log("🚀 SOL_QUANT V9.1 (多路冗餘 + AI 降級限流版) 啟動...");
+    console.log("🚀 SOL_QUANT V9.1.9 (多路冗餘 + AI 降級限流版) 啟動...");
     console.log("======================================================");
 
     // 1. 初始化 AI 劇本快取
@@ -67,6 +69,16 @@ async function startApp() {
 
     // 2. 啟動 Webhook、Express 伺服器與 0 延遲監控
     startMarketMonitor(); 
+    
+    // 🌐 [新增] 啟動 Express 伺服器，專門接收 Alchemy Webhook
+    const app = express();
+    app.use(express.json());
+    app.use('/', walletMonitorRouter); // 掛載錢包監聽器
+    
+    const PORT = process.env.PORT || 8000;
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`🌐 [Webhook Server] 已啟動於 Port ${PORT}，準備接收出入金通知`);
+    });
 
     let isFirstLoad = true; 
 
@@ -128,14 +140,14 @@ async function startApp() {
     console.log("⚙️ [Boot] 正在錯峰喚醒多路聚合器與背景排程...");
     
     // 5. 錯峰啟動各類服務，避免瞬間佔滿 CPU 與連線數
-    setTimeout(() => { sourceAggregator.start(); }, 5000);              // 啟動多路 WebSocket 冗餘監聽
-    setTimeout(() => { trendingMonitorService.start(); }, 16000);       // Gecko 真・Top 100 爬蟲
-    setTimeout(() => { trendingJob.start(); }, 18000);                  // 數學雷達
-    setTimeout(() => { janitorJob.start(); }, 20000);                   // 閒置帳戶回收清道夫
-    setTimeout(() => { graveyardJob.start(); }, 22000);                 // 死幣火化劊子手
-    setTimeout(() => { retrospectiveJob.start(); }, 24000);             // AI 總指揮覆盤 (保留)
-    setTimeout(() => { autoApplyJob.start(); }, 25000);                 // 60 分鐘自動審批防丟失
-    setTimeout(() => { weeklyBacktestJob.start(); }, 26000);            // 雙軌高精度回測引擎
+    setTimeout(() => { sourceAggregator.start(); }, 5000);              
+    setTimeout(() => { trendingMonitorService.start(); }, 16000);       
+    setTimeout(() => { trendingJob.start(); }, 18000);                  
+    setTimeout(() => { janitorJob.start(); }, 20000);                   
+    setTimeout(() => { graveyardJob.start(); }, 22000);                 
+    setTimeout(() => { retrospectiveJob.start(); }, 24000);             
+    setTimeout(() => { autoApplyJob.start(); }, 25000);                 
+    setTimeout(() => { weeklyBacktestJob.start(); }, 26000);            
     setTimeout(() => { environmentService.start(); }, 12000);
 
     // 6. 背景定時回報循環
