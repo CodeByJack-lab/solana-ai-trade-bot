@@ -1,5 +1,5 @@
 // src/services/sourceAggregator.js
-// 📝 檔案功能用途：V9.1 多路冗餘數據源聚合器。三路 WebSocket 監聽 (Helius/Official/Alchemy) + 5秒緩衝池 + LP/FDV 比例快篩。
+// 📝 檔案功能用途：V9.1 多路冗餘數據源聚合器。三路 WebSocket 監聽 (Helius/Official/Alchemy) + 60秒緩衝池 + LP/FDV 比例快篩。
 
 const WebSocket = require('ws');
 const axios = require('axios');
@@ -18,8 +18,9 @@ class SourceAggregator {
         this.blacklist = ['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', '11111111111111111111111111111111'];
         this.isProcessingBuffer = false;
         
-        // 啟動 5 秒一次的批量快篩
-        setInterval(() => this._processMintBuffer(), 5000);
+        // ⏳ [V9.1 最佳化] 延長至 60 秒一次的批量快篩 (黃金入手窗口)
+        // 避開開盤首 30 秒的 MEV 砸盤與 Jupiter 路由盲區
+        setInterval(() => this._processMintBuffer(), 60000);
     }
 
     sanitizeAddress(address) {
@@ -29,45 +30,31 @@ class SourceAggregator {
         return clean;
     }
 
-/**
- * 🌐 建立 WebSocket 監聽 (升級為主動心跳保活機制)
- */
     connectWebSocket(name, wsUrl, programIds) {
         if (!wsUrl) return;
 
         let ws = new WebSocket(wsUrl);
-        let pingInterval;
-        let pongTimeout;
+        let pingTimeout;
 
-        const startHeartbeat = () => {
-            // 💓 每 30 秒主動向 Server 發送 Ping，保持連線活躍
-            pingInterval = setInterval(() => {
-                if (ws.readyState === WebSocket.OPEN) {
-                    ws.ping();
-                }
-                // 如果 10 秒內收唔到 Server 回覆 Pong，就當佢死咗，準備重連
-                pongTimeout = setTimeout(() => {
-                    console.warn(`⚠️ [WS-${name}] 伺服器無回應 Pong，強制重連...`);
-                    ws.terminate();
-                }, 10000);
-            }, 30000);
+        const heartbeat = () => {
+            clearTimeout(pingTimeout);
+            pingTimeout = setTimeout(() => {
+                console.warn(`⚠️ [WS-${name}] 心跳超時，強制重連...`);
+                ws.terminate();
+            }, 35000);
         };
 
         ws.on('open', () => {
             console.log(`🟢 [WS-${name}] 已連線，啟動 logsSubscribe 監聽...`);
-            startHeartbeat();
+            heartbeat();
             
-            // 🎯 精確訂閱：只聽 Pump.fun 與 Raydium V4 相關的日誌
             ws.send(JSON.stringify({
                 jsonrpc: "2.0", id: 1, method: "logsSubscribe",
                 params: [{ mentions: programIds }, { commitment: "processed" }]
             }));
         });
 
-        // 🛡️ 當收到 Server 的 Pong 回覆，清除斷線倒數
-        ws.on('pong', () => {
-            clearTimeout(pongTimeout);
-        });
+        ws.on('ping', heartbeat);
         
         ws.on('message', async (data) => {
             try {
@@ -81,11 +68,9 @@ class SourceAggregator {
                     const signature = response.params.result.context.signature || response.params.result.value.signature;
                     if (!signature) return;
 
-                    // 1. Redis 原子去重
                     const isSeen = await redis.set(`seen_sig:${signature}`, '1', 'EX', 3600, 'NX');
                     if (!isSeen) return; 
 
-                    // 2. RPC 獲取 Mint
                     const txInfo = await axios.post(config.rpc.helius1.url || config.rpc.alchemy.url, {
                         jsonrpc: "2.0", id: 1, method: "getTransaction",
                         params: [signature, { maxSupportedTransactionVersion: 0, encoding: "jsonParsed" }]
@@ -103,8 +88,7 @@ class SourceAggregator {
         });
 
         ws.on('close', () => {
-            clearInterval(pingInterval);
-            clearTimeout(pongTimeout);
+            clearTimeout(pingTimeout);
             console.warn(`🔴 [WS-${name}] 斷線，5 秒後嘗試重連...`);
             setTimeout(() => this.connectWebSocket(name, wsUrl, programIds), 5000);
         });
@@ -115,9 +99,6 @@ class SourceAggregator {
         });
     }
 
-    /**
-     * 🦎 備用通道：定時輪詢 Birdeye (補漏)
-     */
     async pollBirdeyeNewListings() {
         if (!config.external.birdeyeApiKey) return;
         try {
@@ -137,9 +118,6 @@ class SourceAggregator {
         } catch (err) {}
     }
 
-    /**
-     * ⚡ 5 秒一次：批量查價快篩 (剔除低流動性與異常市值比例)
-     */
     async _processMintBuffer() {
         if (this.isProcessingBuffer || this.mintBuffer.size === 0) return;
         this.isProcessingBuffer = true;
@@ -162,14 +140,13 @@ class SourceAggregator {
                     const isProcessed = await redis.set(`processed_mint:${mint}`, '1', 'EX', 86400, 'NX');
                     if (!isProcessed) continue;
 
-                    // 🛑 前置快篩攔截：流動性 >= $5000，且 LP/FDV 比例在 5% - 18% 之間
                     let lpRatioPass = false;
                     if (liquidity >= 5000) {
                         if (fdv > 0) {
                             const ratio = liquidity / fdv;
                             if (ratio >= 0.05 && ratio <= 0.18) lpRatioPass = true;
                         } else {
-                            lpRatioPass = true; // 無 FDV 資料暫且放行
+                            lpRatioPass = true; 
                         }
                     }
 
@@ -181,7 +158,7 @@ class SourceAggregator {
                 }
             }
         } catch (err) {
-            mintsArray.forEach(m => this.mintBuffer.add(m)); // 失敗回滾
+            mintsArray.forEach(m => this.mintBuffer.add(m)); 
         } finally {
             this.isProcessingBuffer = false;
         }
@@ -191,23 +168,14 @@ class SourceAggregator {
         console.log('🌐 [Source Aggregator] 多路 WebSocket 冗餘監聽器啟動...');
         const targets = [PUMP_FUN_PROGRAM_ID, RAYDIUM_V4_PROGRAM_ID];
         
-        // 1. Primary: Helius WebSocket
-        let heliusWsUrl = null;
-        if (config.rpc.helius1.url) {
-            heliusWsUrl = config.rpc.helius1.url.replace('https://', 'wss://');
-        } else if (config.rpc.helius1.apiKey) {
-            heliusWsUrl = `wss://mainnet.helius-rpc.com/?api-key=${config.rpc.helius1.apiKey}`;
-        }
+        const heliusWsUrl = config.rpc.helius1.apiKey ? `wss://atlas-mainnet.helius-rpc.com?api-key=${config.rpc.helius1.apiKey}` : null;
         this.connectWebSocket('Helius', heliusWsUrl, targets);
         
-        // 2. Secondary: Official Solana Mainnet WebSocket (Free/Fallback)
         this.connectWebSocket('Official-Mainnet', 'wss://api.mainnet-beta.solana.com', targets);
 
-        // 3. Backup: Alchemy WebSocket
         const alchemyWsUrl = config.rpc.alchemy.apiKey ? `wss://solana-mainnet.g.alchemy.com/v2/${config.rpc.alchemy.apiKey}` : null;
         this.connectWebSocket('Alchemy', alchemyWsUrl, targets);
 
-        // 4. Polling: Birdeye (每 3 分鐘補漏)
         setInterval(() => this.pollBirdeyeNewListings(), 3 * 60 * 1000);
     }
 }

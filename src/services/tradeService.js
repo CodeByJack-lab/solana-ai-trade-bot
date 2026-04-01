@@ -23,9 +23,6 @@ const PUBLIC_RPC_ENDPOINTS = [
     'https://solana-rpc.publicnode.com'    
 ];
 
-/**
- * 🛡️ 免費公共 RPC 彈匣 (自動輪替讀取)
- */
 async function executeReadWithFailover(operationName, readFunction) {
     for (let i = 0; i < PUBLIC_RPC_ENDPOINTS.length; i++) {
         const currentEndpoint = PUBLIC_RPC_ENDPOINTS[i];
@@ -51,9 +48,6 @@ try {
     }
 } catch (e) { console.error("⚠️ [TradeService] 無法解析 Private Key"); }
 
-/**
- * 🎯 獲取真實 Token 餘額 (防假歸零)
- */
 async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     return await executeReadWithFailover('getRealTokenBalance', async (readConn) => {
         const walletKey = new PublicKey(walletPubKeyStr);
@@ -80,9 +74,6 @@ async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     });
 }
 
-/**
- * 🎯 獲取 Jupiter 聚合報價 (動態滑點輸入)
- */
 async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageBps = null) {
     try {
         let decimals = 6; 
@@ -99,7 +90,6 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
             ? new BigNumber(amount).times(1e9).integerValue().toString() 
             : new BigNumber(amount).times(new BigNumber(10).pow(decimals)).integerValue().toString();
 
-        // 🚀 不對稱滑點 (Asymmetric Slippage)：買入鎖死 2.5% (250 bps)；賣出放寬預設為 15% (1500 bps)
         const defaultSlippage = isBuying ? 250 : 1500;
         const SLIPPAGE_BPS = customSlippageBps !== null ? customSlippageBps : defaultSlippage; 
 
@@ -126,9 +116,6 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
     }
 }
 
-/**
- * ⚡ 執行買入：加入連輸黑名單攔截與嚴格滑點控制
- */
 async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol) {
     console.log(`\n========================================`);
     console.log(`⚡ [Execution] 啟動下單程序: 狙擊目標 ${tokenSymbol}`);
@@ -143,7 +130,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     }
 
     const { data: config } = await supabase.from('system_config').select('*').eq('id', 1).single();
-    const maxMemePositions = config?.max_meme_positions || 0; // V9.0 預設不留 Meme 空位
+    const maxMemePositions = config?.max_meme_positions || 0; 
     const maxTrendingPositions = config?.max_trending_positions || 5;
 
     const currentMemeCount = portfolio.positions.filter(p => p.strategy_type.includes('MEME')).length;
@@ -158,7 +145,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🚀 連輸黑名單攔截：若最近兩次交易皆虧損，物理拒絕買入
     try {
         const { data: recentTrades } = await supabase
             .from(`trade_history_${tableSuffix}`)
@@ -184,11 +170,12 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         console.log(`❌ [Execution] 餘額不足 (${portfolio.cash_sol.toFixed(2)} < ${requiredTotalSol.toFixed(2)})，取消開倉。`);
         return false;
     }
-    // 🚀 V9.1 階梯式滑點 + 狙擊等候環 (解決 Jupiter 新池延遲問題)
+
+    // 🚀 V9.1 階梯式滑點 + 狙擊等候環 (減壓版：解決 429 問題)
     const buySlippageSteps = [250, 500, 750, 1000];
     let quoteData = null;
     let actualSlippageUsed = 0;
-    const maxRetries = 15; // 最多等 30 秒 (15 次 x 2秒)
+    const maxRetries = 8; // 📉 減壓：最多等 40 秒 (8 次 x 5秒)
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         for (const stepSlippage of buySlippageSteps) {
@@ -198,23 +185,25 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
                 if (stepSlippage > 250) {
                     console.log(`⚠️ [Execution] 需放寬至 ${(stepSlippage/100).toFixed(1)}% 滑點方可成功獲取報價！`);
                 }
-                break; // 成功攞到報價，跳出滑點迴圈
+                break; 
             }
+            // 🛡️ 防奪命連環 Call：每次內部試不同滑點失敗後，微停 500ms
+            await new Promise(r => setTimeout(r, 500));
         }
         
         if (quoteData) {
-            if (attempt > 1) console.log(`✅ [Execution] Jupiter 終於載入新池路線！(等候咗大約 ${(attempt-1)*2} 秒)`);
-            break; // 成功攞到報價，跳出重試迴圈
+            if (attempt > 1) console.log(`✅ [Execution] Jupiter 終於載入新池路線！(等候咗大約 ${(attempt-1)*5} 秒)`);
+            break; 
         }
 
         if (attempt < maxRetries) {
-            console.log(`⏳ [Execution] Jupiter 尚未建立此幣路由 (嘗試 ${attempt}/${maxRetries})，等 2 秒再問...`);
-            await new Promise(r => setTimeout(r, 2000));
+            console.log(`⏳ [Execution] Jupiter 尚未建立此幣路由 (嘗試 ${attempt}/${maxRetries})，等 5 秒再問...`);
+            await new Promise(r => setTimeout(r, 5000));
         }
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 等候 30 秒後 Jupiter 依然無報價 (可能係流動性極低或未上線)，果斷放棄。`);
+        console.log(`❌ [Execution] 等候 40 秒後 Jupiter 依然無報價 (未上線或 API 擁堵)，果斷放棄以保全彈藥。`);
         return false;
     }
     
@@ -238,7 +227,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             if (globalWalletPublicKey) {
                 const realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
                 if (realBal !== null && realBal > 0) tokenQuantity = realBal; 
-                else if (realBal === 0) return false; // 假成功，放棄寫入 DB
+                else if (realBal === 0) return false; 
             }
         }
     } else {
@@ -291,9 +280,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     return false;
 }
 
-/**
- * 🛡️ 執行賣出：階梯式放寬滑點，緊急拔線暴力出逃
- */
 async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction = 1.0) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
@@ -320,7 +306,6 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     const isStopLoss = reason.includes('止損') || reason.includes('硬止損') || reason.includes('拔線') || reason.includes('瀑布') || reason.includes('EXIT');
     
-    // 逃生滑點：止損放寬至 15% (1500 bps)，止盈預設 5% (500 bps)
     let currentSlippage = isStopLoss ? 1500 : 500; 
     let quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
     
