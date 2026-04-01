@@ -185,10 +185,26 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 買入滑點預設鎖死 250 bps (2.5%)
-    const quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, 250); 
+    // 🚀 V9.1 階梯式買入滑點：2.5% -> 5.0% -> 7.5% -> 10.0% (250, 500, 750, 1000 bps)
+    const buySlippageSteps = [250, 500, 750, 1000];
+    let quoteData = null;
+    let actualSlippageUsed = 0;
+
+    for (const stepSlippage of buySlippageSteps) {
+        quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, stepSlippage);
+        if (quoteData) {
+            actualSlippageUsed = stepSlippage;
+            if (stepSlippage > 250) {
+                console.log(`⚠️ [Execution] 需放寬至 ${(stepSlippage/100).toFixed(1)}% 滑點方可成功獲取報價！`);
+            }
+            break; // 成功攞到報價就即刻跳出迴圈
+        } else {
+            console.log(`⏳ [Execution] 於 ${(stepSlippage/100).toFixed(1)}% 滑點報價失敗，極速嘗試下一級別...`);
+        }
+    }
+
     if (!quoteData) {
-        console.log(`❌ [Execution] 無法於 2.5% 滑點內獲取報價，放棄高追買入。`);
+        console.log(`❌ [Execution] 已達極限買入滑點 10%，依然無法獲取報價，果斷放棄高追買入。`);
         return false;
     }
     
