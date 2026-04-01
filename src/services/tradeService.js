@@ -185,26 +185,37 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🚀 V9.1 階梯式買入滑點：2.5% -> 5.0% -> 7.5% -> 10.0% (250, 500, 750, 1000 bps)
+    // 🚀 V9.1 階梯式滑點 + 狙擊等候環 (解決 Jupiter 新池延遲問題)
     const buySlippageSteps = [250, 500, 750, 1000];
     let quoteData = null;
     let actualSlippageUsed = 0;
+    const maxRetries = 15; // 最多等 30 秒 (15 次 x 2秒)
 
-    for (const stepSlippage of buySlippageSteps) {
-        quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, stepSlippage);
-        if (quoteData) {
-            actualSlippageUsed = stepSlippage;
-            if (stepSlippage > 250) {
-                console.log(`⚠️ [Execution] 需放寬至 ${(stepSlippage/100).toFixed(1)}% 滑點方可成功獲取報價！`);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        for (const stepSlippage of buySlippageSteps) {
+            quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, stepSlippage);
+            if (quoteData) {
+                actualSlippageUsed = stepSlippage;
+                if (stepSlippage > 250) {
+                    console.log(`⚠️ [Execution] 需放寬至 ${(stepSlippage/100).toFixed(1)}% 滑點方可成功獲取報價！`);
+                }
+                break; // 成功攞到報價，跳出滑點迴圈
             }
-            break; // 成功攞到報價就即刻跳出迴圈
-        } else {
-            console.log(`⏳ [Execution] 於 ${(stepSlippage/100).toFixed(1)}% 滑點報價失敗，極速嘗試下一級別...`);
+        }
+        
+        if (quoteData) {
+            if (attempt > 1) console.log(`✅ [Execution] Jupiter 終於載入新池路線！(等候咗大約 ${(attempt-1)*2} 秒)`);
+            break; // 成功攞到報價，跳出重試迴圈
+        }
+
+        if (attempt < maxRetries) {
+            console.log(`⏳ [Execution] Jupiter 尚未建立此幣路由 (嘗試 ${attempt}/${maxRetries})，等 2 秒再問...`);
+            await new Promise(r => setTimeout(r, 2000));
         }
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 已達極限買入滑點 10%，依然無法獲取報價，果斷放棄高追買入。`);
+        console.log(`❌ [Execution] 等候 30 秒後 Jupiter 依然無報價 (可能係流動性極低或未上線)，果斷放棄。`);
         return false;
     }
     
