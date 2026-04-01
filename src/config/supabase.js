@@ -1,6 +1,6 @@
 // src/config/supabase.js
 const { createClient } = require('@supabase/supabase-js');
-const configEnv = require('./env'); // 👈 引入中央彈藥庫
+const configEnv = require('./config'); // 👈 引入中央彈藥庫
 
 // 建立 Supabase 連接
 const supabaseUrl = configEnv.db.url;
