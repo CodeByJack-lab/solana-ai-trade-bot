@@ -18,13 +18,13 @@ const config = {
     // 🧠 V9.1 AI 資源池 (統一 6 把 API Keys)
     // ==========================================
     aiKeys: [
-        getEnv('GEMINI_API_KEY_1'),
-        getEnv('GEMINI_API_KEY_2'),
-        getEnv('GROQ_API_KEY_1'),
-        getEnv('GROQ_API_KEY_2'),
-        getEnv('GROQ_API_KEY_3'),
-        getEnv('MISTRAL_API_KEY_1') // 湊齊 6 把 Key 作為 Round-Robin 資源池
-    ].filter(Boolean),
+                getEnv('GROQ_API_KEY_1'),
+                getEnv('GROQ_API_KEY_2'),
+                getEnv('GROQ_API_KEY_3'),
+                getEnv('MISTRAL_API_KEY_1'),
+                getEnv('MISTRAL_API_KEY_2'),
+                getEnv('MISTRAL_API_KEY_3')
+            ].filter(Boolean),
 
     // ==========================================
     // 📊 V9.1 100分量化漏斗門檻 (Quant Funnel)

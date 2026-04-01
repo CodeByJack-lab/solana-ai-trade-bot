@@ -171,23 +171,15 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🚀 V9.1.2 配合 5 分鐘養魚池，極速等候環 (最多問 3 次，嚴格等 2 秒)
-    const buySlippageSteps = [250, 500, 750, 1000];
+    // 🚀 V9.1.3 極簡狙擊等候環 (單發點射，告別 429 亂掃射)
     let quoteData = null;
-    let actualSlippageUsed = 0;
     const maxRetries = 3; 
+    const snipeSlippage = 500; // 🎯 預設使用 5% 滑點盲狙，唔再 Loop 浪費 API
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        for (const stepSlippage of buySlippageSteps) {
-            quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, stepSlippage);
-            if (quoteData) {
-                actualSlippageUsed = stepSlippage;
-                if (stepSlippage > 250) {
-                    console.log(`⚠️ [Execution] 需放寬至 ${(stepSlippage/100).toFixed(1)}% 滑點方可成功獲取報價！`);
-                }
-                break; 
-            }
-        }
+        
+        // 每次嘗試只問一次
+        quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, snipeSlippage);
         
         if (quoteData) {
             if (attempt > 1) console.log(`✅ [Execution] Jupiter 終於載入新池路線！`);
