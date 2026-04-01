@@ -1,5 +1,5 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V9.1.5 降級防彈版 AI 議事廳。對接 keyRotator 資源池，利用正則提取 JSON 解決 400 報錯。
+// 📝 檔案功能用途：V9.1.7 終極防彈版 AI 議事廳。加入詳盡點名日誌，反查並印出環境變數 Key Name (如 GROQ_API_KEY_1)，追蹤每一把 Key 的生死與回報。
 
 const { keyRotator } = require('./keyRotator');
 const config = require('../config/config');
@@ -46,37 +46,61 @@ Output ONLY a valid JSON object. Do not use markdown formatting, do not explain 
                 // 🛡️ 終極防彈洗底：清走所有單雙引號同前後空格
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
                 
+                // 🔍 反查這把 Key 在 .env 中的變數名稱 (例如: GROQ_API_KEY_1)
+                let keyName = 'UNKNOWN_KEY';
+                for (const [envKey, envVal] of Object.entries(process.env)) {
+                    if (envVal && typeof envVal === 'string' && envVal.replace(/['"]/g, '').trim() === cleanKey) {
+                        keyName = envKey;
+                        break;
+                    }
+                }
+                
                 // 自動判別 Groq (gsk_...) 或 Mistral 金鑰
                 const isGroq = cleanKey.startsWith('gsk_');
                 const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
-                // 將 Mistral 降級為免費 API 肯定支援的 mistral-small-latest
-                // Groq 換成更穩定的 llama3-70b-8192 確保高頻不死
-                const modelName = isGroq ? 'llama3-70b-8192' : 'mistral-small-latest';
-
+                
+                // 🚀 Llama 3.3 最新模型
+                const modelName = isGroq ? 'llama-3.3-70b-versatile' : 'mistral-small-latest';
                 const providerName = isGroq ? 'GROQ' : 'MISTRAL';
-                console.log(`[KeyRotator] 🔫 系統抽中 ${providerName} (${modelName}) 進行審批...`);
-
-                const payload = {
-                    model: modelName,
-                    messages: [{ role: "user", content: prompt }]
-                    // 🚨 移除了 response_format，防止 Mistral 等模型彈 400 Bad Request
-                };
-
-                const res = await axios.post(apiUrl, payload, {
-                    headers: { 
-                        'Authorization': `Bearer ${cleanKey}`,
-                        'Content-Type': 'application/json' 
-                    },
-                    timeout: 8000 // 8秒極速 Timeout
-                });
-
-                const rawText = res.data.choices[0].message.content;
                 
-                // 🛠️ 暴力正則提取：無視 AI 前後廢話，硬抽 { ... } 出嚟
-                const jsonMatch = rawText.match(/\{[\s\S]*\}/);
-                if (!jsonMatch) throw new Error("AI 未回傳有效 JSON 格式");
-                
-                return JSON.parse(jsonMatch[0]);
+                console.log(`[KeyRotator] 🔫 系統抽中 ${providerName} (${modelName}) [Key Name: ${keyName}] 進行審批...`);
+
+                try {
+                    const payload = {
+                        model: modelName,
+                        messages: [{ role: "user", content: prompt }]
+                    };
+
+                    const res = await axios.post(apiUrl, payload, {
+                        headers: { 
+                            'Authorization': `Bearer ${cleanKey}`,
+                            'Content-Type': 'application/json' 
+                        },
+                        timeout: 8000 // 8秒極速 Timeout
+                    });
+
+                    const rawText = res.data.choices[0].message.content;
+                    
+                    // 🛠️ 暴力正則提取：無視 AI 前後廢話，硬抽 { ... } 出嚟
+                    const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+                    if (!jsonMatch) throw new Error("AI 未回傳有效 JSON 格式");
+                    
+                    const parsedJson = JSON.parse(jsonMatch[0]);
+                    
+                    // 🎯 成功 Log：邊個 AI 畀咗咩分
+                    console.log(`✅ [AI Success] ${providerName} (${modelName}) [Key Name: ${keyName}] 回傳成功！信心度: ${parsedJson.confidence}, 調整分: ${parsedJson.adjustment}, 理由: "${parsedJson.reason}"`);
+                    
+                    return parsedJson;
+
+                } catch (e) {
+                    // ❌ 失敗 Log：邊個 AI 死咗，死因係咩
+                    const status = e.response?.status || 'N/A';
+                    const errMsg = e.response?.data?.error?.message || e.response?.data?.message || e.message;
+                    console.warn(`❌ [AI Failed] ${providerName} (${modelName}) [Key Name: ${keyName}] 審批陣亡 | Status: ${status} | 死因: ${errMsg}`);
+                    
+                    // 必須 Rethrow，等 keyRotator 識得換下一條 Key 繼續試
+                    throw e; 
+                }
             });
 
             const confidence = parseFloat(aiResult.confidence) || 0;
@@ -100,7 +124,7 @@ Output ONLY a valid JSON object. Do not use markdown formatting, do not explain 
             const isBuy = finalScore >= config.quant.rejectThreshold;
             const sign = adjustment >= 0 ? '+' : '';
 
-            console.log(`[Consensus] 🧠 AI 裁決完成: ${baseScore} ${sign}${adjustment} = ${finalScore} 分`);
+            console.log(`[Consensus] 🧠 AI 最終裁決: ${baseScore} ${sign}${adjustment} = ${finalScore} 分`);
 
             return { 
                 buy: isBuy, 
@@ -110,11 +134,11 @@ Output ONLY a valid JSON object. Do not use markdown formatting, do not explain 
 
         } catch (err) {
             // 若觸發 ALL_KEYS_ON_COOLDOWN、網路異常或解析失敗，平滑降級 (Graceful Degradation)
-            console.warn(`⚠️ [Consensus] AI 資源池解析異常或全數冷卻，降級為純量化分數: ${err.message}`);
+            console.warn(`⚠️ [Consensus] AI 資源池全線陣亡，降級為純量化分數: ${err.message}`);
             return { 
                 buy: baseScore >= config.quant.rejectThreshold, 
                 score: baseScore, 
-                reason: "AI 資源池異常或解析失敗，降級採用純量化結果" 
+                reason: "AI 資源池異常或全線冷卻，降級採用純量化結果" 
             };
         }
     }
