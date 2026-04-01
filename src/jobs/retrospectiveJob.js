@@ -2,8 +2,10 @@
 // 📝 檔案功能用途：總指揮覆盤日會。每日結算 24 小時 PnL 戰報，執行「敗局屍檢 (Losers Autopsy)」，並讓 AI 結合歷史記憶動態更新前線 Prompt。
 
 const { supabase } = require('../config/supabase');
-const { aiOrchestrator } = require('../services/aiOrchestrator');
+const { keyRotator } = require('../services/keyRotator'); // 👈 換成資源池
+const axios = require('axios'); // 👈 新增 axios 用來打 API
 const cron = require('node-cron');
+const { getPortfolio } = require('../services/portfolioService');
 const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
 const { promptManager } = require('../services/promptManager');
@@ -104,7 +106,22 @@ Task: Adjust the tactical rules (e.g. OFI, AvgTrade limits) in the prompts to pr
   "briefing_notes": "<Cantonese summary under 80 words explaining what data features you tightened based on the autopsy>"
 }`;
 
-            const aiDecision = await aiOrchestrator.executeTask('MASTER_AI', 'GROQ', prompt, { bypassLimit: true });
+            // 👇 V9.1 改用 keyRotator 排隊打 API
+            const aiDecision = await keyRotator.enqueueRequest(async (apiKey) => {
+                const isGroq = apiKey.startsWith('gsk_');
+                const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
+                const modelName = isGroq ? 'llama-3.3-70b-versatile' : 'mistral-large-latest';
+
+                const res = await axios.post(apiUrl, {
+                    model: modelName,
+                    messages: [{ role: "user", content: prompt }],
+                    response_format: { type: "json_object" }
+                }, {
+                    headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+                    timeout: 30000
+                });
+                return JSON.parse(res.data.choices[0].message.content);
+            });
 
             if (aiDecision && aiDecision.new_trending_scout_prompt && aiDecision.new_meme_scout_prompt) {
                 console.log(`✅ [Retrospective AI] 劇本重構完畢！戰術指示: ${aiDecision.briefing_notes}`);

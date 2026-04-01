@@ -5,7 +5,7 @@ const { supabase } = require('../config/supabase');
 const { connection } = require('../config/solana');
 const { PublicKey, Keypair } = require('@solana/web3.js'); 
 const { healthMonitor } = require('./healthMonitor');
-const configEnv = require('../config/env'); 
+const configEnv = require('../config/config'); 
 
 let bs58 = require('bs58');
 if (bs58.default) {

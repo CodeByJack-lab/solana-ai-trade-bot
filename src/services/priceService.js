@@ -3,7 +3,7 @@
 
 const axios = require('axios');
 const { getUSDHKDRate } = require('../utils/currency');
-const configEnv = require('../config/env');
+const configEnv = require('../config/config');
 const { sendAdminAlert } = require('./telegramService');
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";

@@ -7,7 +7,7 @@ const { securityGuard } = require('../services/securityGuard');
 const { executeBuy } = require('../services/tradeService');
 const { consensusService } = require('../services/consensusService');
 const { canBuyTrending } = require('../services/portfolioService'); 
-const configEnv = require('../config/env'); 
+const configEnv = require('../config/config'); 
 const { healthMonitor } = require('../services/healthMonitor');
 
 const Redis = require('ioredis');

@@ -5,7 +5,7 @@ const { connection } = require('../config/solana');
 const { PublicKey, Transaction, Keypair } = require('@solana/web3.js');
 const axios = require('axios'); 
 const { createBurnInstruction, createCloseAccountInstruction, getAssociatedTokenAddress } = require('@solana/spl-token');
-const configEnv = require('../config/env');
+const configEnv = require('../config/config');
 
 let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;

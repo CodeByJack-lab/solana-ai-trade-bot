@@ -6,7 +6,7 @@ const { connection, broadcastWithPromiseAny } = require('../config/solana'); // 
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
 const { healthMonitor } = require('./healthMonitor'); 
-const configEnv = require('../config/env'); 
+const configEnv = require('../config/config'); 
 
 let bs58 = require('bs58');
 if (bs58.default) {

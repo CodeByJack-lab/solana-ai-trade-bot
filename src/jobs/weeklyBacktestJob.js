@@ -2,8 +2,9 @@
 // 📝 檔案功能用途：雙軌高精度回測引擎。極限壓榨 Node.js 算力，實裝 1355 組兩階段無縫網格。計算完畢後生成 BACKTEST 提案，交由 autoApplyJob 進行 60 分鐘審批倒數。
 
 const { supabase } = require('../config/supabase');
-const { aiOrchestrator } = require('../services/aiOrchestrator');
+const { keyRotator } = require('../services/keyRotator');
 const cron = require('node-cron');
+const axios = require('axios');
 const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
 const { sendTelegramAlert } = require('../services/telegramService');
@@ -202,9 +203,31 @@ Output JSON:
   "evaluation_report": "<Cantonese explanation under 100 words outlining the reasoning, risks, and market context of these parameters>"
 }`;
 
-            console.log(`🧠 [Evolution Engine] 參數計算完畢，正在呼叫 AI 撰寫評估報告...`);
-            const aiDecision = await aiOrchestrator.executeTask('EVOLUTION_MASTER', 'GROQ', prompt, { bypassLimit: true });
-            const evaluation = aiDecision?.evaluation_report || "AI 評估超時，僅提供數學最佳解。";
+console.log(`🧠 [Evolution Engine] 參數計算完畢，正在呼叫 AI 資源池撰寫評估報告...`);
+            
+            // 👇 V9.1 改用 keyRotator 排隊打 API 並加入 Try-Catch 降級
+            let aiDecision = null;
+            try {
+                aiDecision = await keyRotator.enqueueRequest(async (apiKey) => {
+                    const isGroq = apiKey.startsWith('gsk_');
+                    const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
+                    const modelName = isGroq ? 'llama-3.3-70b-versatile' : 'mistral-large-latest';
+
+                    const res = await axios.post(apiUrl, {
+                        model: modelName,
+                        messages: [{ role: "user", content: prompt }],
+                        response_format: { type: "json_object" }
+                    }, {
+                        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+                        timeout: 30000
+                    });
+                    return JSON.parse(res.data.choices[0].message.content);
+                });
+            } catch (aiErr) {
+                console.warn(`⚠️ [Evolution Engine] AI 評估失敗，平滑降級: ${aiErr.message}`);
+            }
+
+            const evaluation = aiDecision?.evaluation_report || "AI 評估超時或冷卻中，僅提供數學最佳解。";
 
             // 4. 寫入 ai_proposals 提案表 (PENDING 狀態)，交由 autoApplyJob 執行 60 分鐘倒數
             const proposedChanges = { 

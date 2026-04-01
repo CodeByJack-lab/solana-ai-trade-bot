@@ -1,7 +1,0 @@
-OKTA application client ID：0oa220wn2g9gH0nLn1d8
-
-OKTA LDAP：
-iptco.ldap.okta.com
-dc=iptco,dc=okta,dc=com
-ou=users,dc=iptco,dc=okta,dc=com
-ou=groups,dc=iptco,dc=okta,dc=com

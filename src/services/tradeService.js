@@ -11,7 +11,7 @@ const { executeLiveSwapUAT } = require('./liveTradeService');
 const { sendTelegramAlert, sendAdminAlert } = require('./telegramService'); 
 const { healthMonitor } = require('./healthMonitor');
 const { getPersonNameByAddress, logNewDeposit, logNewWithdrawal, getContributionStats } = require('./dbService');
-const configEnv = require('../config/env'); 
+const configEnv = require('../config/config'); 
 
 let bs58 = require('bs58');
 if (bs58.default) bs58 = bs58.default;

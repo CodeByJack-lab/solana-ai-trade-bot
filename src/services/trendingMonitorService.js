@@ -1,12 +1,12 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：隱形獵人爬蟲。每 2 小時從 GeckoTerminal 獲取 Solana 鏈上真實 Volume Top 100，具備防 429 智能重試與去重機制。
+// 📝 檔案功能用途：隱形獵人爬蟲。每 2 小時從 GeckoTerminal 獲取 Solana 真實 Volume Top 100，具備防 429 智能重試與去重機制。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const { getPortfolio, canBuyTrending } = require('./portfolioService');
 const { healthMonitor } = require('./healthMonitor');
 const { trendingJob } = require('../jobs/trendingJob');
-const configEnv = require('../config/env');
+const configEnv = require('../config/config');
 const Redis = require('ioredis');
 const { sendAdminAlert } = require('./telegramService');
 const redis = new Redis(configEnv.cache.redisUrl);
@@ -14,39 +14,32 @@ const redis = new Redis(configEnv.cache.redisUrl);
 let isCrawlerRunning = false;
 
 const trendingMonitorService = {
-    /**
-     * 🌐 呼叫 GeckoTerminal 獲取 Solana 真實 Volume 排行榜 (支援智能防 429 重試)
-     */
     async fetchTop100FromGecko() {
         let allPools = [];
         console.log('🌐 [Gecko Crawler] 開始分批抓取 8 頁 (約 160 個池)，準備過濾 Solana 真・Top 100...');
 
-        const targetPages = 8; // 攞 8 頁，確保去重後有 100 隻幣
+        const targetPages = 8; 
 
         for (let page = 1; page <= targetPages; page++) {
             let success = false;
             let retryCount = 0;
             const maxRetries = 3;
 
-            // 🛡️ 智能重試 Loop：專擋 429 Too Many Requests
             while (!success && retryCount < maxRetries) {
                 try {
-                    // 🎯 這裡的 /networks/solana/ 已經完美鎖死只拿 Solana 鏈的數據
                     const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools?page=${page}`;
                     const res = await axios.get(url, { headers: { 'accept': 'application/json' }, timeout: 10000 });
                     
                     if (res.data?.data) {
                         allPools = allPools.concat(res.data.data);
                     }
-                    success = true; // 成功攞到，跳出 Retry Loop
+                    success = true; 
                     console.log(`📑 [Gecko] 第 ${page} 頁抓取成功！`);
 
-                    // 正常成功後，隨機休息 3 - 5 秒，扮真人，極大減低被 WAF 封鎖機會
                     if (page < targetPages) {
                         const delay = Math.floor(Math.random() * 2000) + 3000;
                         await new Promise(r => setTimeout(r, delay));
                     }
-
                 } catch (err) {
                     retryCount++;
                     const is429 = err.response?.status === 429;
@@ -58,9 +51,8 @@ const trendingMonitorService = {
                         break; 
                     }
 
-                    // 如果係 429，代表被限流，重重地罰息 10-15 秒先再試
                     if (is429) {
-                        const penaltyDelay = Math.floor(Math.random() * 5000) + 10000; // 10s - 15s
+                        const penaltyDelay = Math.floor(Math.random() * 5000) + 10000; 
                         console.log(`⏳ 觸發 API 429 保護，強制冷卻 ${Math.round(penaltyDelay/1000)} 秒後重試...`);
                         await new Promise(r => setTimeout(r, penaltyDelay));
                     } else {
@@ -69,7 +61,6 @@ const trendingMonitorService = {
                 }
             }
         }
-        
         return allPools;
     },
 
@@ -91,7 +82,9 @@ const trendingMonitorService = {
                 if (!config || !config.is_running) { isCrawlerRunning = false; return; }
 
                 const { data: stratParams } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 3).single();
-                const dynamicMinLiquidity = stratParams?.min_liquidity || 150000; // 預設 15萬美金流動性
+                
+                // 🟢 修正：將預設最低流動性要求由 150,000 改為 50,000 美金
+                const dynamicMinLiquidity = stratParams?.min_liquidity || 50000; 
 
                 const pools = await this.fetchTop100FromGecko();
                 if (pools.length === 0) { isCrawlerRunning = false; return; }
@@ -99,7 +92,6 @@ const trendingMonitorService = {
                 let top100Array = [];
                 let incubatorArray = [];
                 
-                // 🚀 使用 Set 追蹤已加入的 Token 去重
                 let uniqueMints = new Set();
                 let currentRank = 1;
 
@@ -107,7 +99,6 @@ const trendingMonitorService = {
                 const activePositions = portfolio.positions || [];
                 const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
 
-                // 黑名單：WSOL, USDC, USDT 等
                 const blacklist = [
                     'So11111111111111111111111111111111111111112', 
                     'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
@@ -122,11 +113,9 @@ const trendingMonitorService = {
                     if (!mintAddress || mintAddress.length < 32) continue;
                     if (blacklist.includes(mintAddress)) continue;
 
-                    // 🚨 去重過濾：如果這隻幣已經入咗榜，直接 Skip
                     if (uniqueMints.has(mintAddress)) continue;
                     uniqueMints.add(mintAddress);
 
-                    // 🎯 攞夠 100 隻 Unique Solana Token 就收工
                     if (top100Array.length >= 100) break;
 
                     const attr = pool.attributes || {};
@@ -145,8 +134,8 @@ const trendingMonitorService = {
 
                     top100Array.push({ ...baseData, rank: currentRank });
 
-                    // 🛡️ 過濾 Rank 11-100 且達標的潛力幣進入保溫箱 (Rank 1-10 放棄，太熱門多夾子)
-                    if (currentRank >= 11 && currentRank <= 100 && liquidityUsd >= dynamicMinLiquidity) {
+                    // 🟢 修正：放寬 Rank 要求，由 Rank 1 至 Rank 100 全數納入考慮
+                    if (currentRank >= 1 && currentRank <= 100 && liquidityUsd >= dynamicMinLiquidity) {
                         const isBlacklisted = await redis.get(`scam_blacklist:${mintAddress}`);
                         if (isBlacklisted) {
                             currentRank++;
@@ -159,7 +148,6 @@ const trendingMonitorService = {
                             continue;
                         }
 
-                        // 檢查冷卻期 (保留你原本優良的防打臉機制)
                         const { data: tradeHistory } = await supabase
                             .from(`trade_history_${tableSuffix}`)
                             .select('created_at, realized_pnl_pct')
@@ -172,7 +160,6 @@ const trendingMonitorService = {
                         if (tradeHistory && tradeHistory.length > 0) {
                             const lastTrade = tradeHistory[0];
                             const timeSinceLastTrade = Date.now() - new Date(lastTrade.created_at).getTime();
-                            // 虧損賣出後 24 小時內不碰
                             if (lastTrade.realized_pnl_pct < 0 && timeSinceLastTrade < 24 * 60 * 60 * 1000) isOnCooldown = true; 
                         }
                         
@@ -182,7 +169,6 @@ const trendingMonitorService = {
                     currentRank++;
                 }
 
-                // 3. 雙表同步 (Sync to Supabase)
                 if (top100Array.length > 0) {
                     await supabase.from('trending_top100').delete().neq('mint_address', 'dummy'); 
                     const { error: insertErr } = await supabase.from('trending_top100').insert(top100Array);
@@ -197,7 +183,7 @@ const trendingMonitorService = {
                 if (incubatorArray.length > 0) {
                     const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
                     if (!error) {
-                        console.log(`🦎 [Gecko Crawler] 成功將 ${incubatorArray.length} 隻 Rank 11-100 的藍籌幣送入保溫箱！`);
+                        console.log(`🦎 [Gecko Crawler] 成功將 ${incubatorArray.length} 隻 Rank 1-100 的藍籌幣送入保溫箱！`);
                         healthMonitor.setStatus('Top200_Crawler', `🟢 已佈局 ${incubatorArray.length} 隻大藍籌`);
                         
                         if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {
@@ -212,7 +198,6 @@ const trendingMonitorService = {
             }
         };
 
-        // 啟動 5 秒後行第一次，之後每 2 小時行一次
         setTimeout(() => { runTask(); }, 5000); 
         setInterval(runTask, 2 * 60 * 60 * 1000); 
     }

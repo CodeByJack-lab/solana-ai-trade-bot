@@ -1,38 +1,42 @@
-// src/index.js - V8.9.1
-const configEnv = require('./config/env'); 
-const { supabase } = require('./config/supabase'); 
+// src/index.js
+// 📝 檔案功能用途：V9.1 系統啟動核心 (Bootloader)。喚醒多路聚合器、啟動各類防禦排程，並實時監聽 DB 的全域狀態。
+
+const config = require('./config/config');
+const { supabase } = require('./config/supabase');
 const { initPortfolio, getPortfolio, syncLiveBalanceToDB, updateSystemStatus } = require('./services/portfolioService');
-const { startMarketMonitor } = require('./services/monitorService'); 
-const { getSolPriceInHKD } = require('./services/priceService'); 
+const { startMarketMonitor } = require('./services/monitorService');
+const { getSolPriceInHKD } = require('./services/priceService');
+const { sourceAggregator } = require('./services/sourceAggregator');
+const { healthMonitor } = require('./services/healthMonitor');
+const { environmentService } = require('./services/environmentService');
+
+// 背景排程 (Jobs)
 const { weeklyBacktestJob } = require('./jobs/weeklyBacktestJob');
-const { macroMonitorService } = require('./services/macroMonitorService'); 
-const { retrospectiveJob } = require('./jobs/retrospectiveJob');           
-const { healthMonitor } = require('./services/healthMonitor');             
-const { graveyardJob } = require('./jobs/graveyardJob');                   
-const { janitorJob } = require('./jobs/janitorJob');   
+const { retrospectiveJob } = require('./jobs/retrospectiveJob');
+const { graveyardJob } = require('./jobs/graveyardJob');
+const { janitorJob } = require('./jobs/janitorJob');
 const { trendingMonitorService } = require('./services/trendingMonitorService');
 const { trendingJob } = require('./jobs/trendingJob');
-const { macroJob } = require('./jobs/macroJob');
 const { promptManager } = require('./services/promptManager');
-
-// 🚀 引入自動微調執法官
 const { autoApplyJob } = require('./jobs/autoApplyJob');
 
 async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
     try {
         const currentCache = getPortfolio();
+        if (!currentCache) return;
+        
         const solHkdPrice = await getSolPriceInHKD();
         
-        let config = newData;
-        if (!config) {
+        let sysConfig = newData;
+        if (!sysConfig) {
             const { data } = await supabase.from('system_config').select('*').eq('id', 1).single();
-            config = data;
+            sysConfig = data;
         }
-        if (!config) return;
+        if (!sysConfig) return;
 
-        const isPaper = config.trade_mode === 'PAPER';
+        const isPaper = sysConfig.trade_mode === 'PAPER';
         const modeText = isPaper ? '📝 模擬盤' : '🔥 實盤';
-        const statusIcon = config.is_running ? '🟢 監控中' : '🛑 已暫停';
+        const statusIcon = sysConfig.is_running ? '🟢 監控中' : '🛑 已暫停';
         
         const investedSol = currentCache.positions.reduce((sum, pos) => sum + ((pos.quantity || 0) * (pos.entry_price_sol || 0)), 0);
         const totalCapitalSol = currentCache.cash_sol + investedSol;
@@ -55,14 +59,18 @@ async function forceUpdateStatusAndPrint(newData = null, isFromLoop = false) {
 
 async function startApp() {
     console.log("======================================================");
-    console.log("🚀 SOL_Trade V8.9.1 (Redis 原子鎖 + 自動進化版) 啟動...");
+    console.log("🚀 SOL_QUANT V9.1 (多路冗餘 + AI 降級限流版) 啟動...");
     console.log("======================================================");
 
+    // 1. 初始化 AI 劇本快取
     await promptManager.init();
+
+    // 2. 啟動 Webhook、Express 伺服器與 0 延遲監控
     startMarketMonitor(); 
 
     let isFirstLoad = true; 
 
+    // 3. 監聽全域配置變更
     supabase.channel('system_config_monitor')
         .on(
             'postgres_changes',
@@ -70,12 +78,14 @@ async function startApp() {
             async (payload) => {
                 const newData = payload.new;
                 
+                // 處理交易模式切換
                 if (global.tradeMode !== newData.trade_mode) {
                     console.log(`\n🔄 [系統指令] 偵測到交易模式切換 (${global.tradeMode} ➡️ ${newData.trade_mode})`);
                     console.log(`🧹 正在清洗大腦記憶體，重新載入 ${newData.trade_mode} 專屬數據庫...`);
                     await initPortfolio(); 
                 }
 
+                // 更新本地 RAM 餘額
                 const portfolio = getPortfolio();
                 if (portfolio) {
                     if (newData.trade_mode === 'PAPER') {
@@ -105,24 +115,30 @@ async function startApp() {
         )
         .subscribe();
 
+    // 4. 載入倉位記憶體
     const portfolio = await initPortfolio();
-    if (!portfolio) process.exit(1);
+    if (!portfolio) {
+        console.error("❌ [Boot] 倉位記憶體載入失敗，系統終止。");
+        process.exit(1);
+    }
     
     global.isRunning = true;
     global.tradeMode = portfolio.mode;
 
-    console.log("⚙️ [Boot] 正在錯峰喚醒背景雷達與排程任務...");
+    console.log("⚙️ [Boot] 正在錯峰喚醒多路聚合器與背景排程...");
     
-    setTimeout(() => { macroMonitorService.start(); }, 12000);  
-    setTimeout(() => { macroJob.start(); }, 14000);             
-    setTimeout(() => { trendingMonitorService.start(); }, 16000); 
-    setTimeout(() => { trendingJob.start(); }, 18000);          
-    setTimeout(() => { janitorJob.start(); }, 20000);           
-    setTimeout(() => { graveyardJob.start(); }, 22000);         
-    setTimeout(() => { retrospectiveJob.start(); }, 24000);     
-    setTimeout(() => { autoApplyJob.start(); }, 25000);         // 🚀 啟動自動套用執法官
-    setTimeout(() => { weeklyBacktestJob.start(); }, 26000);    
+    // 5. 錯峰啟動各類服務，避免瞬間佔滿 CPU 與連線數
+    setTimeout(() => { sourceAggregator.start(); }, 5000);              // 啟動多路 WebSocket 冗餘監聽
+    setTimeout(() => { trendingMonitorService.start(); }, 16000);       // Gecko 真・Top 100 爬蟲
+    setTimeout(() => { trendingJob.start(); }, 18000);                  // 數學雷達
+    setTimeout(() => { janitorJob.start(); }, 20000);                   // 閒置帳戶回收清道夫
+    setTimeout(() => { graveyardJob.start(); }, 22000);                 // 死幣火化劊子手
+    setTimeout(() => { retrospectiveJob.start(); }, 24000);             // AI 總指揮覆盤 (保留)
+    setTimeout(() => { autoApplyJob.start(); }, 25000);                 // 60 分鐘自動審批防丟失
+    setTimeout(() => { weeklyBacktestJob.start(); }, 26000);            // 雙軌高精度回測引擎
+    setTimeout(() => { environmentService.start(); }, 12000);
 
+    // 6. 背景定時回報循環
     async function backgroundReportLoop() {
         if (global.isRunning === false) {
             console.log("💤 系統暫停中...");

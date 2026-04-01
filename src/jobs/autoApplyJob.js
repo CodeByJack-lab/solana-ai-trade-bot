@@ -4,7 +4,7 @@
 const { supabase } = require('../config/supabase');
 const { processTelegramCallback } = require('../services/telegramService');
 const cron = require('node-cron');
-const configEnv = require('../config/env');
+const configEnv = require('../config/config');
 
 const autoApplyJob = {
     async checkAndApply() {
