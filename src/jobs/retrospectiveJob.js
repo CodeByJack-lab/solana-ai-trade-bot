@@ -6,7 +6,6 @@ const { keyRotator } = require('../services/keyRotator'); // 👈 換成資源�
 const axios = require('axios'); // 👈 新增 axios 用來打 API
 const cron = require('node-cron');
 const { getPortfolio } = require('../services/portfolioService');
-const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
 const { promptManager } = require('../services/promptManager');
 const { sendStrategyAlert } = require('../services/telegramService');
