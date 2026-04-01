@@ -1,5 +1,5 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V9.1.7 100分量化安檢中樞。實作「4 維度文字快篩」、「實體防偽白名單」、「藍籌鐵閘過濾」與「OFI 動能質量驗證」，精準裁決分數。
+// 📝 檔案功能用途：V9.1.8 100分量化安檢中樞。實作「假池秒殺」、「穩定幣攔截」、「藍籌鐵閘過濾」與「OFI 動能質量驗證」，精準裁決分數。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -109,10 +109,10 @@ class SecurityGuard {
     }
 
     /**
-     * 🎯 V9.1.7 量化 100 分核心引擎 (加入白名單鐵閘)
+     * 🎯 V9.1.8 量化 100 分核心引擎 (加入貔貅假池與穩定幣攔截)
      */
     async calculateQuantScore(mint, type = 'NEWBORN') {
-        // 🛡️ [新增] V9.1.7 藍籌白名單鐵閘 (只針對 TRENDING 策略，在 Call API 前攔截以節省資源)
+        // 🛡️ 藍籌白名單鐵閘 (只針對 TRENDING 策略，在 Call API 前攔截以節省資源)
         if (type === 'TRENDING' && config.trade.enableTrendingWhitelist) {
             const whitelist = config.trade.trendingWhitelist || [];
             if (!whitelist.includes(mint)) {
@@ -129,12 +129,35 @@ class SecurityGuard {
         const marketData = await this._fetchMarketData(mint);
         if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取報價數據', marketData: null };
 
-        // 🌟 [V9.1.6 核心加強] 終極實體防偽：針對重災區，指定幣種只認可唯一真品地址
+        const upperSymbol = marketData.symbol.toUpperCase();
+
+        // 🛑 [新增一刀切] 穩定幣與假穩定幣攔截 (任何以 USD 開頭的代幣)
+        if (upperSymbol.startsWith('USD')) {
+            console.log(`🛡️ [Stablecoin Guard] 觸發攔截！拒絕交易穩定幣或假穩定幣: ${upperSymbol} (${mint})`);
+            return { 
+                numeric_score: 0, 
+                isSafe: false, 
+                reason: `🛑 穩定幣攔截: 系統不交易 ${upperSymbol} 系列代幣`, 
+                marketData 
+            };
+        }
+
+        // 🚨 [新增一刀切] 假池 / 貔貅盤終極防禦 (高流動性 + 極低交易量)
+        if (marketData.liquidity > 100000 && marketData.volume5m < 1000) {
+            console.log(`🚨 [Honeypot Guard] 秒殺假池！流動性 $${marketData.liquidity.toFixed(0)} 但 5m 交易量僅 $${marketData.volume5m.toFixed(0)}: ${upperSymbol}`);
+            return {
+                numeric_score: 0,
+                isSafe: false,
+                reason: `🛑 假池/貔貅攔截: $10萬以上流動性但缺乏真實交易量 ($${marketData.volume5m.toFixed(0)})`,
+                marketData
+            };
+        }
+
+        // 🌟 終極實體防偽：針對重災區，指定幣種只認可唯一真品地址
         const VERIFIED_TOKENS = {
             'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au'
         };
 
-        const upperSymbol = marketData.symbol.toUpperCase();
         if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) {
             console.log(`🛡️ [Fake Shield] 觸發終極防偽！秒殺假冒 ${upperSymbol} (${mint})`);
             return { 
