@@ -15,6 +15,14 @@ class SecurityGuard {
         const fullText = `${symbol} ${name} ${description}`.toLowerCase();
         let result = { isFatal: false, safetyPenalty: 0, fomoPenalty: 0, requireAuthCheck: false, requireLpCheck: false, reasons: [] };
 
+        // 🛑 [V9.1.2 終極拔線] 全域 Ticker 物理黑名單
+        const bannedSymbols = ['VDOR']; // 👈 以後有乞人憎嘅幣，直接將個 Symbol 寫入嚟
+        if (bannedSymbols.includes((symbol || '').toUpperCase())) {
+            result.isFatal = true;
+            result.reasons.push(`⛔ 系統級物理黑名單封殺 ($${symbol})`);
+            return result; // 只要係黑名單，直接 0 分抬走！
+        }
+
         const airdropPatterns = [/free mint/i, /free claim/i, /airdrop/i, /claim now/i, /connect wallet/i];
         for (const p of airdropPatterns) {
             if (p.test(fullText)) {
