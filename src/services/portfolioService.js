@@ -156,10 +156,29 @@ function updateCache(action, solAmount, positionData = null) {
     }
 }
 
+// 🧹 [新增] 專門用來清洗模擬盤記憶體 (一鍵失憶)
+async function resetPaperMemory() {
+    if (portfolio.mode !== 'PAPER') return;
+    
+    // 1. 強制清空記憶體中的持倉
+    portfolio.positions = [];
+    
+    // 2. 重新去資料庫讀取 (因為資料庫已經被 Dashboard 清空，所以會讀返 0 出嚟)
+    try {
+        const { supabase } = require('../config/supabase');
+        const { data: dbConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
+        if (dbConfig) portfolio.cash_sol = dbConfig.simulated_balance;
+        console.log(`🧠 [Portfolio] 記憶體已被強制重置！目前模擬盤餘額: ${portfolio.cash_sol} SOL，持倉數: 0`);
+    } catch (e) {
+        console.error("無法重置 Portfolio 餘額:", e.message);
+    }
+}
+
 module.exports = { 
     initPortfolio, 
     getPortfolio, 
     updateCache, 
+    resetPaperMemory, 
     syncLiveBalanceToDB, 
     updateSystemStatus,
     getMemeCount,

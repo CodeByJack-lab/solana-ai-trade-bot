@@ -221,18 +221,16 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
 }
 
 // ========================================================
-// 🧹 獨立主動清道夫 (Active Death Sweeper)
+// 🧹 獨立主動清道夫 (Active Death Sweeper - 雙軌制版)
 // ========================================================
 function startActiveSweeper() {
-    console.log('🧹 [Sweeper] 主動清道夫已上線，每 60 秒巡邏清除殭屍倉位。');
+    console.log('🧹 [Sweeper] 主動清道夫已上線，按幣種特性 (Meme/Trending) 執行雙軌清理。');
     
     setInterval(async () => {
         if (!globalSysConfig.is_running) return;
         
         const portfolio = getPortfolio();
         const now = Date.now();
-        const timeStopMins = config?.trade?.timeStopMinutes || 30;
-        const timeStopTarget = config?.trade?.timeStopProfitTarget || 15;
 
         for (const pos of portfolio.positions) {
             if (!pos.created_at) continue;
@@ -241,20 +239,30 @@ function startActiveSweeper() {
             const currentPrice = pos.highest_price_sol || pos.entry_price_sol;
             const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
             const isHalfSold = pos.strategy_type?.includes('HALF_SOLD');
+            
+            // 🔍 判斷身份：係藍籌定土狗？
+            const isTrending = pos.strategy_type?.includes('TRENDING');
+
+            // 🚦 雙軌制核心：Meme 同 Trending 嘅容忍度完全唔同
+            // Meme 狗盤：跟 Config (預設 30 分鐘無 15% 斬)，120 分鐘未翻本當殭屍
+            // Trending 藍籌：畀足 24 小時 (1440分鐘) 橫盤，48 小時 (2880分鐘) 未郁先當殭屍
+            const timeStopMins = isTrending ? 1440 : (config?.trade?.timeStopMinutes || 30);
+            const timeStopTarget = isTrending ? 5 : (config?.trade?.timeStopProfitTarget || 15);
+            const zombieMins = isTrending ? 2880 : 120;
 
             let shouldSell = false;
             let reason = '';
 
-            // 1. 無差別 Time-Stop (只要超過 30 分鐘，未達標就踢)
+            // 1. 動態 Time-Stop
             if (ageMins >= timeStopMins && pnlPct < timeStopTarget) {
                 shouldSell = true;
-                reason = `🧹 [主動清道夫] 滯留過久 (${ageMins.toFixed(0)} 分鐘)，判定為死魚盤，無差別清倉！`;
+                reason = `🧹 [主動清道夫] ${isTrending ? '藍籌' : 'Meme'} 滯留過久 (${ageMins.toFixed(0)} 分鐘未達 +${timeStopTarget}%)，無差別清倉！`;
             }
 
-            // 2. 終極殭屍防線：超過 120 分鐘 (2小時) 依然未翻本，強制火化！
-            if (ageMins >= 120 && !isHalfSold) {
+            // 2. 動態殭屍防線
+            if (!shouldSell && ageMins >= zombieMins && !isHalfSold) {
                 shouldSell = true;
-                reason = `🧟 [主動清道夫] 殭屍幣超時 (${ageMins.toFixed(0)} 分鐘)，強制火化拔線！`;
+                reason = `🧟 [主動清道夫] ${isTrending ? '藍籌' : 'Meme'} 殭屍幣超時 (${ageMins.toFixed(0)} 分鐘未翻本)，強制火化拔線！`;
             }
 
             if (shouldSell) {
@@ -319,6 +327,29 @@ function startPositionMonitor() {
                     }
                 });
                 await Promise.allSettled(sellPromises);
+            }
+            // 🧹 [新增] 攔截重置模擬盤指令，進行一鍵洗腦！
+            else if (cmd.command_type === 'RESET_PAPER') {
+                console.log(`\n🧹 [System] 收到前端重置模擬盤指令！正在進行物理失憶...`);
+                
+                // 1. 清空風控雷達 Map (防跳頻嗰個)
+                tokenStateRadar.clear();
+                
+                // 2. 清除 Redis 可能殘留嘅賣出鎖
+                try {
+                    const keys = await redis.keys('sell_lock:*');
+                    if (keys.length > 0) await redis.del(keys);
+                } catch(e) {}
+
+                // 3. 呼叫 portfolioService 進行記憶體大掃除
+                try {
+                    const { resetPaperMemory } = require('./portfolioService');
+                    if (resetPaperMemory) await resetPaperMemory();
+                } catch (e) {
+                    console.log(`⚠️ 無法呼叫 resetPaperMemory: ${e.message}`);
+                }
+
+                console.log(`✅ [System] 洗腦完成！幽靈倉位已全數清除，無需重啟系統！`);
             }
             
             // 執行完畢後清理隊列，保持資料庫乾淨

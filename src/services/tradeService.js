@@ -30,7 +30,7 @@ async function executeReadWithFailover(operationName, readFunction) {
         try {
             return await readFunction(readConnection);
         } catch (error) {
-            console.warn(`⚠️ [Read Fallback] ${operationName} 於免費節點 ${i+1} 失敗，嘗試切換備援...`);
+            console.log(`⚠️ [Read Fallback] ${operationName} 於免費節點 ${i+1} 失敗，嘗試切換備援...`);
             if (i === PUBLIC_RPC_ENDPOINTS.length - 1) {
                 try { return await readFunction(connection); } 
                 catch (mainErr) { return null; }
@@ -46,7 +46,7 @@ try {
         if (rawKey.startsWith('[')) globalWalletPublicKey = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(rawKey))).publicKey.toString();
         else globalWalletPublicKey = Keypair.fromSecretKey(bs58.decode(rawKey)).publicKey.toString();
     }
-} catch (e) { console.error("⚠️ [TradeService] 無法解析 Private Key"); }
+} catch (e) { console.log("⚠️ [TradeService] 無法解析 Private Key"); }
 
 async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     return await executeReadWithFailover('getRealTokenBalance', async (readConn) => {
@@ -84,14 +84,14 @@ async function checkRugcheckApi(mintAddress) {
         if (report?.risks && report.risks.length > 0) {
             const dangerRisks = report.risks.filter(r => r.level === 'danger');
             if (dangerRisks.length > 0) {
-                console.warn(`🚨 [RugCheck] 攔截！發現致命風險: ${dangerRisks.map(r => r.name).join(', ')}`);
+                console.log(`🚨 [RugCheck] 攔截！發現致命風險: ${dangerRisks.map(r => r.name).join(', ')}`);
                 return false; 
             }
         }
         console.log(`✅ [RugCheck] 掃描通過，LP 安全，准許放行！`);
         return true;
     } catch (err) {
-        console.warn(`⚠️ [RugCheck] API 無回應或超時，為免錯失機會，預設放行 (${err.message})`);
+        console.log(`⚠️ [RugCheck] API 無回應或超時，為免錯失機會，預設放行 (${err.message})`);
         return true; 
     }
 }
@@ -130,7 +130,7 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
         const response = await axios.get(url, { headers, timeout: 8000 });
         
         if (!response.data || !response.data.outAmount) {
-             console.warn(`⚠️ [Jupiter] ${tokenMint.substring(0,6)} 報價回傳空數據`);
+             console.log(`⚠️ [Jupiter] ${tokenMint.substring(0,6)} 報價回傳空數據`);
              return null;
         }
 
@@ -150,14 +150,14 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
             if (status === 400) {
                 // 路徑未建立，安靜 return null 等待外層 Retry
             } else if (status === 429) {
-                console.error(`🚨 [Jupiter] 頻率限制 (429)！API 請求過快或額度爆滿。`);
+                console.log(`🚨 [Jupiter] 頻率限制 (429)！API 請求過快或額度爆滿。`);
             } else if (status === 401 || status === 403) {
-                console.error(`🚨 [Jupiter] API Key 無效或未授權 (Status: ${status})！`);
+                console.log(`🚨 [Jupiter] API Key 無效或未授權 (Status: ${status})！`);
             } else {
-                console.error(`❌ [Jupiter Error] Status: ${status} | Msg: ${errorMsg}`);
+                console.log(`❌ [Jupiter Error] Status: ${status} | Msg: ${errorMsg}`);
             }
         } else {
-            console.error(`❌ [Jupiter Network Error] 網絡連線異常: ${err.message}`);
+            console.log(`❌ [Jupiter Network Error] 網絡連線異常: ${err.message}`);
         }
         return null;
     }
@@ -260,7 +260,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
                 await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
             }
         } catch (redisErr) {
-            console.error(`⚠️ [Blacklist Error] 無法寫入黑名單: ${redisErr.message}`);
+            console.log(`⚠️ [Blacklist Error] 無法寫入黑名單: ${redisErr.message}`);
         }
         
         return false;
@@ -355,7 +355,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         const realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
         if (realBal !== null) {
             if (realBal === 0) {
-                console.error(`🚨 [FATAL] 鏈上餘額確認為 0，自動執行本地撇帳。`);
+                console.log(`🚨 [FATAL] 鏈上餘額確認為 0，自動執行本地撇帳。`);
                 await forceWriteOff(mintAddress, "實盤餘額為 0，假持倉撇帳");
                 return false;
             }
@@ -369,7 +369,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     let quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
     
     if (!quoteData) {
-        console.warn(`⚠️ [Liquidity Warning] ${tokenSymbol} 無法於 ${(currentSlippage/100).toFixed(0)}% 滑點報價，啟動絕命放寬...`);
+        console.log(`⚠️ [Liquidity Warning] ${tokenSymbol} 無法於 ${(currentSlippage/100).toFixed(0)}% 滑點報價，啟動絕命放寬...`);
         const fallbackSteps = isStopLoss ? [2000, 3000, 5000] : [1000, 1500]; 
         
         for (const stepSlippage of fallbackSteps) {
@@ -382,7 +382,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     }
 
     if (!quoteData) {
-        console.error(`❌ [Fatal] 已達極限滑點仍無法取得報價，放棄一般平倉。`);
+        console.log(`❌ [Fatal] 已達極限滑點仍無法取得報價，放棄一般平倉。`);
         
         // ☠️ 終極 Rug Pull 判定與撇帳機制
         // 如果係因為逃生/止損而賣出，但連 50% 滑點都搵唔到一條生路，代表個池已經乾晒 (Rugged)
