@@ -184,7 +184,6 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         console.log(`❌ [Execution] 餘額不足 (${portfolio.cash_sol.toFixed(2)} < ${requiredTotalSol.toFixed(2)})，取消開倉。`);
         return false;
     }
-
     // 🚀 V9.1 階梯式滑點 + 狙擊等候環 (解決 Jupiter 新池延遲問題)
     const buySlippageSteps = [250, 500, 750, 1000];
     let quoteData = null;
