@@ -1,5 +1,5 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V9.1 100分量化安檢中樞。實作「4 維度文字快篩」、「真假撞名打假」與「OFI 動能質量驗證」。
+// 📝 檔案功能用途：V9.1 100分量化安檢中樞。實作「4 維度文字快篩」、「真假撞名打假」、「語系防線」與「OFI 動能質量驗證」。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -15,12 +15,21 @@ class SecurityGuard {
         const fullText = `${symbol} ${name} ${description}`.toLowerCase();
         let result = { isFatal: false, safetyPenalty: 0, fomoPenalty: 0, requireAuthCheck: false, requireLpCheck: false, reasons: [] };
 
-        // 🛑 [V9.1.2 終極拔線] 全域 Ticker 物理黑名單
-        const bannedSymbols = ['VDOR']; // 👈 以後有乞人憎嘅幣，直接將個 Symbol 寫入嚟
+        // 🛑 [V9.1.2 終極拔線] 全域 Ticker 物理黑名單 (包含常見穩定幣、LST及乞人憎死池)
+        const bannedSymbols = ['VDOR', 'TRUMP', 'USDT', 'USDC', 'DAI', 'PYUSD', 'JITOSOL', 'MSOL']; 
         if (bannedSymbols.includes((symbol || '').toUpperCase())) {
             result.isFatal = true;
             result.reasons.push(`⛔ 系統級物理黑名單封殺 ($${symbol})`);
             return result; // 只要係黑名單，直接 0 分抬走！
+        }
+
+        // 🛑 [V9.1.3 語系防線] 攔截所有包含 中/日/韓/俄/泰/阿拉伯文 的代幣 (允許 Emoji)
+        // 覆蓋: \u4E00-\u9FFF(中文), \u3040-\u30FF(日文), \uAC00-\uD7AF(韓文), \u0400-\u04FF(俄文) 等
+        const nonEnglishRegex = /[\u0400-\u04FF\u0600-\u06FF\u0E00-\u0E7F\u3040-\u30FF\u31F0-\u31FF\u3400-\u4DBF\u4E00-\u9FFF\uAC00-\uD7AF\uFF00-\uFFEF]/;
+        if (nonEnglishRegex.test(symbol) || nonEnglishRegex.test(name)) {
+            result.isFatal = true;
+            result.reasons.push(`⛔ 小圈子語系封殺: 包含非英文字符 (${symbol} / ${name})`);
+            return result;
         }
 
         const airdropPatterns = [/free mint/i, /free claim/i, /airdrop/i, /claim now/i, /connect wallet/i];
