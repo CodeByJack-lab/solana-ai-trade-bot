@@ -23,9 +23,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.0 系統正常運行中 (多路冗餘 + Fast-Track)'));
+// 🟢 [優化 1] 建立全域變數緩存，防止高頻轟炸 Database
+let globalSysConfig = { is_running: true };
+let cachedSolPriceUsd = 150;
 
-// 掛載解耦的 Webhook
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.1 系統正常運行中 (高併發優化版)'));
+
 app.use(aggregatorRouter);
 app.use(walletMonitorRouter);
 
@@ -42,35 +45,37 @@ app.post('/webhook/telegram', async (req, res) => {
             
             console.log(`📥 [Telegram Webhook] 收到 ${userName} 的 0 延遲風控指令: ${actionData}`);
 
-            // 1. 處理 0 延遲核按鈕
             if (actionData === 'PANIC_PAUSE_BUY') {
+                globalSysConfig.is_running = false; // 先改 Memory 擋截
                 await supabase.from('system_config').update({ is_running: false, status_msg: '已手動暫停新開倉' }).eq('id', 1);
                 sendAdminAlert(`⏸️ <b>系統已暫停買入</b>\n操作者: ${userName}`);
                 return;
             }
             if (actionData === 'PANIC_RESUME_BUY') {
+                globalSysConfig.is_running = true;
                 await supabase.from('system_config').update({ is_running: true, status_msg: '正常運作中' }).eq('id', 1);
                 sendAdminAlert(`▶️ <b>系統已恢復正常</b>\n操作者: ${userName}`);
                 return;
             }
             if (actionData === 'PANIC_SELL_ALL_CONFIRM') {
+                globalSysConfig.is_running = false;
                 await supabase.from('system_config').update({ is_running: false, status_msg: '手動緊急全平倉中' }).eq('id', 1);
-                sendAdminAlert(`🚨 <b>手動啟動核按鈕</b>\n操作者: ${userName}\n正在全線市價強平！`);
+                sendAdminAlert(`🚨 <b>手動啟動核按鈕</b>\n操作者: ${userName}\n正在全線併發市價強平！`);
 
                 const positions = getPortfolio().positions;
-                for (const pos of positions) {
+                // 🟢 [優化 2] 併發執行緊急平倉，不再排隊槍斃
+                const sellPromises = positions.map(async (pos) => {
                     const lockKey = `sell_lock:${pos.mint_address}`;
                     const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                     if (acquired) {
-                        await runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, "🚨 Telegram 0延遲手動拔線", 1.0)
+                        return runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, "🚨 Telegram 0延遲手動併發拔線", 1.0)
                             .finally(() => redis.del(lockKey));
-                        await new Promise(r => setTimeout(r, 1000)); // 避免 RPC 擁堵
                     }
-                }
+                });
+                await Promise.allSettled(sellPromises);
                 return;
             }
 
-            // 2. 處理原有的 AI 回測提案審批
             if (actionData.startsWith('APPROVE_') || actionData.startsWith('REJECT_')) {
                 await processTelegramCallback(query);
             }
@@ -85,13 +90,16 @@ app.post('/webhook/telegram', async (req, res) => {
 // ========================================================
 const priceHistory1Min = new Map(); 
 
-async function handleZeroLatencyCheck(mint, currentPriceSol, sysConfig, portfolio) {
+async function handleZeroLatencyCheck(mint, currentPriceSol, portfolio) {
     if (!currentPriceSol || currentPriceSol <= 0) return;
     
     const pos = portfolio.positions.find(p => p.mint_address === mint);
-    if (!pos) return; 
+    if (!pos) {
+        // 清理殘留 Memory Leak
+        if (priceHistory1Min.has(mint)) priceHistory1Min.delete(mint);
+        return; 
+    }
 
-    // 維護 1 分鐘價格快取
     const now = Date.now();
     if (!priceHistory1Min.has(mint)) priceHistory1Min.set(mint, []);
     const history = priceHistory1Min.get(mint);
@@ -104,12 +112,12 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, sysConfig, portfoli
     
     const pnlPct = (((currentPriceSol - pos.entry_price_sol) * pos.quantity) / (pos.entry_price_sol * pos.quantity)) * 100;
     
-    // 更新歷史最高價
     if (currentPriceSol > pos.highest_price_sol) {
         if (currentPriceSol / (pos.highest_price_sol || pos.entry_price_sol) < 50) { 
             pos.highest_price_sol = currentPriceSol;
             const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
-            supabase.from(`active_positions_${tableSuffix}`).update({ highest_price_sol: currentPriceSol }).eq('mint_address', pos.mint_address).then();
+            // 🟢 [優化 3] 加入 catch 避免 Unhandled Promise Rejection
+            supabase.from(`active_positions_${tableSuffix}`).update({ highest_price_sol: currentPriceSol }).eq('mint_address', pos.mint_address).then().catch(()=> {});
         }
     }
 
@@ -119,17 +127,18 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, sysConfig, portfoli
 
     let action = 'HOLD'; let reason = ''; let sellFraction = 1.0; 
     
-    // 讀取 config 中的動態門檻
-    const stopLossLimit = -15; // 預設物理止損 15%
-    const tpTrigger = 50;      // 預設追蹤止盈觸發點 50%
-    const pullbackTolerance = 20; // 預設回落容忍 20%
+    // 安全讀取 Config (加防呆)
+    const timeStopMins = config?.trade?.timeStopMinutes || 30;
+    const timeStopTarget = config?.trade?.timeStopProfitTarget || 15;
+    const stopLossLimit = config?.trade?.stopLossPct || -15; 
+    const tpTrigger = 50;      
+    const pullbackTolerance = 20; 
     
-    // ⏳ 檢查 V9.1 專屬 Time-Stop 標籤 (30分鐘未達利潤即斬)
-    if (pos.strategy_type.includes('TIMESTOP')) {
+    if (pos.strategy_type.includes('TIMESTOP') && pos.created_at) {
         const ageMins = (now - new Date(pos.created_at).getTime()) / 60000;
-        if (ageMins >= config.trade.timeStopMinutes && pnlPct < config.trade.timeStopProfitTarget) {
+        if (ageMins >= timeStopMins && pnlPct < timeStopTarget) {
             action = 'SELL';
-            reason = `⏱️ Time-Stop 觸發: 持倉達 ${config.trade.timeStopMinutes} 分鐘但利潤未達 +${config.trade.timeStopProfitTarget}%，強制離場。`;
+            reason = `⏱️ Time-Stop 觸發: 持倉達 ${timeStopMins} 分鐘但利潤未達 +${timeStopTarget}%，強制離場。`;
         }
     }
 
@@ -137,7 +146,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, sysConfig, portfoli
     let trailingReason = '';
     const pnlDropPoints = highestPnlPct - pnlPct; 
 
-    // 動態網格防線邏輯
     if (highestPnlPct >= tpTrigger) {
         if (pnlDropPoints >= pullbackTolerance) { 
             trailingTriggered = true; 
@@ -145,7 +153,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, sysConfig, portfoli
         }
     }
 
-    // 決策樹判定
     if (action === 'HOLD') {
         if (!isHalfSold && pnlPct >= 100) {
             action = 'SELL'; sellFraction = 0.5; 
@@ -169,7 +176,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, sysConfig, portfoli
         }
     }
 
-    // 執行賣出
     if (action === 'SELL') {
         const lockKey = `sell_lock:${pos.mint_address}`;
         const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
@@ -191,13 +197,16 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, sysConfig, portfoli
 // ========================================================
 function startPositionMonitor() {
     console.log('👁️ [Monitor] V9.1 0 延遲秒斬防線與動能接收器已啟動...');
-    let cachedSolPriceUsd = 150; 
     
+    // 🟢 [優化 1.1] 獨立一個 Worker 每 10 秒更新 DB 狀態，解放 Pub/Sub
     setInterval(async () => {
-        try { cachedSolPriceUsd = (await require('./priceService').getSolPriceInHKD()) / 7.8; } catch(e) {}
-    }, 60000);
+        try { 
+            cachedSolPriceUsd = (await require('./priceService').getSolPriceInHKD()) / 7.8; 
+            const { data } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
+            if (data) globalSysConfig.is_running = data.is_running;
+        } catch(e) {}
+    }, 10000);
 
-    // 🎯 訂閱 2 秒報價更新 與 動能衰退拔線訊號
     redisSub.subscribe('price_updates', 'emergency_sell');
     
     redisSub.on('message', async (channel, message) => {
@@ -205,20 +214,17 @@ function startPositionMonitor() {
         
         if (channel === 'price_updates') {
             try {
-                const { data: sysConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-                if (!sysConfig?.is_running) return;
+                if (!globalSysConfig.is_running) return; // 讀取 Memory，0 延遲
                 
                 const { mint, priceUsd } = JSON.parse(message);
                 const currentPriceSol = priceUsd / cachedSolPriceUsd; 
-                await handleZeroLatencyCheck(mint, currentPriceSol, sysConfig, portfolio);
+                await handleZeroLatencyCheck(mint, currentPriceSol, portfolio);
             } catch (err) {}
         }
         
-        // 🚀 接收 priceBot.js 傳來的動能衰退拔線訊號
         if (channel === 'emergency_sell') {
             try {
-                const { data: sysConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-                if (!sysConfig?.is_running) return;
+                if (!globalSysConfig.is_running) return;
 
                 const { mint, reason } = JSON.parse(message);
                 const pos = portfolio.positions.find(p => p.mint_address === mint);
@@ -238,34 +244,37 @@ function startPositionMonitor() {
         }
     });
 
-    // 🌟 每 10 秒檢查 Nursery Queue 處理新進標的
+    // 🌟 檢查 Nursery Queue 處理新進標的 (併發加速版)
     let isNurseryRunning = false;
     setInterval(async () => {
-        if (isNurseryRunning) return;
+        if (isNurseryRunning || !globalSysConfig.is_running) return;
         isNurseryRunning = true;
 
         try {
-            const { data: sysConfig } = await supabase.from('system_config').select('*').eq('id', 1).single();
-            if (!sysConfig || !sysConfig.is_running) return;
-
-            // 從 Redis 取出最新 1 個排隊的 Mint
-            const queueItems = await redis.zrange('v9_nursery_queue', 0, 0);
+            // 🟢 [優化 2] 每次拉取 5 隻幣，解決大塞車
+            const queueItems = await redis.zrange('v9_nursery_queue', 0, 4);
             if (queueItems.length > 0) {
-                const mint = queueItems[0];
-                await redis.zrem('v9_nursery_queue', mint);
+                // 從 Queue 中移除
+                await redis.zrem('v9_nursery_queue', ...queueItems);
 
-                // 執行 100 分量化安檢
-                const secResult = await securityGuard.calculateQuantScore(mint, 'NEWBORN');
-                
-                // 送入 Router 分流 (Fast-Track 或 AI 微調)
-                await routerService.routeSignal(mint, 'NEWBORN', secResult);
+                // 並行執行 100 分量化安檢
+                const evalPromises = queueItems.map(async (mint) => {
+                    try {
+                        const secResult = await securityGuard.calculateQuantScore(mint, 'NEWBORN');
+                        await routerService.routeSignal(mint, 'NEWBORN', secResult);
+                    } catch (e) {
+                        console.error(`❌ [Nursery] 評估 ${mint} 失敗:`, e.message);
+                    }
+                });
+
+                await Promise.allSettled(evalPromises);
             }
         } catch (err) {
             console.error(`❌ [Nursery Processor] 異常:`, err.message);
         } finally {
             isNurseryRunning = false;
         }
-    }, 10000);
+    }, 5000); // 縮短至每 5 秒執行一次
 }
 
 function startMarketMonitor() {
