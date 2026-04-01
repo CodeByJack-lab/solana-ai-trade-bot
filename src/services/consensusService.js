@@ -49,7 +49,12 @@ Output STRICTLY IN JSON FORMAT:
                 // 自動判別 Groq (gsk_...) 或 Mistral 金鑰
                 const isGroq = cleanKey.startsWith('gsk_');
                 const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
-                const modelName = isGroq ? 'llama-3.3-70b-versatile' : 'mistral-large-latest';
+                // 將 Mistral 降級為免費 API 肯定支援的 mistral-small-latest 或 open-mixtral-8x7b
+                // Groq 換成更穩定的 llama3-70b-8192 確保高頻不死
+                const modelName = isGroq ? 'llama3-70b-8192' : 'mistral-small-latest';
+
+                const providerName = isGroq ? 'GROQ' : 'MISTRAL';
+                console.log(`[KeyRotator] 🔫 系統抽中 ${providerName} (${modelName}) 進行審批...`);
 
                 const res = await axios.post(apiUrl, {
                     model: modelName,

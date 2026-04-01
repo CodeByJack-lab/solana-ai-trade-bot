@@ -157,7 +157,7 @@ class SecurityGuard {
 
         if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; // 5分
 
-        // 🌊 偽 OFI 動能質量檢查 (三道關卡)
+        // 🌊 偽 OFI 動能質量檢查 (三道關卡 + V9.1 殭屍幣物理過濾)
         const totalTxs = marketData.buys5m + marketData.sells5m;
         if (totalTxs > 0) {
             const volOFI = (marketData.buys5m - marketData.sells5m) / totalTxs;

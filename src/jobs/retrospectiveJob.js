@@ -109,7 +109,7 @@ Task: Adjust the tactical rules (e.g. OFI, AvgTrade limits) in the prompts to pr
             const aiDecision = await keyRotator.enqueueRequest(async (apiKey) => {
                 const isGroq = apiKey.startsWith('gsk_');
                 const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
-                const modelName = isGroq ? 'llama-3.3-70b-versatile' : 'mistral-large-latest';
+                const modelName = isGroq ? 'llama3-70b-8192' : 'mistral-small-latest';
 
                 const res = await axios.post(apiUrl, {
                     model: modelName,
