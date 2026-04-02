@@ -210,7 +210,7 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
         
         if (pnlPct <= stopLossLimit) {
             action = 'SELL';
-            reason = `💥 硬止損觸發: ${pnlPct.toFixed(1)}% <= ${stopLossLimit}%`;
+            reason = `💥 硬止損觸發: ${pnlPct.toFixed(1)}% 跌穿 ${stopLossLimit}%`;
         }
         else if (highestPnlPct >= trailingTpTrigger && (highestPnlPct - pnlPct) >= trailingPullback) {
             action = 'SELL';

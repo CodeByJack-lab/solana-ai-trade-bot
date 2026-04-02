@@ -1,5 +1,6 @@
 // src/services/sourceAggregator.js
 // 📝 檔案功能用途：V9.2 多路冗餘數據源聚合器。三路 WebSocket 監聽 + 15秒極速緩衝池 + 5分鐘壽命防塞車機制 (去 Birdeye 化)。
+// 🚀 V9.2.3 升級：加入 1nc1nerator 焚化爐監聽，捕捉 LP Burn 訊號極速搶跑。
 
 const WebSocket = require('ws');
 const axios = require('axios');
@@ -11,10 +12,11 @@ const redis = new Redis(config.cache.redisUrl);
 
 const PUMP_FUN_PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
+// 💀 官方焚化爐 (所有 LP Burn 都會經過呢度)
+const INCINERATOR_ADDRESS = "1nc1nerator11111111111111111111111111111111"; 
 
 class SourceAggregator {
     constructor() {
-        // 🚀 V9.2 修復：將 Buffer 改為 Map，記錄發現時間，防止永遠查不到價的死幣塞爆 RAM
         this.mintBuffer = new Map(); 
         this.blacklist = ['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', '11111111111111111111111111111111', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'];
         this.isProcessingBuffer = false;
@@ -69,12 +71,15 @@ class SourceAggregator {
                 if (response.method !== 'logsNotification') return;
                 
                 const logs = response.params?.result?.value?.logs || [];
-                const isCreation = logs.some(l => l.includes('InitializeMint') || l.includes('CreatePool') || l.includes('InitializeInstruction2'));
-                
-                if (isCreation) {
-                    const signature = response.params.result.context.signature || response.params.result.value.signature;
-                    if (!signature) return;
+                const logsStr = JSON.stringify(logs);
+                const signature = response.params.result.context.signature || response.params.result.value.signature;
+                if (!signature) return;
 
+                const isCreation = logsStr.includes('InitializeMint') || logsStr.includes('CreatePool') || logsStr.includes('InitializeInstruction2');
+                const isBurn = logsStr.includes('Instruction: Burn') || logsStr.includes('1nc1nerator');
+
+                // 🎯 攔截 1：新池建立
+                if (isCreation) {
                     const isSeen = await redis.set(`seen_sig:${signature}`, '1', 'EX', 3600, 'NX');
                     if (!isSeen) return; 
 
@@ -89,9 +94,39 @@ class SourceAggregator {
                     const now = Date.now();
                     for (const mint of potentialMints) {
                         const cleanMint = this.sanitizeAddress(mint);
-                        // 記錄發現時間
                         if (cleanMint && !this.mintBuffer.has(cleanMint)) {
                             this.mintBuffer.set(cleanMint, now);
+                        }
+                    }
+                } 
+                // 🔥 攔截 2：捕捉到燒池 (LP Burn)！
+                else if (isBurn) {
+                    const nurseryCount = await redis.zcard('v9_nursery_queue');
+                    if (nurseryCount === 0) return; // 保溫箱無貨，直接無視，慳 API
+
+                    const txInfo = await axios.post(config.rpc.helius1.url || config.rpc.alchemy.url, {
+                        jsonrpc: "2.0", id: 1, method: "getTransaction",
+                        params: [signature, { maxSupportedTransactionVersion: 0, encoding: "jsonParsed" }]
+                    }).catch(() => null);
+
+                    const accounts = txInfo?.data?.result?.transaction?.message?.accountKeys || [];
+                    const activeNurseryMints = await redis.zrange('v9_nursery_queue', 0, -1);
+
+                    for (const acc of accounts) {
+                        if (activeNurseryMints.includes(acc.pubkey)) {
+                            console.log(`\n🔥 [LP BURN DETECTED] 捕捉到莊家燒池訊號！保溫箱目標鎖定: ${acc.pubkey}`);
+                            await redis.set(`lp_burned:${acc.pubkey}`, 'TRUE', 'EX', 86400);
+
+                            // 🚀 提前從保溫池抽出嚟買
+                            await redis.zrem('v9_nursery_queue', acc.pubkey);
+                            const { securityGuard } = require('./securityGuard');
+                            const { routerService } = require('./router');
+
+                            const secResult = await securityGuard.calculateQuantScore(acc.pubkey, 'NEWBORN');
+                            // 因為燒咗池，硬性加 20 分動能分
+                            secResult.numeric_score += 20; 
+                            await routerService.routeSignal(acc.pubkey, 'NEWBORN', secResult);
+                            break;
                         }
                     }
                 }
@@ -176,7 +211,7 @@ class SourceAggregator {
 
     start() {
         console.log('🌐 [Source Aggregator] 多路 WebSocket 冗餘監聽器啟動...');
-        const targets = [PUMP_FUN_PROGRAM_ID, RAYDIUM_V4_PROGRAM_ID];
+        const targets = [PUMP_FUN_PROGRAM_ID, RAYDIUM_V4_PROGRAM_ID, INCINERATOR_ADDRESS];
         
         let heliusWsUrl = null;
         if (config.rpc.helius1.url) {

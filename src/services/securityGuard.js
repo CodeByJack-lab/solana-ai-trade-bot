@@ -1,5 +1,6 @@
 // src/services/securityGuard.js
 // 📝 檔案功能用途：V9.2 100分量化安檢中樞。實裝「懶漢判定法」保護 RPC、防 429 智能重試、原生 RPC Top 10 籌碼分佈檢查，以及動態防偽名單。
+// 🚀 V9.2.3 升級：新增 0 成本 Metaplex Metadata isMutable 掃描 (防換圖騙局)。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -107,26 +108,66 @@ class SecurityGuard {
     }
 
     /**
-     * 🛡️ 原生 RPC 權限審計 (免費)
+     * 🛡️ 原生 RPC 權限與 Metadata 審計 (0 成本、防隱形稅、防換圖)
      */
     async _checkContractSafety(mint, requireAuthCheck) {
         try {
-            const accInfo = await connection.getParsedAccountInfo(new PublicKey(mint));
+            const mintPubkey = new PublicKey(mint);
+            const accInfo = await connection.getParsedAccountInfo(mintPubkey);
             const info = accInfo.value?.data?.parsed?.info;
-            if (!info) return false;
             
-            // 防隱形抽水：檢查 Token-2022 Transfer Fee
+            if (!info) return { isSafe: false, isMutable: false };
+            
+            // 1. 防隱形抽水：檢查 Token-2022 Transfer Fee
             const extensions = info.extensions || [];
             const hasTransferFee = extensions.some(ext => ext.extension === 'transferFeeConfig');
             if (hasTransferFee) {
                 console.log(`🚨 [Security Guard] 攔截！發現 Token-2022 交易稅陷阱！`);
-                return false;
+                return { isSafe: false, isMutable: false };
             }
 
-            if (info.mintAuthority || (requireAuthCheck && info.freezeAuthority)) return false;
-            return true;
+            // 2. 檢查基本鑄幣/凍結權限
+            if (info.mintAuthority || (requireAuthCheck && info.freezeAuthority)) {
+                return { isSafe: false, isMutable: false };
+            }
+
+            // 🌟 3. 終極防禦：零成本讀取 Metaplex Metadata 檢查 isMutable
+            let isMutable = false;
+            try {
+                const metaplexProgramId = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
+                // 找出 Metadata 的 PDA (Program Derived Address)
+                const [metadataPDA] = PublicKey.findProgramAddressSync(
+                    [Buffer.from('metadata'), metaplexProgramId.toBuffer(), mintPubkey.toBuffer()],
+                    metaplexProgramId
+                );
+                
+                const metadataAcc = await connection.getAccountInfo(metadataPDA);
+                
+                if (metadataAcc && metadataAcc.data && metadataAcc.data[0] === 4) {
+                    // 極速 Buffer 解析 (無視變長字串，精準定位 isMutable Byte)
+                    let offset = 1 + 32 + 32; // Key(1) + UpdateAuthority(32) + Mint(32)
+                    const nameLen = metadataAcc.data.readUInt32LE(offset); offset += 4 + nameLen;
+                    const symbolLen = metadataAcc.data.readUInt32LE(offset); offset += 4 + symbolLen;
+                    const uriLen = metadataAcc.data.readUInt32LE(offset); offset += 4 + uriLen;
+                    offset += 2; // SellerFeeBasisPoints
+                    
+                    const hasCreators = metadataAcc.data.readUInt8(offset); offset += 1;
+                    if (hasCreators === 1) {
+                        const creatorsLen = metadataAcc.data.readUInt32LE(offset); 
+                        offset += 4 + (creatorsLen * 34); // Creator Address(32) + Verified(1) + Share(1)
+                    }
+                    offset += 1; // PrimarySaleHappened
+                    
+                    // 🎯 拿取 isMutable 旗標 (1 = true, 0 = false)
+                    isMutable = metadataAcc.data.readUInt8(offset) === 1;
+                }
+            } catch (metaErr) {
+                console.warn(`⚠️ [Security Guard] 讀取 Metadata 失敗 (忽略): ${metaErr.message}`);
+            }
+
+            return { isSafe: true, isMutable: isMutable };
         } catch (err) {
-            return false;
+            return { isSafe: false, isMutable: false };
         }
     }
 
@@ -234,10 +275,18 @@ class SecurityGuard {
         if (marketData.liquidity >= minLiqToScore) coreScore += 20;
         else reasons.push(`流動性未達優質線 ($${marketData.liquidity.toFixed(0)})`);
 
-        // 1. 呼叫 RPC 查合約權限
-        const isContractSafe = await this._checkContractSafety(mint, textAnalysis.requireAuthCheck);
-        if (isContractSafe) coreScore += 20;
-        else reasons.push('合約權限未放棄 (高危)');
+        // 1. 呼叫 RPC 查合約權限與 Metadata
+        const safetyCheck = await this._checkContractSafety(mint, textAnalysis.requireAuthCheck);
+        if (safetyCheck.isSafe) {
+            coreScore += 20;
+            // 🎯 如果 isMutable 係 true，直接扣 20 分！
+            if (safetyCheck.isMutable) {
+                coreScore -= 20;
+                reasons.push('Metadata 未鎖定 (可隨時改名/換圖，極高危)');
+            }
+        } else {
+            reasons.push('合約權限未放棄或有隱藏稅 (高危)');
+        }
 
         // 2. 呼叫 RPC 查 Top 10 籌碼分佈
         const isHoldersSafe = await this._checkTop10Holders(mint);
