@@ -137,9 +137,9 @@ class EnvironmentService {
     // 🧠 V9.2 升級：Groq Llama-3 智能情緒分析
     async _analyzeTitles(titles) {
         try {
-            const groqApiKey = process.env.GROQ_API_KEY;
+            const groqApiKey = process.env.GROQ_API_KEY_1;
             if (!groqApiKey) {
-                throw new Error("Missing GROQ_API_KEY");
+                throw new Error("Missing GROQ_API_KEY_1");
             }
 
             const prompt = `You are a top-tier Web3 market sentiment analyst. Analyze these 20 recent crypto news titles. Determine the overall macroeconomic sentiment score from -5 (extreme fear/panic) to 5 (extreme greed/euphoria). 0 is neutral. 
