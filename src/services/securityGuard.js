@@ -1,10 +1,11 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V9.2 100分量化安檢中樞。實裝「懶漢判定法」保護 RPC、防 429 智能重試、原生 RPC Top 10 籌碼分佈檢查，廢除對 Birdeye 依賴。
+// 📝 檔案功能用途：V9.2 100分量化安檢中樞。實裝「懶漢判定法」保護 RPC、防 429 智能重試、原生 RPC Top 10 籌碼分佈檢查，以及動態防偽名單。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
 const { PublicKey } = require('@solana/web3.js');
 const config = require('../config/config');
+const { cacheManager } = require('./cacheManager'); 
 
 class SecurityGuard {
     
@@ -56,7 +57,6 @@ class SecurityGuard {
         for (const p of fomoPatterns) {
             if (p.test(fullText)) hasFomo = true;
         }
-        // 表情轟炸
         const emojiMatches = fullText.match(/[\u{1F680}\u{1F525}\u{1F4A5}\u{1F4B0}]/gu);
         if (hasFomo || (emojiMatches && emojiMatches.length >= 5)) {
             result.fomoPenalty += 20;
@@ -92,18 +92,18 @@ class SecurityGuard {
                         hasSocials: (pair.info?.socials?.length > 0 || pair.info?.websites?.length > 0)
                     };
                 }
-                return null; // 有效回應但無池
+                return null; 
             } catch (err) {
                 if (err.response?.status === 429) {
                     retries++;
                     console.log(`⏳ [DexScreener] 觸發 429 限制，冷卻 1.1 秒後重試 (${retries}/${maxRetries})...`);
-                    await new Promise(r => setTimeout(r, 1100)); // 精確 1.1 秒防抖
+                    await new Promise(r => setTimeout(r, 1100)); 
                 } else {
-                    return null; // 其他錯誤直接放棄
+                    return null; 
                 }
             }
         }
-        return null; // 耗盡重試次數
+        return null; 
     }
 
     /**
@@ -115,6 +115,14 @@ class SecurityGuard {
             const info = accInfo.value?.data?.parsed?.info;
             if (!info) return false;
             
+            // 防隱形抽水：檢查 Token-2022 Transfer Fee
+            const extensions = info.extensions || [];
+            const hasTransferFee = extensions.some(ext => ext.extension === 'transferFeeConfig');
+            if (hasTransferFee) {
+                console.log(`🚨 [Security Guard] 攔截！發現 Token-2022 交易稅陷阱！`);
+                return false;
+            }
+
             if (info.mintAuthority || (requireAuthCheck && info.freezeAuthority)) return false;
             return true;
         } catch (err) {
@@ -129,16 +137,13 @@ class SecurityGuard {
         try {
             const mintPubkey = new PublicKey(mint);
             
-            // 1. 獲取總發行量
             const supplyRes = await connection.getTokenSupply(mintPubkey);
             const totalSupply = supplyRes.value?.uiAmount;
             if (!totalSupply || totalSupply === 0) return true; 
 
-            // 2. 獲取最大持倉帳戶
             const largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
             if (!largestAccounts.value || largestAccounts.value.length === 0) return true;
 
-            // 3. 撇除最大池 (通常為 Raydium AMM)，計算第 2 至第 11 名的總和
             let top10Sum = 0;
             const holdersToCheck = largestAccounts.value.slice(1, 11); 
             
@@ -155,7 +160,7 @@ class SecurityGuard {
             return true;
         } catch (err) {
             console.warn(`⚠️ [Top 10 Guard] 查閱籌碼失敗: ${err.message}`);
-            return true; // 若 RPC 失敗，為免誤殺預設放行
+            return true; 
         }
     }
 
@@ -163,15 +168,11 @@ class SecurityGuard {
      * 🎯 V9.2 量化 100 分核心引擎 (懶漢判定法：先快篩，後 RPC)
      */
     async calculateQuantScore(mint, type = 'NEWBORN') {
-        // 🛡️ [0 成本] 藍籌白名單鐵閘
-        if (type === 'TRENDING' && config.trade.enableTrendingWhitelist) {
-            const whitelist = config.trade.trendingWhitelist || [];
-            if (!whitelist.includes(mint)) {
-                return { numeric_score: 0, isSafe: false, reason: `🛑 藍籌鐵閘攔截: 不在 Trending 白名單內`, marketData: null };
-            }
-        }
+        const cache = cacheManager.getConfig();
+        
+        // 🧠 動態讀取 Database 參數
+        const dbParams = cacheManager.getStrategy(type);
 
-        // 📊 [低成本] 獲取 DexScreener 數據
         const marketData = await this._fetchMarketData(mint);
         if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取報價數據 (DexScreener 異常或無池)', marketData: null };
 
@@ -182,15 +183,16 @@ class SecurityGuard {
             return { numeric_score: 0, isSafe: false, reason: `🛑 穩定幣攔截: 系統不交易 ${upperSymbol} 系列代幣`, marketData };
         }
 
-        // 🛑 [0 成本] 絕對流動性底線 (未來會換成 DB 參數，目前暫時 hardcode 保底)
-        const absoluteMinLiq = type === 'TRENDING' ? 20000 : 2500; 
-        if (marketData.liquidity < absoluteMinLiq) {
-            return { numeric_score: 0, isSafe: false, reason: `🛑 流動性過低攔截: 僅有 $${marketData.liquidity.toFixed(0)}`, marketData };
+        // 🛑 [0 成本] 絕對流動性底線 (讀取 DB)
+        if (marketData.liquidity < dbParams.min_liquidity) {
+            console.log(`🚨 [Liquidity Guard] 流動性極度枯竭！僅有 $${marketData.liquidity.toFixed(0)}: ${upperSymbol}`);
+            return { numeric_score: 0, isSafe: false, reason: `🛑 流動性過低攔截: 僅有 $${marketData.liquidity.toFixed(0)} (底線: $${dbParams.min_liquidity})`, marketData };
         }
 
-        // 🛑 [0 成本] 死水大池與假池過濾
-        if (marketData.liquidity > 100000 && marketData.volume5m < 5000) {
-            return { numeric_score: 0, isSafe: false, reason: `🛑 假池攔截: $10萬以上流動性但缺乏真實交易量 ($${marketData.volume5m.toFixed(0)})`, marketData };
+        // 🛑 [0 成本] 死水大池與假池過濾 (動態比例)
+        const deadPoolVolReq = dbParams.min_vol_5m * 5; 
+        if (marketData.liquidity > 100000 && marketData.volume5m < deadPoolVolReq) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 假池/貔貅攔截: $10萬以上流動性但交易量不足 $${deadPoolVolReq}`, marketData };
         }
 
         // 🛑 [0 成本] 活人真實度與貔貅檢測
@@ -205,9 +207,10 @@ class SecurityGuard {
             }
         }
 
-        // 🌟 [0 成本] 終極實體防偽
-        const VERIFIED_TOKENS = { 'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au' };
+        // 🌟 [0 成本] 終極實體防偽 (從 DB Cache 讀取)
+        const VERIFIED_TOKENS = cache.verified_tokens || {};
         if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) {
+            console.log(`🛡️ [Fake Shield] 觸發終極防偽！秒殺假冒 ${upperSymbol} (${mint})`);
             return { numeric_score: 0, isSafe: false, reason: `🛑 終極防偽攔截: 假冒 ${upperSymbol} 幣`, marketData };
         }
 
@@ -253,7 +256,7 @@ class SecurityGuard {
         if (marketData.h1 > 10) momentumScore += 15;
         else if (marketData.h1 > 0) momentumScore += 5;
 
-        if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; // 5分
+        if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; 
 
         if (totalTxs5m > 0) {
             const volOFI = (marketData.buys5m - marketData.sells5m) / totalTxs5m;
@@ -264,7 +267,7 @@ class SecurityGuard {
                 reasons.push('疑似納米刷量機器人 (動能無效)');
             } else if (volOFI > 0.3 && countRatio > 1.5) {
                 momentumScore += 15;
-                reasons.push(`OFI 動能強勁 (VolOFI:${volOFI.toFixed(2)}, Ratio:${countRatio.toFixed(1)})`);
+                reasons.push(`OFI 動能強勁`);
             }
         }
 
@@ -279,7 +282,7 @@ class SecurityGuard {
 
         const isSafe = score >= config.quant.rejectThreshold; 
         const finalReason = isSafe 
-            ? `量化得分: ${score}/100 [防禦:${coreScore}, 動能:${momentumScore}] 備註: ${reasons.join(' | ')}` 
+            ? `量化得分: ${score}/100 [防:${coreScore}, 動:${momentumScore}] 備註: ${reasons.join(' | ')}` 
             : `攔截得分: ${score}/100, 缺陷: ${reasons.join(' | ')}`;
 
         return { numeric_score: score, isSafe, reason: finalReason, marketData };
