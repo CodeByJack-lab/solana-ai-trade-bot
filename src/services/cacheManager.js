@@ -1,5 +1,6 @@
 // src/services/cacheManager.js
-// 📝 檔案功能用途：V9.2 終極全域大腦。統一快取 AI 戰略參數、防偽白名單、以及所有核心 AI Prompt 劇本與模型輪替陣列。內建防偷懶 (Anti-Laziness) 雙語思維鏈底稿。
+// 📝 檔案功能用途：V9.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
+// 🛡️ 內建防幻覺機制：當 DB 讀取失敗時，自動降級至純英文後備底稿。
 
 const { supabase } = require('../config/supabase');
 
@@ -8,55 +9,59 @@ class CacheManager {
         this.cache = {
             verified_tokens: { 'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au' },
             strategies: {
-                MEME: { min_liquidity: 2500, min_vol_5m: 1000, tp_level_1_pct: 50.0, tp_level_2_pct: 100.0, time_stop_mins: 30, time_stop_target_pct: 15.0, base_jito_tip: 150000, max_buy_tip_pct: 0.02, base_slippage: 500, stop_loss_pct: -15.0, trailing_pullback: 20.0 },
-                TRENDING: { min_liquidity: 20000, min_vol_5m: 5000, tp_level_1_pct: 30.0, tp_level_2_pct: 100.0, time_stop_mins: 1440, time_stop_target_pct: 5.0, base_jito_tip: 150000, max_buy_tip_pct: 0.01, base_slippage: 500, stop_loss_pct: -20.0, trailing_pullback: 10.0 }
+                MEME: { 
+                    min_liquidity: 2500, min_vol_5m: 1000, tp_level_1_pct: 50.0, 
+                    tp_level_2_pct: 100.0, time_stop_mins: 30, time_stop_target_pct: 15.0, 
+                    base_jito_tip: 150000, max_buy_tip_pct: 0.02, base_slippage: 500, 
+                    stop_loss_pct: -15.0, trailing_pullback: 20.0 
+                },
+                TRENDING: { 
+                    min_liquidity: 20000, min_vol_5m: 5000, tp_level_1_pct: 30.0, 
+                    tp_level_2_pct: 100.0, time_stop_mins: 1440, time_stop_target_pct: 5.0, 
+                    base_jito_tip: 150000, max_buy_tip_pct: 0.01, base_slippage: 500, 
+                    stop_loss_pct: -20.0, trailing_pullback: 10.0 
+                }
             },
-            prompts: new Map() // 存放 AI 劇本
+            prompts: new Map() 
         };
         this.isLoaded = false;
 
-        // 🛡️ Prompt 底稿保命符 (全線升級：強制 Step 1/2 分工 + 嚴禁留空 + 嚴禁拼音)
+        // 🛡️ 核心後備底稿 (Fallback Prompts) - 確保 100% 英文輸出
         this.fallbackPrompts = {
             'CLIMATE_ADVISOR': {
                 provider: 'GEMINI', 
-                models: ['gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it'],
-                content: `You are a top-tier Web3 Quant Strategist. Current climate: {{climate}}. Data: News {{newsScore}}, VolSurge {{volSurge}}%, Jito P50 {{jitoP50}}. [Task] Recommend parameter adjustments. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "analysis". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "your step-by-step reasoning in English", "tp_level_1": <number>, "stop_loss": <negative number>, "max_tip_pct": <number>, "analysis": "<Cantonese explanation>"}`
+                models: ['gemma-3-27b-it', 'gemma-3-12b-it'],
+                content: `You are a top-tier Web3 Quant Strategist. Climate: {{climate}}. News: {{newsScore}}. [Task] Adjust parameters. [Rules] Final "analysis" field MUST be in brief English. Output JSON: {"english_thought_process": "...", "tp_level_1": <num>, "stop_loss": <num>, "max_tip_pct": <num>, "analysis": "<Concise English under 30 words>"}`
             },
             'quant_consensus': {
                 provider: 'GROQ', 
-                models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'llama3-8b-8192'],
-                content: `You are a strict Quantitative AI Auditor. Evaluate asset {{symbol}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, 5m_Vol=\${{volume5m}}, OFI={{ofi}}, 1H_Change={{h1}}%. [Task] Adjust score based on momentum. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "reason". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning in English", "confidence": <float 0.0-1.0>, "adjustment": <integer -20 to +20>, "reason": "<Cantonese explanation>"}`
+                models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768'],
+                content: `You are a strict AI Auditor. Symbol: {{symbol}}, Score: {{baseScore}}. [Task] Adjust score. [Rules] Reason MUST be in brief English. Output JSON: {"english_thought_process": "...", "confidence": <float>, "adjustment": <int>, "reason": "<Concise English under 20 words>"}`
             },
-            'reviewer_trending': {
-                provider: 'MISTRAL', 
-                models: ['mistral-large-latest', 'mistral-small-latest', 'open-mixtral-8x22b'],
-                content: `You are a Swing Trader for Top 100 assets. Target: {{token_symbol}}. Current PnL: {{pnl_pct}}%. Memory: {{ai_memory}}. [Task] Evaluate position. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "reason". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning", "decision": "HOLD"|"EXIT", "reason": "<Cantonese explanation>"}`
+            'meme_scout': {
+                provider: 'GROQ',
+                models: ['llama-3.3-70b-versatile'],
+                content: `Analyze Meme: {{token_symbol}}. Liq: {{liquidity}}. [Rules] Reason in brief English. Output JSON: {"english_thought_process": "...", "decision": "PASS"|"VETO", "score": <int>, "risk_tag": "...", "reason": "<Concise English under 20 words>"}`
             },
-            'reviewer_overseer': {
-                provider: 'GROQ', 
-                models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'llama3-8b-8192'],
-                content: `You are a Ruthless Meme Trader. Target: {{token_symbol}}. Current PnL: {{pnl_pct}}%. Memory: {{ai_memory}}. [Task] Evaluate position. Cut losers fast. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "reason". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning", "decision": "HOLD"|"EXIT", "reason": "<Cantonese explanation>"}`
-            },
-            'backtest_analyst': {
-                provider: 'GROQ', 
-                models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'llama3-8b-8192'],
-                content: `You are the Chief Quant Analyst. Context: {{promptContext}}. [Task] Write a concise report explaining parameter split logic. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese report in "report". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning in English", "report": "<Cantonese text>"}`
+            'trending_scout': {
+                provider: 'MISTRAL',
+                models: ['mistral-large-latest'],
+                content: `Analyze Trending: {{token_symbol}}. [Rules] Reason in brief English. Output JSON: {"english_thought_process": "...", "decision": "PASS"|"VETO", "score": <int>, "risk_tag": "...", "reason": "<Concise English under 20 words>"}`
             }
         };
     }
 
     /**
-     * 🚀 初始化：從 Supabase 讀取完整配置並寫入 RAM，同時監聽熱更新。
+     * 🚀 初始化 RAM 快取
      */
     async init() {
-        console.log('🧠 [Cache Manager] 終極大腦啟動！戰略參數、白名單與 AI 劇本已全數載入 RAM。');
+        console.log('🧠 [Cache Manager] 啟動中...');
         await this.refreshFromDB();
         
-        // 每 5 分鐘背景靜默同步 DB
         setInterval(() => this.refreshFromDB(), 5 * 60 * 1000); 
 
-        // ⚡ 監聽 Prompts 熱更新
-        supabase.channel('bot_prompts_hot_swap')
+        // ⚡ 監聽 bot_prompts 表格熱更新
+        supabase.channel('bot_prompts_realtime')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'bot_prompts' }, (payload) => {
                 const pId = payload.new?.prompt_id || payload.old?.prompt_id;
                 if (payload.eventType === 'DELETE') {
@@ -69,14 +74,14 @@ class CacheManager {
                         content: p.content
                     });
                 }
-                console.log(`🔄 [Cache Manager] AI 劇本 [${pId}] 已熱更新！`);
+                console.log(`🔄 [Cache Manager] AI 劇本 [${pId}] 已同步熱更新！`);
             }).subscribe();
             
         this.isLoaded = true;
     }
 
     /**
-     * 🔄 從 Supabase 拉取最新數據覆寫 RAM
+     * 🔄 同步資料庫數據至 RAM
      */
     async refreshFromDB() {
         try {
@@ -97,7 +102,7 @@ class CacheManager {
                 this.cache.verified_tokens = tokenDict;
             }
 
-            // 3. 同步 AI 劇本
+            // 3. 🎯 同步 AI 劇本 (對準 bot_prompts)
             const { data: promptsData } = await supabase.from('bot_prompts').select('*');
             if (promptsData) {
                 promptsData.forEach(p => {
@@ -107,51 +112,33 @@ class CacheManager {
                         content: p.content
                     });
                 });
+                console.log(`✅ [Cache Manager] 已從 DB 載入 ${promptsData.length} 條劇本。`);
             }
         } catch (err) {
-            console.error('⚠️ [Cache Manager] 背景同步 DB 失敗:', err.message);
+            console.error('⚠️ [Cache Manager] 同步 DB 失敗:', err.message);
         }
     }
 
-    // --- 獲取戰略參數 ---
-    getConfig(type = 'MEME') { return this.getStrategy(type); }
-    
-    getStrategy(type) {
+    getConfig(type = 'MEME') {
         const safeType = (type && type.includes('TRENDING')) ? 'TRENDING' : 'MEME';
         return this.cache.strategies[safeType];
     }
-    
-    updateLocally(type, newConfigPayload) {
-        const safeType = (type && type.includes('TRENDING')) ? 'TRENDING' : 'MEME';
-        this.cache.strategies[safeType] = { ...this.cache.strategies[safeType], ...newConfigPayload };
-    }
 
-    // 🚀 獨立獲取防偽名單 Function
-    getVerifiedTokens() {
-        return this.cache.verified_tokens || {};
-    }
-
-    // --- 獲取 AI 劇本 ---
     getPromptConfig(promptId, dataObj = {}) {
         const config = this.cache.prompts.get(promptId) || this.fallbackPrompts[promptId];
         
         if (!config) {
-            return { 
-                provider: 'UNKNOWN', 
-                models: [], 
-                parsedPrompt: `{"decision": "VETO", "reason": "Missing Prompt: ${promptId}"}` 
-            };
+            return { provider: 'UNKNOWN', models: [], parsedPrompt: `{"decision": "VETO", "reason": "Prompt Error"}` };
         }
         
         let parsedContent = config.content;
         for (const [key, value] of Object.entries(dataObj)) {
-            parsedContent = parsedContent.replace(new RegExp(`{{${key}}}`, 'g'), value !== undefined && value !== null ? value : 'UNKNOWN');
+            parsedContent = parsedContent.replace(new RegExp(`{{${key}}}`, 'g'), value ?? 'N/A');
         }
 
-        // 🛡️ 加入可選串連運算子 (?.) 防止 config.models 未定義時報錯
         return { 
             provider: config.provider, 
-            models: config.models?.length > 0 ? config.models : (this.fallbackPrompts[promptId]?.models || []), 
+            models: config.models?.length > 0 ? config.models : [], 
             parsedPrompt: parsedContent 
         };
     }
