@@ -1,5 +1,5 @@
 // src/services/monitorService.js
-// 📝 檔案功能用途：V9.2 終極風控樞紐。結合 Telegram Webhook 裝甲、Redis 瀑布防線、全域快取參數 O(1) 讀取、精準分批止盈、動態追蹤止損、無差別 Time-Stop 及主動清道夫。
+// 📝 檔案功能用途：V9.2 終極風控樞紐。結合 Telegram Webhook 裝甲、Redis 瀑布防線、全域快取參數 O(1) 讀取、精準分批止盈、動態追蹤止損、無差別 Time-Stop、主動清道夫及 AMM 報價崩潰防護。
 
 const express = require('express');
 const cors = require('cors');
@@ -139,16 +139,14 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
 
     const pnlPct = ((currentPriceSol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
     const isHalfSold = pos.strategy_type?.includes('HALF_SOLD') || radarState.halfSellTriggered === 'true';
-    const isTrending = pos.strategy_type?.includes('TRENDING'); // 🚀 新增：判斷幣種
+    const isTrending = pos.strategy_type?.includes('TRENDING');
 
-    // 🧠 V9.2 讀取大腦戰略參數 (精準區分 MEME 與 TRENDING)
     const cache = cacheManager.getConfig(isTrending ? 'TRENDING' : 'MEME');
     
     const timeStopMins = cache.time_stop_mins || (isTrending ? 90 : 30);
     const timeStopTarget = cache.time_stop_target_pct || (isTrending ? 5.0 : 15.0);
     const stopLossLimit = cache.stop_loss_pct || (isTrending ? -20.0 : -25.0);
     
-    // 🚀 動態讀取追蹤止損的啟動點與回撤點
     const trailingTpTrigger = cache.trailing_tp_trigger || 50.0; 
     const trailingPullback = cache.trailing_pullback || (isTrending ? 10.0 : 20.0);
     
@@ -159,8 +157,17 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
     let reason = '';
     let sellFraction = 1.0;
 
+    // 🚨 優先級 0：防騙濾鏡 (AMM 報價崩潰 / Rug Pull 瞬間暴漲偵測)
+    // 正常 100 倍金狗是慢慢升的。如果 2 秒內報價突然跨越式狂飆超過前高 5 倍，且帳面利潤 > 500%，絕對是莊家抽池！
+    const previousHigh = pos.highest_price_sol || pos.entry_price_sol;
+    if ((currentPriceSol / previousHigh) > 5 && pnlPct > 500) {
+        action = 'SELL';
+        sellFraction = 1.0;
+        reason = `☠️ 慘遭 Rug Pull (流動性歸零導致報價幻象)，強制撇帳`;
+    }
+
     // 🚨 優先級 1：Rug Pull 拔線 (LP 抽走 40%)
-    if (currentLiquidityUsd && maxLiquidity > 5000) { 
+    if (action === 'HOLD' && currentLiquidityUsd && maxLiquidity > 5000) { 
         if (currentLiquidityUsd < maxLiquidity * 0.60) {
             action = 'SELL';
             sellFraction = 1.0;
@@ -201,12 +208,10 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
     if (action === 'HOLD') {
         const highestPnlPct = (((pos.highest_price_sol || pos.entry_price_sol) - pos.entry_price_sol) / pos.entry_price_sol) * 100;
         
-        // 物理硬止損
         if (pnlPct <= stopLossLimit) {
             action = 'SELL';
             reason = `💥 硬止損觸發: ${pnlPct.toFixed(1)}% <= ${stopLossLimit}%`;
         }
-        // 🚀 動態追蹤止損 (Trailing Stop)
         else if (highestPnlPct >= trailingTpTrigger && (highestPnlPct - pnlPct) >= trailingPullback) {
             action = 'SELL';
             reason = `💰 獲利回撤保護: 高位 +${highestPnlPct.toFixed(0)}% 回落 ${trailingPullback} 點`;
@@ -243,10 +248,10 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
 }
 
 // ========================================================
-// 🧹 獨立主動清道夫 (Active Death Sweeper - 雙軌制防誤殺版)
+// 🧹 獨立主動清道夫 (Active Death Sweeper)
 // ========================================================
 function startActiveSweeper() {
-    console.log('🧹 [Sweeper] 主動清道夫已上線，具備 2 秒實時查價防誤殺機制。');
+    console.log('🧹 [Sweeper] 主動清道夫已上線，具備實時查價防誤殺機制。');
     
     setInterval(async () => {
         if (!globalSysConfig.is_running) return;
@@ -264,29 +269,19 @@ function startActiveSweeper() {
             const isHalfSold = pos.strategy_type?.includes('HALF_SOLD');
             const isTrending = pos.strategy_type?.includes('TRENDING');
 
-            // 🚦 雙軌制核心 (精準讀取 RAM 快取)
             const posCache = cacheManager.getConfig(isTrending ? 'TRENDING' : 'MEME');
-            
             const timeStopMins = posCache.time_stop_mins || (isTrending ? 90 : 30);
             const timeStopTarget = posCache.time_stop_target_pct || (isTrending ? 5.0 : 15.0);
-            
-            // 🧟 殭屍防線：Time-Stop 的 4 倍時間 (Meme: 預設 120m)
             const zombieMins = timeStopMins * 4; 
 
             let shouldSell = false;
             let reason = '';
 
-            // ⏱️ 第一關：常規時間止損
-            if (ageMins >= timeStopMins) {
-                if (pnlPct >= timeStopTarget) {
-                    // console.log(`🛡️ [Sweeper] 攔截！${pos.token_symbol} 實時已達標 (+${pnlPct.toFixed(2)}%)，收回屠刀，交由常規雷達止盈！`);
-                } else {
-                    shouldSell = true;
-                    reason = `🧹 [主動清道夫] ${isTrending ? 'Top 100 熱門幣' : 'Meme'} 滯留過久 (${ageMins.toFixed(0)} 分鐘未達 +${timeStopTarget}%)，無差別清倉！`;
-                }
+            if (ageMins >= timeStopMins && pnlPct < timeStopTarget) {
+                shouldSell = true;
+                reason = `🧹 [主動清道夫] ${isTrending ? 'Top 100 熱門幣' : 'Meme'} 滯留過久 (${ageMins.toFixed(0)} 分鐘未達 +${timeStopTarget}%)，無差別清倉！`;
             }
 
-            // 🧟 第二關：殭屍防線
             if (!shouldSell && !isTrending && ageMins >= zombieMins && !isHalfSold) {
                 shouldSell = true;
                 reason = `🧟 [主動清道夫] Meme 殭屍幣超時 (${ageMins.toFixed(0)} 分鐘未翻本)，強制火化拔線！`;
@@ -374,14 +369,12 @@ function startPositionMonitor() {
     redisSub.on('message', async (channel, message) => {
         const portfolio = getPortfolio();
         
-        // 🚀 核心修復：正確解析 priceBot.js 傳來的 { "MintA": 0.01, "MintB": 0.05 } 格式
         if (channel === 'price_updates') {
             try {
                 if (!globalSysConfig.is_running) return; 
                 
                 const pricesMap = JSON.parse(message);
                 
-                // 使用 Object.entries 遍歷每一隻收到報價的代幣
                 for (const [mint, priceSol] of Object.entries(pricesMap)) {
                     const currentPriceSol = parseFloat(priceSol);
                     if (isNaN(currentPriceSol)) continue;
@@ -389,13 +382,9 @@ function startPositionMonitor() {
                     const pos = portfolio.positions.find(p => p.mint_address === mint);
                     if (pos) {
                         pos.current_price_sol = currentPriceSol;
-                        // 更新最高價
-                        if (currentPriceSol > (pos.highest_price_sol || pos.entry_price_sol)) {
-                            pos.highest_price_sol = currentPriceSol;
-                        }
+                        // 更新最高價移至 handleZeroLatencyCheck 判斷後
                     }
                     
-                    // 觸發 0 延遲止損檢查！(liquidity 參數傳 0，由函數內部做優雅降級)
                     await handleZeroLatencyCheck(mint, currentPriceSol, 0, portfolio);
                 }
             } catch (err) {
