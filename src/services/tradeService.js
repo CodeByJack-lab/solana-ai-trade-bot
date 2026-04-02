@@ -1,7 +1,9 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：交易執行大腦。實裝 V9.1.7 階梯式盲狙 (5%, 10%, 15%, 20%)、RugCheck 買入前防線與不對稱滑點。
+// 📝 檔案功能及用途：交易執行大腦。實裝 V9.2 防 MEV 動態滑點 (最高鎖死 10%)、小數點精度防護、以及原路折返黑客逃生艙。
 
 const { getPortfolio, updateCache } = require('./portfolioService');
+const { cacheManager } = require('./cacheManager'); 
+const { fallbackEscapeService } = require('./fallbackEscapeService'); // 🛸 V9.2 引入黑客逃生艙
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
 const { PublicKey, Keypair, Connection } = require('@solana/web3.js'); 
@@ -74,7 +76,6 @@ async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     });
 }
 
-// 🛡️ V9.1.6 買入前最終防線：調用 RugCheck.xyz API
 async function checkRugcheckApi(mintAddress) {
     try {
         console.log(`🔍 [RugCheck] 正在對 ${mintAddress.substring(0,6)} 進行買入前最終防線掃描...`);
@@ -96,7 +97,6 @@ async function checkRugcheckApi(mintAddress) {
     }
 }
 
-// 🚀 V9.1.4 升級版報價核心：智能路由切換 + 錯誤診斷
 async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageBps = null) {
     try {
         let decimals = 6; 
@@ -134,13 +134,20 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
              return null;
         }
 
+        let dexLabel = null;
+        let poolAddress = null;
+        if (response.data.routePlan && response.data.routePlan.length > 0) {
+            dexLabel = response.data.routePlan[0].swapInfo?.label;
+            poolAddress = response.data.routePlan[0].swapInfo?.ammKey;
+        }
+
         let pricePerTokenSol = isBuying 
             ? new BigNumber(amount).div(new BigNumber(response.data.outAmount).div(new BigNumber(10).pow(decimals))).toNumber()
             : new BigNumber(response.data.outAmount).div(1e9).div(amount).toNumber();
         
         if (!Number.isFinite(pricePerTokenSol)) return null;
 
-        return { pricePerToken: pricePerTokenSol, rawResponse: response.data, decimals };
+        return { pricePerToken: pricePerTokenSol, rawResponse: response.data, decimals, dexLabel, poolAddress };
 
     } catch (err) {
         if (err.response) {
@@ -148,7 +155,6 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
             const errorMsg = err.response.data?.error || err.response.data?.message || '未知錯誤';
             
             if (status === 400) {
-                // 路徑未建立，安靜 return null 等待外層 Retry
             } else if (status === 429) {
                 console.log(`🚨 [Jupiter] 頻率限制 (429)！API 請求過快或額度爆滿。`);
             } else if (status === 401 || status === 403) {
@@ -224,9 +230,11 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🚀 V9.1.7 階梯式盲狙等候環 (最多 4 次，滑點 5% -> 10% -> 15% -> 20%)
     let quoteData = null;
-    const slippageSteps = [500, 1000, 1500, 2000]; // 🎯 5%, 10%, 15%, 20% 滑點
+    const cache = cacheManager.getConfig();
+    const baseSlippage = cache.base_slippage || 500; 
+    
+    const slippageSteps = [baseSlippage, Math.min(baseSlippage + 250, 1000), 1000]; 
     const maxRetries = slippageSteps.length;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -246,7 +254,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 嘗試 4 次階梯滑點 (最高 20%) 後依然無報價，放棄狙擊 (不盲目追高)。`);
+        console.log(`❌ [Execution] 嘗試 3 次防 MEV 階梯滑點 (最高鎖死 10%) 後依然無報價，為防被夾擊，放棄狙擊。`);
         
         try {
             const Redis = require('ioredis');
@@ -301,6 +309,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             mint_address: mintAddress, token_symbol: tokenSymbol,
             quantity: tokenQuantity, entry_price_sol: buyPriceSol,
             highest_price_sol: buyPriceSol, strategy_type: strategyType,
+            buy_dex_label: quoteData.dexLabel, buy_pool_address: quoteData.poolAddress, token_decimals: quoteData.decimals,
             created_at: new Date().toISOString() 
         });
 
@@ -318,7 +327,8 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
 
         await supabase.from(`active_positions_${tableSuffix}`).insert([{
             mint_address: mintAddress, token_symbol: tokenSymbol, strategy_type: strategyType,
-            entry_price_sol: buyPriceSol, highest_price_sol: buyPriceSol, quantity: tokenQuantity, ai_reason: aiReason
+            entry_price_sol: buyPriceSol, highest_price_sol: buyPriceSol, quantity: tokenQuantity, ai_reason: aiReason,
+            buy_dex_label: quoteData.dexLabel, buy_pool_address: quoteData.poolAddress, token_decimals: quoteData.decimals
         }]);
 
         await supabase.from(`trade_history_${tableSuffix}`).insert([{
@@ -348,8 +358,11 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
     const tokenSymbol = pos.token_symbol || 'UNKNOWN';
     const isLive = portfolio.mode === 'LIVE';
     
-    let sellQuantity = new BigNumber(pos.quantity).times(sellFraction).toNumber();
-    console.log(`\n⚡ [Sell] 正在嘗試平倉: ${tokenSymbol} (預期比例: ${sellFraction * 100}%)`);
+    const decimals = pos.token_decimals || 6;
+    const multiplier = Math.pow(10, decimals);
+    let sellQuantity = Math.floor(new BigNumber(pos.quantity).times(sellFraction).toNumber() * multiplier) / multiplier;
+    
+    console.log(`\n⚡ [Sell] 正在嘗試平倉: ${tokenSymbol} (預期比例: ${sellFraction * 100}%, 精度: ${decimals})`);
 
     if (isLive && globalWalletPublicKey) {
         const realBal = await getRealTokenBalance(globalWalletPublicKey, mintAddress);
@@ -359,11 +372,11 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
                 await forceWriteOff(mintAddress, "實盤餘額為 0，假持倉撇帳");
                 return false;
             }
-            sellQuantity = new BigNumber(realBal).times(sellFraction).toNumber();
+            sellQuantity = Math.floor(new BigNumber(realBal).times(sellFraction).toNumber() * multiplier) / multiplier;
         }
     }
 
-    const isStopLoss = reason.includes('止損') || reason.includes('硬止損') || reason.includes('拔線') || reason.includes('瀑布') || reason.includes('EXIT');
+    const isStopLoss = reason.includes('止損') || reason.includes('硬止損') || reason.includes('拔線') || reason.includes('瀑布') || reason.includes('EXIT') || reason.includes('RUG');
     
     let currentSlippage = isStopLoss ? 1500 : 500; 
     let quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
@@ -381,17 +394,22 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         }
     }
 
-    if (!quoteData) {
-        console.log(`❌ [Fatal] 已達極限滑點仍無法取得報價，放棄一般平倉。`);
+    // 🛸 終極逃生艙介入：若 Jupiter 徹底放棄，發射逃生艙！
+    if (!quoteData && isLive && isStopLoss && pos.buy_dex_label) {
+        console.log(`❌ [Fatal] Jupiter 已達極限滑點仍無法報價，啟動終極黑客逃生艙！`);
         
-        // ☠️ 終極 Rug Pull 判定與撇帳機制
-        // 如果係因為逃生/止損而賣出，但連 50% 滑點都搵唔到一條生路，代表個池已經乾晒 (Rugged)
-        if (isStopLoss || reason.includes('RUG')) {
-            console.log(`☠️ [RUG CONFIRMED] 逃生失敗！Jupiter 無法找到任何退路，判定為資金池已被抽乾！`);
-            // 自動執行 -100% 撇帳，踢出持倉列表
+        const escapeResult = await fallbackEscapeService.executeEscape(pos, sellQuantity);
+        if (escapeResult && escapeResult.success) {
+            await commitTradeToDb(posIndex, escapeResult.sellValueSol, escapeResult.finalPriceSol, -pos.entry_price_sol * sellQuantity, -99.9, reason + " [逃生艙發射]", sellQuantity, sellFraction, pos.strategy_type, escapeResult.txid);
+            return true;
+        }
+    }
+
+    if (!quoteData) {
+        if (isStopLoss) {
+            console.log(`☠️ [RUG CONFIRMED] 逃生失敗！Jupiter 與底層皆無法找到退路，判定為資金池已被騙徒抽乾！`);
             await forceWriteOff(mintAddress, `☠️ 慘遭 Rug Pull (流動性歸零)，強制撇帳 -100%`);
         }
-        
         return false; 
     }
 
@@ -409,7 +427,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         } else {
             console.log(`🛡️ 啟動「分拆砸盤」機制，本次僅平倉原定比例的 50%。`);
             sellFraction = sellFraction * 0.5;
-            sellQuantity = new BigNumber(pos.quantity).times(sellFraction).toNumber();
+            sellQuantity = Math.floor(new BigNumber(pos.quantity).times(sellFraction).toNumber() * multiplier) / multiplier; // 精度防護
             quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
             if (!quoteData) return false;
         }
@@ -573,7 +591,6 @@ async function handleIncomingFund(address, amount, txid) {
     
     let personName = await getPersonNameByAddress(address);
     
-    // 🛡️ 防漏機制：如果是全新地址，不要 Ignore，給他一個預設名字！
     if (!personName) {
         console.log(`⚠️ [Process] 發現未知入金地址: ${address}，將以「未命名金主」記錄`);
         personName = `未命名_${address.substring(0, 4)}`;

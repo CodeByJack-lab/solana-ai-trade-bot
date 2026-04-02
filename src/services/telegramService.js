@@ -1,5 +1,5 @@
 // src/services/telegramService.js
-// 📝 檔案功能用途：V9.1 Telegram 路由與通訊中心。實裝大市宏觀拔線審批、倉位快照，以及配合死人開關的 Redis 狀態鎖。
+// 📝 檔案功能用途：V9.2 Telegram 路由與通訊中心。純粹的「郵差」角色，負責防 429 訊息隊列 (Message Queue) 及解析 Webhook 按鈕回調並執行熱更新。
 
 const axios = require('axios');
 const config = require('../config/config');
@@ -10,16 +10,47 @@ const ADMIN_BOT_TOKEN = config.telegram.adminBotToken;
 const CHANNEL_ID = config.telegram.channelId;
 const CHAT_ID = config.telegram.chatId;
 
-const redis = new Redis(config.cache.redisUrl);
+const redis = new Redis(config.cache.redisUrl || process.env.REDIS_URL);
 
 function safeHTML(text) {
     if (!text) return "";
     return text.toString().replace(/</g, '＜').replace(/>/g, '＞');
 }
 
-/**
- * 🚀 底層發送邏輯
- */
+// ==========================================
+// 🛡️ V9.2 防 429 訊息隊列 (Message Queue)
+// ==========================================
+const messageQueue = [];
+let isProcessingQueue = false;
+
+async function processQueue() {
+    if (isProcessingQueue || messageQueue.length === 0) return;
+    isProcessingQueue = true;
+
+    while (messageQueue.length > 0) {
+        const { token, endpoint, payload, resolve, reject } = messageQueue.shift();
+        try {
+            const url = `https://api.telegram.org/bot${token}/${endpoint}`;
+            const res = await axios.post(url, payload, { timeout: 10000 });
+            if (resolve) resolve(res.data?.result);
+        } catch (error) {
+            console.error(`❌ [Telegram] 發送失敗: ${error.response?.data?.description || error.message}`);
+            if (reject) reject(error);
+        }
+        // 🛡️ 強制冷卻 1500ms，徹底杜絕 Telegram Error 429
+        await new Promise(r => setTimeout(r, 1500));
+    }
+    isProcessingQueue = false;
+}
+
+function enqueueMessage(token, endpoint, payload) {
+    if (!token) return Promise.resolve(null);
+    return new Promise((resolve, reject) => {
+        messageQueue.push({ token, endpoint, payload, resolve, reject });
+        processQueue();
+    });
+}
+
 async function _send(message, token, targetChatId, pin = false, replyMarkup = null) {
     if (!token || !targetChatId) return null;
 
@@ -28,32 +59,18 @@ async function _send(message, token, targetChatId, pin = false, replyMarkup = nu
         finalMessage = finalMessage.substring(0, 4000) + "\n\n... ✂️ (報告過長，已由系統自動截斷)";
     }
 
-    const url = `https://api.telegram.org/bot${token}/sendMessage`;
     const payload = { chat_id: targetChatId, text: finalMessage, parse_mode: 'HTML' };
     if (replyMarkup) payload.reply_markup = replyMarkup;
 
-    try {
-        const res = await axios.post(url, payload);
-        
-        if (pin && res.data?.result?.message_id) {
-            const pinUrl = `https://api.telegram.org/bot${token}/pinChatMessage`;
-            await axios.post(pinUrl, {
-                chat_id: targetChatId, message_id: res.data.result.message_id, disable_notification: true
-            }).catch(() => {}); 
-        }
-        
-        return res.data?.result?.message_id;
-    } catch (err) {
-        if (err.response?.data?.description?.includes('HTML')) {
-            try {
-                payload.text = finalMessage.replace(/<[^>]+>/g, '');
-                payload.parse_mode = undefined;
-                const fallbackRes = await axios.post(url, payload);
-                return fallbackRes.data?.result?.message_id;
-            } catch (fallbackErr) {}
-        }
+    const messageId = await enqueueMessage(token, 'sendMessage', payload).then(res => res?.message_id).catch(() => null);
+
+    if (pin && messageId) {
+        enqueueMessage(token, 'pinChatMessage', {
+            chat_id: targetChatId, message_id: messageId, disable_notification: true
+        }).catch(() => {}); 
     }
-    return null;
+    
+    return messageId;
 }
 
 // 🛣️ 3 路分流 API
@@ -62,9 +79,8 @@ async function sendAdminAlert(message, pin = false) { await _send(message, MAIN_
 async function sendStrategyAlert(message, pin = false) { await _send(message, ADMIN_BOT_TOKEN, CHAT_ID, pin); }
 
 // ==========================================
-// 🚨 V9.1 大市宏觀風控：快照與死人開關鎖
+// 🚨 大市宏觀風控警報 (保留)
 // ==========================================
-
 async function sendMacroPanicApproval(reason) {
     const { getPortfolio } = require('./portfolioService');
     const portfolio = getPortfolio();
@@ -93,57 +109,52 @@ async function sendMacroPanicApproval(reason) {
         ]
     };
 
-    // 發送警報並寫入死人開關鎖 (記錄當前時間戳)
     await _send(message, MAIN_BOT_TOKEN, CHAT_ID, true, keyboard);
-    await redis.set('macro_panic_pending', Date.now().toString(), 'EX', 3600); // 鎖存活 1 小時
+    await redis.set('macro_panic_pending', Date.now().toString(), 'EX', 3600); 
 }
 
 async function sendApprovalRequest(reportText, proposalId) {
-    // 每週回測參數審批邏輯不變
-    const { supabase } = require('../config/supabase'); 
-    let finalReportText = reportText;
-    // ... 省略部分代碼以節省長度，功能與之前完全相同 ...
     const keyboard = {
         inline_keyboard: [
             [{ text: "✅ 批准套用", callback_data: `APPROVE_${proposalId}` }, { text: "❌ 否決提案", callback_data: `REJECT_${proposalId}` }]
         ]
     };
-    await _send(finalReportText, ADMIN_BOT_TOKEN, CHAT_ID, false, keyboard);
+    await _send(reportText, ADMIN_BOT_TOKEN, CHAT_ID, false, keyboard);
 }
 
 // ==========================================
-// 🎮 Webhook 回調處理中心
+// 🎮 Webhook 回調處理中心 (處理所有 Inline Keyboard)
 // ==========================================
-
 async function processTelegramCallback(callbackQuery) {
     const { supabase } = require('../config/supabase');
+    const { cacheManager } = require('./cacheManager'); 
     const data = callbackQuery.data; 
     const messageId = callbackQuery.message.message_id;
-    const userName = callbackQuery.from?.first_name || "Admin";
+    const chatId = callbackQuery.message.chat.id;
+    const userName = callbackQuery.from?.first_name || "Boss";
 
-    // --------------------------------------------------
-    // ⚔️ 1. 大市宏觀全平倉審批 (二段確認執行區)
-    // --------------------------------------------------
+    // 1. 宏觀強平審批
     if (data === 'APPROVE_MACRO_SELL' || data === 'REJECT_MACRO_SELL') {
         const isProcessed = await redis.set(`tg_btn_lock:${messageId}`, '1', 'EX', 86400, 'NX');
         if (!isProcessed) return;
 
-        // 🟢 指揮官已作決定，解除 15 分鐘死人開關
         await redis.del('macro_panic_pending');
 
         if (data === 'REJECT_MACRO_SELL') {
-            await axios.post(`https://api.telegram.org/bot${MAIN_BOT_TOKEN}/editMessageText`, {
-                chat_id: CHAT_ID, message_id: messageId, parse_mode: 'HTML',
-                text: callbackQuery.message.text + `\n\n🛡️ <b>結果:</b> 指揮官 ${userName} 已否決強平，維持現狀。`
-            }).catch(()=>{});
+            await enqueueMessage(MAIN_BOT_TOKEN, 'editMessageText', {
+                chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+                text: callbackQuery.message.text + `\n\n🛡️ <b>結果:</b> 指揮官 ${userName} 已否決強平，維持現狀。`,
+                reply_markup: { inline_keyboard: [] }
+            });
             return;
         }
 
         if (data === 'APPROVE_MACRO_SELL') {
-            await axios.post(`https://api.telegram.org/bot${MAIN_BOT_TOKEN}/editMessageText`, {
-                chat_id: CHAT_ID, message_id: messageId, parse_mode: 'HTML',
-                text: callbackQuery.message.text + `\n\n🔥 <b>結果:</b> 指揮官 ${userName} 已批准！全線市價強平執行中...`
-            }).catch(()=>{});
+            await enqueueMessage(MAIN_BOT_TOKEN, 'editMessageText', {
+                chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+                text: callbackQuery.message.text + `\n\n🔥 <b>結果:</b> 指揮官 ${userName} 已批准！全線市價強平執行中...`,
+                reply_markup: { inline_keyboard: [] }
+            });
 
             const { getPortfolio } = require('./portfolioService');
             const { runSellPipeline } = require('./tradeService');
@@ -162,12 +173,77 @@ async function processTelegramCallback(callbackQuery) {
         }
     }
 
-    // --------------------------------------------------
-    // 🧬 2. 每週 AI 回測參數審批
-    // --------------------------------------------------
+    // 2. AI 戰略參謀提案審批 (熱更新區)
+    let responseText = '';
+    let isAIProposal = false;
+
+    if (data === 'REJECT_ALL_PROP') {
+        responseText = `❌ 已忽略 AI 提案。`;
+        isAIProposal = true;
+    } 
+    else if (data.startsWith('APPROVE_ALL_')) {
+        const climate = data.replace('APPROVE_ALL_', '');
+        const isBear = climate === 'BEAR_PANIC';
+        const isBull = climate === 'RAGING_BULL';
+        
+        const valTp1 = isBear ? 20.0 : (isBull ? 80.0 : 50.0);
+        const valSl = isBear ? -10.0 : (isBull ? -20.0 : -15.0);
+        const valTip = isBear ? 0.5 : (isBull ? 5.0 : 2.0);
+
+        await supabase.from('ai_strategy_params').update({ tp_level_1_pct: valTp1, stop_loss_pct: valSl, max_buy_tip_pct: valTip }).in('id', [2, 3]);
+        cacheManager.updateLocally('MEME', { tp_level_1_pct: valTp1, stop_loss_pct: valSl, max_buy_tip_pct: valTip });
+        cacheManager.updateLocally('TRENDING', { tp_level_1_pct: valTp1, stop_loss_pct: valSl, max_buy_tip_pct: valTip });
+        
+        await supabase.from('system_config').update({ status_msg: `切換至 ${climate} 模式` }).eq('id', 1);
+        responseText = `✅ 已批准全套 ${climate} 戰略！`;
+        isAIProposal = true;
+    }
+    else if (data.startsWith('APPROVE_TP1_')) {
+        const val = parseFloat(data.replace('APPROVE_TP1_', ''));
+        await supabase.from('ai_strategy_params').update({ tp_level_1_pct: val }).in('id', [2, 3]);
+        cacheManager.updateLocally('MEME', { tp_level_1_pct: val });
+        cacheManager.updateLocally('TRENDING', { tp_level_1_pct: val });
+        responseText = `✅ 已更新第一階止盈為 ${val}%`;
+        isAIProposal = true;
+    }
+    else if (data.startsWith('APPROVE_SL_')) {
+        const val = parseFloat(data.replace('APPROVE_SL_', ''));
+        await supabase.from('ai_strategy_params').update({ stop_loss_pct: val }).in('id', [2, 3]);
+        cacheManager.updateLocally('MEME', { stop_loss_pct: val });
+        cacheManager.updateLocally('TRENDING', { stop_loss_pct: val });
+        responseText = `✅ 已更新硬止損為 ${val}%`;
+        isAIProposal = true;
+    }
+    else if (data.startsWith('APPROVE_TIP_')) {
+        const val = parseFloat(data.replace('APPROVE_TIP_', ''));
+        await supabase.from('ai_strategy_params').update({ max_buy_tip_pct: val }).in('id', [2, 3]);
+        cacheManager.updateLocally('MEME', { max_buy_tip_pct: val });
+        cacheManager.updateLocally('TRENDING', { max_buy_tip_pct: val });
+        responseText = `✅ 已更新買入小費上限為 ${val}%`;
+        isAIProposal = true;
+    }
+
+    if (isAIProposal) {
+        await enqueueMessage(MAIN_BOT_TOKEN, 'editMessageText', {
+            chat_id: chatId, message_id: messageId,
+            text: `${callbackQuery.message.text}\n\n<b>[執行結果]</b>\n${responseText}\n(操作者: ${userName})`,
+            parse_mode: 'HTML', reply_markup: { inline_keyboard: [] }
+        });
+        await enqueueMessage(MAIN_BOT_TOKEN, 'answerCallbackQuery', { callback_query_id: callbackQuery.id });
+        return;
+    }
+
+    // 3. 舊有的每週 AI 回測參數審批 (兜底保留)
     if (data.startsWith('APPROVE_') || data.startsWith('REJECT_')) {
-        // ... 功能與之前相同 ...
+        const isProcessed = await redis.set(`tg_btn_lock:${messageId}`, '1', 'EX', 86400, 'NX');
+        if (!isProcessed) return;
+        const isApprove = data.startsWith('APPROVE_');
+        await enqueueMessage(ADMIN_BOT_TOKEN, 'editMessageText', {
+            chat_id: chatId, message_id: messageId, parse_mode: 'HTML',
+            text: callbackQuery.message.text + `\n\n🛡️ <b>結果:</b> 指揮官 ${userName} 已${isApprove ? '批准' : '否決'}提案。`,
+            reply_markup: { inline_keyboard: [] }
+        });
     }
 }
 
-module.exports = { sendTelegramAlert, sendAdminAlert, sendStrategyAlert, safeHTML, sendMacroPanicApproval, sendApprovalRequest, processTelegramCallback };
+module.exports = { sendTelegramAlert, sendAdminAlert, sendStrategyAlert, safeHTML, sendMacroPanicApproval, sendApprovalRequest, processTelegramCallback, enqueueMessage, MAIN_BOT_TOKEN, CHAT_ID };

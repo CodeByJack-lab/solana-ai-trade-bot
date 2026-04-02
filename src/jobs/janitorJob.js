@@ -155,14 +155,74 @@ const janitorJob = {
         }
     },
 
+    // 💎 [V9.2 新增] 任務 3：WSOL 碎石解包機 (自動將卡住嘅 WSOL 轉回原生 SOL)
+    async cleanWrappedSol() {
+        if (!wallet) return;
+        console.log('\n🔨 [Janitor] 任務 3：檢查並解包積壓的 WSOL 碎石...');
+        try {
+            const WSOL_MINT = 'So11111111111111111111111111111111111111112';
+            const parsedTokenAccounts = await connection.getParsedTokenAccountsByOwner(wallet.publicKey, {
+                mint: new PublicKey(WSOL_MINT)
+            });
+
+            if (parsedTokenAccounts.value.length === 0) {
+                console.log('✅ [Janitor] 錢包內沒有 WSOL 帳戶。');
+                return;
+            }
+
+            for (const accInfo of parsedTokenAccounts.value) {
+                const uiAmount = accInfo.account.data.parsed.info.tokenAmount.uiAmount;
+                const ataPubkey = accInfo.pubkey;
+
+                // 只要積壓超過 0.01 WSOL，就果斷砸碎解包
+                if (uiAmount > 0.01) {
+                    console.log(`🚨 [Janitor] 發現積壓的 WSOL (${uiAmount} WSOL)，準備砸碎解包為原生 SOL...`);
+                    
+                    const transaction = new Transaction().add(
+                        createCloseAccountInstruction(
+                            new PublicKey(ataPubkey), // 要關閉的 WSOL ATA
+                            wallet.publicKey,         // 接收原生 SOL (本金+租金) 的地址
+                            wallet.publicKey          // 帳戶擁有人
+                        )
+                    );
+
+                    const latestBlockhash = await connection.getLatestBlockhash();
+                    transaction.recentBlockhash = latestBlockhash.blockhash;
+                    transaction.feePayer = wallet.publicKey;
+
+                    const signature = await connection.sendTransaction(transaction, [wallet]);
+                    await connection.confirmTransaction({
+                        blockhash: latestBlockhash.blockhash,
+                        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+                        signature: signature
+                    });
+                    console.log(`✅ [Janitor] WSOL 碎石解包成功！已轉回原生 SOL。Tx: ${signature}`);
+                } else if (uiAmount === 0) {
+                    // 如果係 0 餘額，由任務 1 去處理 (等待 7 日後回收租金)
+                } else {
+                    console.log(`✅ [Janitor] WSOL 餘額為 ${uiAmount}，未達 0.01 門檻，暫不解包。`);
+                }
+            }
+        } catch (err) {
+            console.error('❌ [Janitor] 解包 WSOL 發生錯誤:', err.message);
+        }
+    },
+
     start() {
+        // 舊有排程：每天凌晨 4:00 執行深度清理 (任務 1 & 2)
         cron.schedule('0 4 * * *', async () => {
             await this.cleanEmptyAccounts();
             await this.cleanIncubatorPool();
             console.log(`\n✅ [Janitor] 每日清晨 4:00 巡邏作業全數完成！`);
         });
-        console.log('🧹 [Janitor] 清道夫排程已啟動 (每天凌晨 4:00 巡邏 0餘額帳戶 及 保溫箱)');
-        healthMonitor.setStatus('Janitor_Service', '🟢 待命 (04:00)');
+
+        // 💎 V9.2 新排程：每 4 小時獨立執行一次 WSOL 碎石解包 (任務 3)
+        cron.schedule('0 */4 * * *', async () => {
+            await this.cleanWrappedSol();
+        });
+
+        console.log('🧹 [Janitor] 清道夫排程已啟動 (每日 4:00 深度清理 + 每 4 小時 WSOL 解包)');
+        healthMonitor.setStatus('Janitor_Service', '🟢 待命 (多重排程)');
     }
 };
 

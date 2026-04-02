@@ -1,13 +1,14 @@
 // src/jobs/weeklyBacktestJob.js
-// 📝 檔案功能用途：雙軌高精度回測引擎。極限壓榨 Node.js 算力，實裝 1355 組兩階段無縫網格。計算完畢後生成 BACKTEST 提案，交由 autoApplyJob 進行 60 分鐘審批倒數。
+// 📝 檔案功能用途：V9.2 雙軌高精度回測引擎。實裝 1355 組兩階段無縫網格。對接 cacheManager 動態載入英文思維鏈劇本，生成 BACKTEST 提案交由 autoApplyJob 審批。
 
 const { supabase } = require('../config/supabase');
 const { keyRotator } = require('../services/keyRotator');
+const { cacheManager } = require('../services/cacheManager'); // 🛡️ 引入大腦快取
 const cron = require('node-cron');
 const axios = require('axios');
 const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
-const { sendTelegramAlert } = require('../services/telegramService');
+const { sendApprovalRequest } = require('../services/telegramService'); // 🛡️ 使用新版郵差
 
 const weeklyBacktestJob = {
     /**
@@ -185,49 +186,54 @@ const weeklyBacktestJob = {
                 console.log(`🎯 Trending 極限微調完畢: SL ${finalBestTrending.stop_loss_pct}%, TP ${finalBestTrending.trailing_tp_trigger}%, PB ${finalBestTrending.trailing_pullback}%`);
             }
 
-            // 3. 提交 AI 進行「合理性評估」
-            const prompt = `You are the EVOLUTION MASTER of a Quant bot.
-The Backtest Engine has mathematically determined the optimal parameters for next week using a Two-Stage High-Precision Grid Search. 
+            // 3. 🧠 動態獲取 AI 劇本與模型輪替 (V9.2 升級)
+            const contextString = `[MEME STRATEGY]\nProposed: SL ${finalBestMeme?.stop_loss_pct || 'N/A'}%, TP Trigger ${finalBestMeme?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestMeme?.trailing_pullback || 'N/A'}%\nWin Rate: ${finalBestMeme?.win_rate?.toFixed(1) || 'N/A'}%\n\n[TRENDING STRATEGY]\nProposed: SL ${finalBestTrending?.stop_loss_pct || 'N/A'}%, TP Trigger ${finalBestTrending?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestTrending?.trailing_pullback || 'N/A'}%\nWin Rate: ${finalBestTrending?.win_rate?.toFixed(1) || 'N/A'}%`;
 
-[MEME STRATEGY (High Volatility)]
-Proposed Params: Stop Loss ${finalBestMeme?.stop_loss_pct || 'N/A'}%, Take Profit Trigger ${finalBestMeme?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestMeme?.trailing_pullback || 'N/A'}%
-Simulated Win Rate: ${finalBestMeme?.win_rate?.toFixed(1) || 'N/A'}%
+            const aiConfig = cacheManager.getPromptConfig('backtest_analyst', { promptContext: contextString });
+            const prompt = aiConfig.parsedPrompt;
+            const models = aiConfig.models;
 
-[TRENDING STRATEGY (Top 100 Momentum)]
-Proposed Params: Stop Loss ${finalBestTrending?.stop_loss_pct || 'N/A'}%, Take Profit Trigger ${finalBestTrending?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestTrending?.trailing_pullback || 'N/A'}%
-Simulated Win Rate: ${finalBestTrending?.win_rate?.toFixed(1) || 'N/A'}%
-
-Task: Provide a critical evaluation of these proposed parameters. Are they reasonable given current market conditions? What are the potential risks? 
-Output JSON: 
-{
-  "evaluation_report": "<Cantonese explanation under 100 words outlining the reasoning, risks, and market context of these parameters>"
-}`;
-
-console.log(`🧠 [Evolution Engine] 參數計算完畢，正在呼叫 AI 資源池撰寫評估報告...`);
+            console.log(`🧠 [Evolution Engine] 參數計算完畢，正在呼叫 AI 大腦 (${aiConfig.provider}) 撰寫評估報告...`);
             
-            // 👇 V9.1 改用 keyRotator 排隊打 API 並加入 Try-Catch 降級
-            let aiDecision = null;
-            try {
-                aiDecision = await keyRotator.enqueueRequest(async (apiKey) => {
-                    const isGroq = apiKey.startsWith('gsk_');
-                    const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
-                    const modelName = isGroq ? 'llama3-70b-8192' : 'mistral-small-latest';
+            let evaluation = "⚠️ AI 評估超時或冷卻中，僅提供數學最佳解。";
 
-                    const res = await axios.post(apiUrl, {
-                        model: modelName,
-                        messages: [{ role: "user", content: prompt }],
-                        response_format: { type: "json_object" }
-                    }, {
-                        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-                        timeout: 30000
-                    });
-                    return JSON.parse(res.data.choices[0].message.content);
+            try {
+                evaluation = await keyRotator.enqueueRequest(async (apiKey) => {
+                    const cleanKey = apiKey.replace(/['"]/g, '').trim();
+                    const isGroq = cleanKey.startsWith('gsk_');
+                    const apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
+                    
+                    let lastErr = null;
+
+                    // 🔄 多模型輪替防崩潰機制
+                    for (const currentModel of models) {
+                        try {
+                            console.log(`🤖 嘗試呼叫模型: ${currentModel}`);
+                            const res = await axios.post(apiUrl, {
+                                model: currentModel,
+                                messages: [{ role: "user", content: prompt }],
+                                response_format: { type: "json_object" }
+                            }, {
+                                headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' },
+                                timeout: 15000
+                            });
+                            
+                            const rawText = res.data.choices[0].message.content;
+                            const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+                            if (!jsonMatch) throw new Error("AI 未回傳有效 JSON");
+                            
+                            // ✅ 精準提取 report 欄位 (無視 english_thought_process)
+                            return JSON.parse(jsonMatch[0]).report; 
+                        } catch (e) {
+                            lastErr = e;
+                            console.warn(`⚠️ [Evolution Engine] 模型 ${currentModel} 失敗，嘗試後備...`);
+                        }
+                    }
+                    throw lastErr || new Error("所有後備模型均失敗");
                 });
             } catch (aiErr) {
-                console.warn(`⚠️ [Evolution Engine] AI 評估失敗，平滑降級: ${aiErr.message}`);
+                console.warn(`⚠️ [Evolution Engine] AI 評估徹底失敗: ${aiErr.message}`);
             }
-
-            const evaluation = aiDecision?.evaluation_report || "AI 評估超時或冷卻中，僅提供數學最佳解。";
 
             // 4. 寫入 ai_proposals 提案表 (PENDING 狀態)，交由 autoApplyJob 執行 60 分鐘倒數
             const proposedChanges = { 
@@ -245,8 +251,7 @@ console.log(`🧠 [Evolution Engine] 參數計算完畢，正在呼叫 AI 資源
             const proposalId = proposalInsert[0].id;
             console.log(`⏳ [Evolution Engine] 提案已生成 (ID: ${proposalId})。已交由 AutoApplyJob 進行 60 分鐘倒數...`);
             
-            if (typeof sendTelegramAlert === 'function') {
-                const { sendApprovalRequest } = require('../services/telegramService');
+            if (typeof sendApprovalRequest === 'function') {
                 await sendApprovalRequest(`🧬 <b>每週參數優化提案已生成</b>\n\n💡 <b>AI 評估:</b>\n${evaluation}\n\n⏳ 系統將於 60 分鐘後自動 Apply。你可立即批准或否決！`, proposalId);
             }
 

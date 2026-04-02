@@ -1,9 +1,10 @@
 // src/services/liveTradeService.js
-// 📝 檔案功能用途：實盤簽名與上鏈引擎。對接 Jito Block Engine 進行 Bundle 拍賣，實裝動態小費，並具備 Promise.any 絕命公鏈廣播備援。
+// 📝 檔案功能用途：實盤簽名與上鏈引擎。對接 Jito Block Engine 進行 Bundle 拍賣，實裝 V9.2 Jito 智能封頂 (max_buy_tip_pct) 與 P50 網絡感知，具備 Promise.any 絕命備援。
 
 const { Keypair, VersionedTransaction, Transaction, SystemProgram, PublicKey } = require('@solana/web3.js');
-const { connection, broadcastWithPromiseAny } = require('../config/solana'); // 👈 引入 Promise.any 引擎
+const { connection, broadcastWithPromiseAny } = require('../config/solana'); 
 const { supabase } = require('../config/supabase'); 
+const { cacheManager } = require('./cacheManager'); // 🛡️ V9.2 引入快取大腦
 const axios = require('axios');
 const { healthMonitor } = require('./healthMonitor'); 
 const configEnv = require('../config/config'); 
@@ -70,7 +71,7 @@ async function pollSignatureStatus(signature, timeoutMs = 15000) {
     throw new Error('Jito Bundle 確認超時 (Transaction Dropped or Pending)');
 }
 
-// 🚀 升級版：加入 1.1 秒精確破盾重試 (Micro-Retry) 防 429 斷線
+// 🚀 加入 1.1 秒精確破盾重試 (Micro-Retry) 防 429 斷線
 async function getJupiterSwapTransaction(quoteResponse) {
     if (!wallet) return null;
     const baseUrl = (configEnv.external.jupiterBaseUrl || 'https://quote-api.jup.ag').replace(/\/$/, '');
@@ -89,7 +90,7 @@ async function getJupiterSwapTransaction(quoteResponse) {
         prioritizationFeeLamports: "auto" 
     };
 
-    const maxRetries = 3; // 最多死纏爛打 3 次
+    const maxRetries = 3; 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const response = await axios.post(`${baseUrl}${endpoint}`, payload, config);
@@ -103,7 +104,6 @@ async function getJupiterSwapTransaction(quoteResponse) {
                 return null;
             }
             
-            // 🛡️ 精確 1.1 秒 (1100 毫秒)，完美跨越 API Rate Limit 懲罰區間！
             console.log(`⏳ 觸發 1.1 秒精確冷卻以重置 API 視窗...`);
             await new Promise(r => setTimeout(r, 1100)); 
         }
@@ -111,7 +111,18 @@ async function getJupiterSwapTransaction(quoteResponse) {
     return null;
 }
 
-// 🎯 接收 reason 參數，啟動智能環境感知與多路備援
+// 📊 獲取 Jito P50 網絡擠塞指數
+async function fetchJitoTipFloor() {
+    try {
+        const res = await axios.get('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { timeout: 2000 });
+        if (res.data && res.data.length > 0) {
+            return res.data[0].landed_tips_50th_percentile || 150000;
+        }
+    } catch (err) {}
+    return 150000; // 預設保底 0.00015 SOL
+}
+
+// 🎯 接收 reason 參數，啟動智能環境感知、多路備援與防水魚封頂
 async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
     if (!wallet) return { success: false, txid: null };
 
@@ -139,19 +150,32 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
         
         console.log(`✅ [Pre-flight Success] 模擬通過，準備進入 Jito 動態拍賣場...`);
 
-        // 讀取基礎 Tip
-        let baseTip = 150000; 
-        try {
-            const { data: config } = await supabase.from('system_config').select('jito_tip_lamports').eq('id', 1).single();
-            if (config && config.jito_tip_lamports) baseTip = Number(config.jito_tip_lamports);
-        } catch (dbErr) {}
+        // 🛡️ V9.2 核心：極速讀取 RAM 快取，獲取小費戰略
+        const cache = cacheManager.getConfig();
+        const baseTip = cache.base_jito_tip || 150000;
+        const maxTipPct = cache.max_jito_tip_pct || 0.02;
 
-        // 🚀 [智能環境感知] 動態調整起步價
         let currentTip = baseTip;
         let isEmergency = false;
+        let maxBuyTipLamports = Infinity;
 
         if (action === 'BUY') {
-            currentTip = baseTip * 2; 
+            const tradeAmountLamports = Number(quoteResponse.inAmount || 0);
+            maxBuyTipLamports = tradeAmountLamports * maxTipPct;
+
+            const p50Tip = await fetchJitoTipFloor();
+            console.log(`📊 [Jito Oracle] 當前網絡 P50 小費中位數為 ${(p50Tip/1e9).toFixed(5)} SOL`);
+
+            // 如果 P50 已經貴過我哋條底線，即刻走人
+            if (p50Tip > maxBuyTipLamports) {
+                console.log(`🛑 [Jito 防護] 當前網絡 P50 小費超出本金 ${maxTipPct*100}% 上限 (${(maxBuyTipLamports/1e9).toFixed(5)} SOL)！為防被當水魚，果斷放棄建倉。`);
+                healthMonitor.setStatus('Live_Engine', '🔴 網絡擠塞，放棄高成本買單');
+                return { success: false, txid: null };
+            }
+
+            // 用 P50 與 上限 之間嘅最小值做起步價
+            currentTip = Math.min(p50Tip, maxBuyTipLamports);
+            
         } else if (action === 'SELL' && reason) {
             if (reason.includes('瀑布') || reason.includes('硬止損') || reason.includes('崩盤') || reason.includes('拔線') || reason.includes('EXIT')) {
                 currentTip = baseTip * 4; 
@@ -208,12 +232,19 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
                 console.log(`⚠️ [Jito 拍賣失敗] 交易超時或被擠出。`);
                 if (attempt < maxRetries) {
                     currentTip = currentTip * 2; 
-                    console.log(`🔥 準備加碼保護費，重新發送...`);
+                    
+                    // 🛡️ V9.2 買單鎖死：加碼時絕對唔可以爆上限
+                    if (action === 'BUY' && currentTip > maxBuyTipLamports) {
+                        currentTip = maxBuyTipLamports;
+                        console.log(`🔥 準備加碼保護費，但已達 ${maxTipPct*100}% 上限，鎖死出價: ${(currentTip/1e9).toFixed(5)} SOL`);
+                    } else {
+                        console.log(`🔥 準備加碼保護費，重新發送...`);
+                    }
                 }
             }
         }
 
-        // 🚨 [V9.0 絕命備援] 如果 Jito 徹底失敗，且為賣出逃生，呼叫 Promise.any 多路廣播！
+        // 🚨 絕命備援：如果 Jito 徹底失敗，且為賣出逃生，呼叫 Promise.any 多路廣播！
         if (action === 'SELL') {
             console.error(`❌ [Jito 拍賣失敗] 已達最大重試次數。啟動 V9.0 絕命公鏈廣播 (Promise.any)...`);
             try {

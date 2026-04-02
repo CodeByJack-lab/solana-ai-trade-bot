@@ -1,9 +1,9 @@
 // src/config/solana.js
-// 📝 檔案功能用途 ( < 50 字 )：Solana 區塊鏈連線引擎。負責建立 RPC 節點連線、攔截限流錯誤，並提供多車道無縫輪替與 Promise.any 併發廣播機制。
+// 📝 檔案功能用途：V9.2 Solana 區塊鏈連線引擎。支援 RPC 智能輪替、防併發切換風暴 (Debounce)、429 攔截及 Promise.any 極限併發廣播。
 
 const { Connection, PublicKey, Keypair } = require('@solana/web3.js');
 
-// 🚀 核心急救：直接讀取系統變數，嚴格對齊 V9.0 變數清單
+// 🚀 直接讀取系統變數
 const ALCHEMY_API_KEY = process.env.ALCHEMY_API_KEY;
 const HELIUS_API_KEY_1 = process.env.HELIUS_API_KEY;
 const HELIUS_API_KEY_2 = process.env.HELIUS_API_KEY_2;
@@ -42,6 +42,7 @@ const publicConnections = PUBLIC_RPCS.map(url => new Connection(url, connectionC
 
 let currentVipIndex = 0; 
 let currentPublicIndex = 0;
+let lastRotationTime = 0; // 🛡️ V9.2 新增：防併發切換鎖
 
 /**
  * ⏳ 防超時機制：為 Promise 加上強制死亡線，超時即拋出錯誤觸發輪替。
@@ -86,20 +87,30 @@ const connection = new Proxy(dummyTarget, {
                         if (NO_TIMEOUT_METHODS.includes(propKey)) {
                             return await methodToRun.apply(activeConn, args);
                         } else {
-                            return await withTimeout(methodToRun.apply(activeConn, args), 5000, propKey);
+                            // V9.2 針對查籌碼 (getParsedAccountInfo 等) 縮短 Timeout 至 3.5 秒，強制及早 Failover
+                            const timeoutMs = propKey.includes('get') ? 3500 : 5000;
+                            return await withTimeout(methodToRun.apply(activeConn, args), timeoutMs, propKey);
                         }
                     } catch (err) {
                         const is429 = err.message.includes('429') || err.message.includes('TOO_MANY_REQUESTS') || err.message.includes('Too Many Requests');
                         const isTimeout = err.message.includes('Timeout');
 
                         if (is429 || isTimeout) {
-                            if (isVip) {
-                                currentVipIndex = (currentVipIndex + 1) % vipConnections.length;
-                                console.warn(`\n⚠️ 節點限流/超時！自動切換至 ➡️ 節點 ${currentVipIndex} (${maskUrl(vipUrls[currentVipIndex])})`);
-                            } else {
-                                currentPublicIndex = (currentPublicIndex + 1) % publicConnections.length;
+                            const now = Date.now();
+                            // 🛡️ V9.2 核心：防併發切換風暴。2秒內只允許切換一次節點
+                            if (now - lastRotationTime > 2000) {
+                                if (isVip) {
+                                    currentVipIndex = (currentVipIndex + 1) % vipConnections.length;
+                                    console.warn(`\n⚠️ 節點限流/超時！全局鎖定切換至 ➡️ VIP 節點 ${currentVipIndex} (${maskUrl(vipUrls[currentVipIndex])})`);
+                                } else {
+                                    currentPublicIndex = (currentPublicIndex + 1) % publicConnections.length;
+                                }
+                                lastRotationTime = now;
                             }
                         }
+
+                        // 畀少少時間新節點抖氣 (防抖)
+                        await new Promise(r => setTimeout(r, 500));
 
                         if (attempt < pool.length) {
                             return await runWithRetry(isVip, attempt + 1);

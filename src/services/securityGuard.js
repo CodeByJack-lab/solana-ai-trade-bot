@@ -1,13 +1,10 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V9.1.9 100分量化安檢中樞。實作「假池秒殺」、「穩定幣攔截」、「藍籌鐵閘過濾」、「活人檢測」與「廢除盲狙」，精準裁決分數。
+// 📝 檔案功能用途：V9.2 100分量化安檢中樞。實裝「懶漢判定法」保護 RPC、防 429 智能重試、原生 RPC Top 10 籌碼分佈檢查，廢除對 Birdeye 依賴。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
 const { PublicKey } = require('@solana/web3.js');
 const config = require('../config/config');
-
-const PROVIDERS = ['DEXSCREENER', 'BIRDEYE'];
-let activeProviderIdx = 0;
 
 class SecurityGuard {
     
@@ -69,32 +66,49 @@ class SecurityGuard {
         return result;
     }
 
+    /**
+     * 📊 獲取 DexScreener 報價 (具備 429 智能重試防護)
+     */
     async _fetchMarketData(mint) {
-        for (let i = 0; i < PROVIDERS.length; i++) {
-            const provider = PROVIDERS[(activeProviderIdx + i) % PROVIDERS.length];
+        let retries = 0;
+        const maxRetries = 3;
+
+        while (retries < maxRetries) {
             try {
-                if (provider === 'DEXSCREENER') {
-                    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 5000 });
-                    if (res.data?.pairs && res.data.pairs.length > 0) {
-                        const pair = res.data.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
-                        activeProviderIdx = (activeProviderIdx + i) % PROVIDERS.length;
-                        return {
-                            symbol: pair.baseToken?.symbol || 'UNKNOWN',
-                            name: pair.baseToken?.name || 'UNKNOWN',
-                            description: pair.info?.description || '',
-                            liquidity: pair.liquidity?.usd || 0, fdv: pair.fdv || 0,
-                            volume5m: pair.volume?.m5 || 0,
-                            buys5m: pair.txns?.m5?.buys || 0, sells5m: pair.txns?.m5?.sells || 0,
-                            h1: parseFloat(pair.priceChange?.h1) || 0, priceUsd: parseFloat(pair.priceUsd) || 0,
-                            hasSocials: (pair.info?.socials?.length > 0 || pair.info?.websites?.length > 0)
-                        };
-                    }
+                const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 5000 });
+                if (res.data && res.data.pairs && res.data.pairs.length > 0) {
+                    const pair = res.data.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+                    return {
+                        symbol: pair.baseToken?.symbol || 'UNKNOWN',
+                        name: pair.baseToken?.name || 'UNKNOWN',
+                        description: pair.info?.description || '',
+                        liquidity: pair.liquidity?.usd || 0, 
+                        fdv: pair.fdv || 0,
+                        volume5m: pair.volume?.m5 || 0,
+                        buys5m: pair.txns?.m5?.buys || 0, 
+                        sells5m: pair.txns?.m5?.sells || 0,
+                        h1: parseFloat(pair.priceChange?.h1) || 0, 
+                        priceUsd: parseFloat(pair.priceUsd) || 0,
+                        hasSocials: (pair.info?.socials?.length > 0 || pair.info?.websites?.length > 0)
+                    };
                 }
-            } catch (err) {}
+                return null; // 有效回應但無池
+            } catch (err) {
+                if (err.response?.status === 429) {
+                    retries++;
+                    console.log(`⏳ [DexScreener] 觸發 429 限制，冷卻 1.1 秒後重試 (${retries}/${maxRetries})...`);
+                    await new Promise(r => setTimeout(r, 1100)); // 精確 1.1 秒防抖
+                } else {
+                    return null; // 其他錯誤直接放棄
+                }
+            }
         }
-        return null;
+        return null; // 耗盡重試次數
     }
 
+    /**
+     * 🛡️ 原生 RPC 權限審計 (免費)
+     */
     async _checkContractSafety(mint, requireAuthCheck) {
         try {
             const accInfo = await connection.getParsedAccountInfo(new PublicKey(mint));
@@ -109,93 +123,98 @@ class SecurityGuard {
     }
 
     /**
-     * 🎯 V9.1.9 量化 100 分核心引擎 (終極治本版)
+     * 🦅 原生 RPC 籌碼分佈探測 (取代 Birdeye)
+     */
+    async _checkTop10Holders(mint) {
+        try {
+            const mintPubkey = new PublicKey(mint);
+            
+            // 1. 獲取總發行量
+            const supplyRes = await connection.getTokenSupply(mintPubkey);
+            const totalSupply = supplyRes.value?.uiAmount;
+            if (!totalSupply || totalSupply === 0) return true; 
+
+            // 2. 獲取最大持倉帳戶
+            const largestAccounts = await connection.getTokenLargestAccounts(mintPubkey);
+            if (!largestAccounts.value || largestAccounts.value.length === 0) return true;
+
+            // 3. 撇除最大池 (通常為 Raydium AMM)，計算第 2 至第 11 名的總和
+            let top10Sum = 0;
+            const holdersToCheck = largestAccounts.value.slice(1, 11); 
+            
+            for (const account of holdersToCheck) {
+                top10Sum += account.uiAmount || 0;
+            }
+
+            const top10Pct = top10Sum / totalSupply;
+            
+            if (top10Pct > 0.50) {
+                console.log(`🚨 [Top 10 Guard] 籌碼過度集中！前 10 大散戶持倉(撇除最大池)佔比 ${(top10Pct*100).toFixed(2)}%: ${mint}`);
+                return false; 
+            }
+            return true;
+        } catch (err) {
+            console.warn(`⚠️ [Top 10 Guard] 查閱籌碼失敗: ${err.message}`);
+            return true; // 若 RPC 失敗，為免誤殺預設放行
+        }
+    }
+
+    /**
+     * 🎯 V9.2 量化 100 分核心引擎 (懶漢判定法：先快篩，後 RPC)
      */
     async calculateQuantScore(mint, type = 'NEWBORN') {
-        // 🛡️ 藍籌白名單鐵閘 (只針對 TRENDING 策略，在 Call API 前攔截以節省資源)
+        // 🛡️ [0 成本] 藍籌白名單鐵閘
         if (type === 'TRENDING' && config.trade.enableTrendingWhitelist) {
             const whitelist = config.trade.trendingWhitelist || [];
             if (!whitelist.includes(mint)) {
-                console.log(`🛡️ [Whitelist Guard] 拒絕進入：${mint.substring(0,6)} 不在藍籌白名單內！`);
-                return { 
-                    numeric_score: 0, 
-                    isSafe: false, 
-                    reason: `🛑 藍籌鐵閘攔截: 不在 Trending 專屬白名單內，已自動過濾。`,
-                    marketData: null
-                };
+                return { numeric_score: 0, isSafe: false, reason: `🛑 藍籌鐵閘攔截: 不在 Trending 白名單內`, marketData: null };
             }
         }
 
+        // 📊 [低成本] 獲取 DexScreener 數據
         const marketData = await this._fetchMarketData(mint);
-        if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取報價數據', marketData: null };
+        if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取報價數據 (DexScreener 異常或無池)', marketData: null };
 
         const upperSymbol = marketData.symbol.toUpperCase();
 
-        // 🛑 [一刀切] 穩定幣與假穩定幣攔截
+        // 🛑 [0 成本] 穩定幣攔截
         if (upperSymbol.startsWith('USD')) {
-            console.log(`🛡️ [Stablecoin Guard] 觸發攔截！拒絕交易穩定幣或假穩定幣: ${upperSymbol} (${mint})`);
-            return { 
-                numeric_score: 0, 
-                isSafe: false, 
-                reason: `🛑 穩定幣攔截: 系統不交易 ${upperSymbol} 系列代幣`, 
-                marketData 
-            };
+            return { numeric_score: 0, isSafe: false, reason: `🛑 穩定幣攔截: 系統不交易 ${upperSymbol} 系列代幣`, marketData };
         }
 
-        // ==========================================
-        // 🎯 治本方案二：資金效率池過濾 (死水大池)
-        // ==========================================
+        // 🛑 [0 成本] 絕對流動性底線 (未來會換成 DB 參數，目前暫時 hardcode 保底)
+        const absoluteMinLiq = type === 'TRENDING' ? 20000 : 2500; 
+        if (marketData.liquidity < absoluteMinLiq) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 流動性過低攔截: 僅有 $${marketData.liquidity.toFixed(0)}`, marketData };
+        }
+
+        // 🛑 [0 成本] 死水大池與假池過濾
         if (marketData.liquidity > 100000 && marketData.volume5m < 5000) {
-            console.log(`🚨 [Honeypot Guard] 秒殺假池！流動性 $${marketData.liquidity.toFixed(0)} 但 5m 交易量僅 $${marketData.volume5m.toFixed(0)}: ${upperSymbol}`);
-            return {
-                numeric_score: 0,
-                isSafe: false,
-                reason: `🛑 假池/貔貅攔截: $10萬以上流動性但缺乏真實交易量 ($${marketData.volume5m.toFixed(0)})`,
-                marketData
-            };
+            return { numeric_score: 0, isSafe: false, reason: `🛑 假池攔截: $10萬以上流動性但缺乏真實交易量 ($${marketData.volume5m.toFixed(0)})`, marketData };
         }
 
-        // ==========================================
-        // 🎯 治本方案一：活人真實度與貔貅檢測
-        // ==========================================
+        // 🛑 [0 成本] 活人真實度與貔貅檢測
         const totalTxs5m = marketData.buys5m + marketData.sells5m;
         if (totalTxs5m > 0) {
-            // 1. 只有買沒有賣 (最典型的貔貅 Honeypot)
             if (marketData.buys5m > 10 && marketData.sells5m === 0) {
-                console.log(`🚨 [Honeypot Guard] 貔貅攔截！完全沒有賣單: ${upperSymbol}`);
                 return { numeric_score: 0, isSafe: false, reason: `🛑 貔貅攔截: 完全沒有賣單 (Buy:${marketData.buys5m}, Sell:0)`, marketData };
             }
-            
-            // 2. 極低均價連環刷量 (Wash Trading 機房盤)
             const avgTrade = marketData.volume5m / totalTxs5m;
-            // 如果 5 分鐘內交易超過 100 次，但平均每單少於 $15 美金
             if (totalTxs5m >= 100 && avgTrade < 15) {
-                console.log(`🚨 [Wash Trading Guard] 刷量攔截！單筆均價極低 ($${avgTrade.toFixed(2)}): ${upperSymbol}`);
                 return { numeric_score: 0, isSafe: false, reason: `🛑 刷量攔截: 異常高頻但單筆均價極低 ($${avgTrade.toFixed(2)})`, marketData };
             }
         }
 
-        // 🌟 終極實體防偽：針對重災區，指定幣種只認可唯一真品地址
-        const VERIFIED_TOKENS = {
-            'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au'
-        };
-
+        // 🌟 [0 成本] 終極實體防偽
+        const VERIFIED_TOKENS = { 'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au' };
         if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) {
-            console.log(`🛡️ [Fake Shield] 觸發終極防偽！秒殺假冒 ${upperSymbol} (${mint})`);
-            return { 
-                numeric_score: 0, 
-                isSafe: false, 
-                reason: `🛑 終極防偽攔截: 假冒 ${upperSymbol} 幣`, 
-                marketData 
-            };
+            return { numeric_score: 0, isSafe: false, reason: `🛑 終極防偽攔截: 假冒 ${upperSymbol} 幣`, marketData };
         }
 
         let score = 0;
         let reasons = [];
 
-        // ==========================================
-        // 🛡️ Tier-0: 四維度文字快篩
-        // ==========================================
+        // 🛡️ [0 成本] 四維度文字快篩
         const textAnalysis = this.analyzeTextFeatures(marketData.symbol, marketData.name, marketData.description);
         if (textAnalysis.isFatal) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 一票否決: ${textAnalysis.reasons.join(', ')}`, marketData };
@@ -203,23 +222,31 @@ class SecurityGuard {
         if (textAnalysis.reasons.length > 0) reasons.push(...textAnalysis.reasons);
 
         // ==========================================
-        // 🛡️ Part 1: Core Defense (滿分 60 分)
+        // 💎 進入高昂成本區：只有精英代幣才會呼叫 RPC
         // ==========================================
-        let coreScore = 0;
+        let coreScore = 20; // 基礎分
+        coreScore = Math.max(0, coreScore - textAnalysis.safetyPenalty);
 
-        const minLiq = type === 'TRENDING' ? 50000 : 5000; 
-        if (marketData.liquidity >= minLiq) coreScore += 20;
-        else reasons.push(`流動性不足 ($${marketData.liquidity.toFixed(0)})`);
+        const minLiqToScore = type === 'TRENDING' ? 50000 : 5000; 
+        if (marketData.liquidity >= minLiqToScore) coreScore += 20;
+        else reasons.push(`流動性未達優質線 ($${marketData.liquidity.toFixed(0)})`);
 
+        // 1. 呼叫 RPC 查合約權限
         const isContractSafe = await this._checkContractSafety(mint, textAnalysis.requireAuthCheck);
         if (isContractSafe) coreScore += 20;
         else reasons.push('合約權限未放棄 (高危)');
 
-        coreScore += 20; // 基礎分
-        coreScore = Math.max(0, coreScore - textAnalysis.safetyPenalty);
+        // 2. 呼叫 RPC 查 Top 10 籌碼分佈
+        const isHoldersSafe = await this._checkTop10Holders(mint);
+        if (!isHoldersSafe) {
+            coreScore -= 20;
+            reasons.push('籌碼過度集中 (Top10 > 50%)');
+        }
+
+        coreScore = Math.max(0, coreScore);
 
         // ==========================================
-        // 🚀 Part 2: Momentum 結構與 OFI 濾波器 (滿分 40 分)
+        // 🚀 Part 2: Momentum 結構與 OFI 濾波器
         // ==========================================
         let momentumScore = 0;
 
@@ -228,35 +255,26 @@ class SecurityGuard {
 
         if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; // 5分
 
-        // 🌊 偽 OFI 動能質量檢查
         if (totalTxs5m > 0) {
             const volOFI = (marketData.buys5m - marketData.sells5m) / totalTxs5m;
             const countRatio = marketData.sells5m > 0 ? (marketData.buys5m / marketData.sells5m) : 2;
             const avgTrade = marketData.volume5m / totalTxs5m;
 
-            // 刷量檢測 (輕度警告)
             if (totalTxs5m >= 20 && avgTrade < 20) {
                 reasons.push('疑似納米刷量機器人 (動能無效)');
-            } 
-            // OFI 質量達標 -> 額外加分
-            else if (volOFI > 0.3 && countRatio > 1.5) {
+            } else if (volOFI > 0.3 && countRatio > 1.5) {
                 momentumScore += 15;
                 reasons.push(`OFI 動能強勁 (VolOFI:${volOFI.toFixed(2)}, Ratio:${countRatio.toFixed(1)})`);
             }
         }
 
-        // 施加 FOMO 懲罰
         momentumScore = Math.max(0, momentumScore - textAnalysis.fomoPenalty);
-
         score = coreScore + momentumScore;
 
-        // ==========================================
-        // 🎯 治本方案三：廢除 Meme 幣 Fast-Track (盲狙) 特權
-        // ==========================================
+        // 🎯 廢除 Meme 幣 Fast-Track 特權
         if (type !== 'TRENDING' && score >= 90) {
-            score = 89; // 強制壓低分數，讓系統必須交給 AI 審批
+            score = 89; 
             reasons.push('🛡️ 預防盲狙: Meme幣強制降至 89 分等待 AI 審批');
-            console.log(`🛡️ [Anti-Blind Snipe] 偵測到 Meme 幣 (${upperSymbol}) 達 90 分以上，強制降至 89 分交由 AI 審批。`);
         }
 
         const isSafe = score >= config.quant.rejectThreshold; 

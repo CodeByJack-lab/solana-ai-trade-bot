@@ -18,13 +18,20 @@ const config = {
     // 🧠 V9.1 AI 資源池 (統一 6 把 API Keys)
     // ==========================================
     aiKeys: [
-                getEnv('GROQ_API_KEY_1'),
-                getEnv('GROQ_API_KEY_2'),
-                getEnv('GROQ_API_KEY_3'),
-                getEnv('MISTRAL_API_KEY_1'),
-                getEnv('MISTRAL_API_KEY_2'),
-                getEnv('MISTRAL_API_KEY_3')
-            ].filter(Boolean),
+        getEnv('GROQ_API_KEY_1'),
+        getEnv('GROQ_API_KEY_2'),
+        getEnv('GROQ_API_KEY_3'),
+        getEnv('MISTRAL_API_KEY_1'),
+        getEnv('MISTRAL_API_KEY_2'),
+        getEnv('MISTRAL_API_KEY_3')
+    ].filter(Boolean),
+
+    // 🚀 V9.2 新增 Gemini 專屬資源池 (用於高階推理如 Climate Advisor)
+    geminiKeys: [
+        getEnv('GEMINI_API_KEY_1'), 
+        getEnv('GEMINI_API_KEY_2'), 
+        getEnv('GEMINI_API_KEY_3')
+    ].filter(Boolean),
 
     // ==========================================
     // 📊 V9.1 100分量化漏斗門檻 (Quant Funnel)
