@@ -1,5 +1,5 @@
 // src/services/cacheManager.js
-// 📝 檔案功能用途：V9.2 終極全域大腦。統一快取 AI 戰略參數、防偽白名單、以及所有核心 AI Prompt 劇本與模型輪替陣列。
+// 📝 檔案功能用途：V9.2 終極全域大腦。統一快取 AI 戰略參數、防偽白名單、以及所有核心 AI Prompt 劇本與模型輪替陣列。內建防偷懶 (Anti-Laziness) 雙語思維鏈底稿。
 
 const { supabase } = require('../config/supabase');
 
@@ -15,32 +15,32 @@ class CacheManager {
         };
         this.isLoaded = false;
 
-        // 🛡️ Prompt 底稿保命符 (已徹底清除冗餘的 Scout/Auditor，並全線升級為英文思維鏈)
+        // 🛡️ Prompt 底稿保命符 (全線升級：強制 Step 1/2 分工 + 嚴禁留空 + 嚴禁拼音)
         this.fallbackPrompts = {
             'CLIMATE_ADVISOR': {
                 provider: 'GEMINI', 
                 models: ['gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it'],
-                content: `You are a top-tier Web3 Quant Strategist. Current climate: {{climate}}. Data: News {{newsScore}}, VolSurge {{volSurge}}%, Jito P50 {{jitoP50}}. [Task] Recommend parameter adjustments. [Rules] 1. Think in English first. 2. The final "analysis" must be in Traditional Chinese (Cantonese). Output pure JSON exactly: {"english_thought_process": "your step-by-step reasoning in English", "tp_level_1": <number>, "stop_loss": <negative number>, "max_tip_pct": <number>, "analysis": "<Cantonese explanation>"}`
+                content: `You are a top-tier Web3 Quant Strategist. Current climate: {{climate}}. Data: News {{newsScore}}, VolSurge {{volSurge}}%, Jito P50 {{jitoP50}}. [Task] Recommend parameter adjustments. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "analysis". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning in English", "tp_level_1": <number>, "stop_loss": <negative number>, "max_tip_pct": <number>, "analysis": "<Cantonese explanation>"}`
             },
             'quant_consensus': {
                 provider: 'GROQ', 
                 models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'llama3-8b-8192'],
-                content: `You are a strict Quantitative AI Auditor. Evaluate asset {{symbol}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, 5m_Vol=\${{volume5m}}, OFI={{ofi}}, 1H_Change={{h1}}%. [Task] Adjust score based on momentum. [Rules] 1. Think in English first. 2. Reason in Cantonese. Output pure JSON exactly: {"english_thought_process": "reasoning in English", "confidence": <float 0.0-1.0>, "adjustment": <integer -20 to +20>, "reason": "<Cantonese explanation>"}`
+                content: `You are a strict Quantitative AI Auditor. Evaluate asset {{symbol}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, 5m_Vol=\${{volume5m}}, OFI={{ofi}}, 1H_Change={{h1}}%. [Task] Adjust score based on momentum. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "reason". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning in English", "confidence": <float 0.0-1.0>, "adjustment": <integer -20 to +20>, "reason": "<Cantonese explanation>"}`
             },
             'reviewer_trending': {
                 provider: 'MISTRAL', 
                 models: ['mistral-large-latest', 'mistral-small-latest', 'open-mixtral-8x22b'],
-                content: `You are a Swing Trader for Top 100 assets. Target: {{token_symbol}}. Current PnL: {{pnl_pct}}%. Memory: {{ai_memory}}. [Task] Evaluate position. [Rules] Think in English first. Output pure JSON exactly: {"english_thought_process": "reasoning", "decision": "HOLD"|"EXIT", "reason": "<Cantonese explanation>"}`
+                content: `You are a Swing Trader for Top 100 assets. Target: {{token_symbol}}. Current PnL: {{pnl_pct}}%. Memory: {{ai_memory}}. [Task] Evaluate position. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "reason". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning", "decision": "HOLD"|"EXIT", "reason": "<Cantonese explanation>"}`
             },
             'reviewer_overseer': {
                 provider: 'GROQ', 
                 models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'llama3-8b-8192'],
-                content: `You are a Ruthless Meme Trader. Target: {{token_symbol}}. Current PnL: {{pnl_pct}}%. Memory: {{ai_memory}}. [Task] Evaluate position. Cut losers fast. [Rules] Think in English first. Output pure JSON exactly: {"english_thought_process": "reasoning", "decision": "HOLD"|"EXIT", "reason": "<Cantonese explanation>"}`
+                content: `You are a Ruthless Meme Trader. Target: {{token_symbol}}. Current PnL: {{pnl_pct}}%. Memory: {{ai_memory}}. [Task] Evaluate position. Cut losers fast. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "reason". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning", "decision": "HOLD"|"EXIT", "reason": "<Cantonese explanation>"}`
             },
             'backtest_analyst': {
                 provider: 'GROQ', 
                 models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768', 'llama3-8b-8192'],
-                content: `You are the Chief Quant Analyst. Context: {{promptContext}}. [Task] Write a concise report explaining parameter split logic. [Rules] Think in English first, output report in Cantonese. Output pure JSON exactly: {"english_thought_process": "reasoning in English", "report": "<Cantonese text>"}`
+                content: `You are the Chief Quant Analyst. Context: {{promptContext}}. [Task] Write a concise report explaining parameter split logic. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese report in "report". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning in English", "report": "<Cantonese text>"}`
             }
         };
     }
@@ -143,9 +143,10 @@ class CacheManager {
             parsedContent = parsedContent.replace(new RegExp(`{{${key}}}`, 'g'), value !== undefined && value !== null ? value : 'UNKNOWN');
         }
 
+        // 🛡️ 加入可選串連運算子 (?.) 防止 config.models 未定義時報錯
         return { 
             provider: config.provider, 
-            models: config.models.length > 0 ? config.models : (this.fallbackPrompts[promptId]?.models || []), 
+            models: config.models?.length > 0 ? config.models : (this.fallbackPrompts[promptId]?.models || []), 
             parsedPrompt: parsedContent 
         };
     }

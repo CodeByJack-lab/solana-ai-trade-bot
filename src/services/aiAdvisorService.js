@@ -95,7 +95,7 @@ class AIAdvisorService {
         text += `📊 <b>當前局勢</b>：新聞情緒 ${envState.newsScore}，交易量湧浪 ${(envState.volSurge * 100).toFixed(0)}%。\n`;
         text += `🌡️ <b>氣候判定</b>：<code>${climate}</code>\n\n`;
         text += `🧠 <b>參謀分析</b>：<i>「${aiAnalysis}」</i>\n\n`;
-        text += `💡 <b>建議動作</b>：切換至『${climate === 'BEAR_PANIC' ? '熊市防禦' : (climate === 'RAGING_BULL' ? '狂暴進攻' : '震盪市')}套餐』。\n\n`;
+        text += `💡 <b>建議動作</b>：切換至『${climate === 'BEAR_PANIC' ? '熊市防禦' : (climate === 'RAGING_BULL' ? '牛市進攻' : '市場波動')}』。\n\n`;
 
         const keyboard = {
             inline_keyboard: [
