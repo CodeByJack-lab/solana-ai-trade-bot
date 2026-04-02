@@ -20,7 +20,7 @@ class CacheManager {
             'CLIMATE_ADVISOR': {
                 provider: 'GEMINI', 
                 models: ['gemma-3-27b-it', 'gemma-3-12b-it', 'gemma-3-4b-it'],
-                content: `You are a top-tier Web3 Quant Strategist. Current climate: {{climate}}. Data: News {{newsScore}}, VolSurge {{volSurge}}%, Jito P50 {{jitoP50}}. [Task] Recommend parameter adjustments. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "analysis". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "reasoning in English", "tp_level_1": <number>, "stop_loss": <negative number>, "max_tip_pct": <number>, "analysis": "<Cantonese explanation>"}`
+                content: `You are a top-tier Web3 Quant Strategist. Current climate: {{climate}}. Data: News {{newsScore}}, VolSurge {{volSurge}}%, Jito P50 {{jitoP50}}. [Task] Recommend parameter adjustments. [Rules] 1. Put English reasoning in "english_thought_process". 2. Put Cantonese explanation in "analysis". DO NOT leave it empty! NO pinyin allowed! Output pure JSON exactly: {"english_thought_process": "your step-by-step reasoning in English", "tp_level_1": <number>, "stop_loss": <negative number>, "max_tip_pct": <number>, "analysis": "<Cantonese explanation>"}`
             },
             'quant_consensus': {
                 provider: 'GROQ', 
@@ -124,6 +124,11 @@ class CacheManager {
     updateLocally(type, newConfigPayload) {
         const safeType = (type && type.includes('TRENDING')) ? 'TRENDING' : 'MEME';
         this.cache.strategies[safeType] = { ...this.cache.strategies[safeType], ...newConfigPayload };
+    }
+
+    // 🚀 獨立獲取防偽名單 Function
+    getVerifiedTokens() {
+        return this.cache.verified_tokens || {};
     }
 
     // --- 獲取 AI 劇本 ---

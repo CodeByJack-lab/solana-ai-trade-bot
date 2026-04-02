@@ -106,9 +106,8 @@ const trendingMonitorService = {
                     'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
                 ];
 
-                // 🛡️ 從大腦讀取最新防偽名單
-                const cache = cacheManager.getConfig();
-                const VERIFIED_TOKENS = cache?.verified_tokens || {};
+                // 🚀 核心修復：正確調用 getVerifiedTokens 獲取防偽名單
+                const VERIFIED_TOKENS = typeof cacheManager.getVerifiedTokens === 'function' ? cacheManager.getVerifiedTokens() : {};
 
                 for (let i = 0; i < pools.length; i++) {
                     const pool = pools[i];
@@ -120,8 +119,12 @@ const trendingMonitorService = {
 
                     const attr = pool.attributes || {};
                     const symbol = attr.name?.split(' /')[0]?.toUpperCase() || 'UNKNOWN';
+                    const liquidityUsd = parseFloat(attr.reserve_in_usd) || 0;
 
-                    // 🚨 源頭攔截：如果是防偽名單上的幣種，但地址不符，直接踢走，不准上榜！
+                    // 🚨 垃圾池攔截：流動性低於 $1,000 的假池直接踢走，不准入 DB
+                    if (liquidityUsd < 1000) continue;
+
+                    // 🚨 防偽大閘：如果是名單上的幣種，但地址不符，直接踢走！
                     if (VERIFIED_TOKENS[symbol] && mintAddress !== VERIFIED_TOKENS[symbol]) {
                         console.log(`🗑️ [Fake Shield] 發現假冒 ${symbol} (${mintAddress})，直接踢出，拒絕佔用榜單與保溫箱資源！`);
                         continue; 
@@ -131,8 +134,6 @@ const trendingMonitorService = {
                     uniqueMints.add(mintAddress);
 
                     if (top100Array.length >= 100) break;
-
-                    const liquidityUsd = parseFloat(attr.reserve_in_usd) || 0;
 
                     const baseData = {
                         mint_address: mintAddress, 
@@ -213,7 +214,6 @@ const trendingMonitorService = {
         };
 
         setTimeout(() => { runTask(); }, 5000); 
-        // ⚡ 將大熱幣掃描頻率縮短至 15 分鐘
         setInterval(runTask, 15 * 60 * 1000); 
     }
 };
