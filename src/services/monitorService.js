@@ -1,5 +1,6 @@
 // src/services/monitorService.js
 // 📝 檔案功能用途：V9.2 終極風控樞紐。結合 Telegram Webhook 裝甲、Redis 瀑布防線、全域快取參數 O(1) 讀取、精準分批止盈、動態追蹤止損、無差別 Time-Stop、主動清道夫及 AMM 報價崩潰防護。
+// 🛡️ 新增裝甲：Helius Webhook 對接、OFI 缺失攔截防線、3階段指數退避解決 404 API 延遲。
 
 const express = require('express');
 const cors = require('cors');
@@ -18,6 +19,11 @@ const { walletMonitorRouter } = require('./walletMonitor');
 const { securityGuard } = require('./securityGuard');
 const { routerService } = require('./router');
 
+// 📦 新增依賴：用於 API 退避查詢與 RPC 降級
+const axios = require('axios');
+const { Connection, PublicKey } = require('@solana/web3.js');
+const solanaConnection = new Connection(process.env.SOLANA_RPC_URL || 'https://api.mainnet-beta.solana.com', 'confirmed');
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -25,9 +31,137 @@ app.use(express.json());
 let globalSysConfig = { is_running: true };
 let cachedSolPriceUsd = 150;
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.2 系統正常運行中 (全域快取 + Webhook 裝甲 + Redis 瀑布防線)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.2 系統正常運行中 (全域快取 + Webhook 裝甲 + Redis 瀑布防線 + OFI 硬防線)'));
 
 app.use(walletMonitorRouter);
+
+// ========================================================
+// 🛡️ 核心輔助函數：Payload 清洗與 OFI 安檢引擎
+// ========================================================
+function extractBase58(payload) {
+    if (!payload) return null;
+    const rawMint = String(payload.mint || payload).replace(/[\n\r\s]/g, '');
+    const base58Regex = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+    return base58Regex.test(rawMint) ? rawMint : null;
+}
+
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+async function checkOnChainExistence(mintAddress) {
+    try {
+        const pubKey = new PublicKey(mintAddress);
+        const accountInfo = await solanaConnection.getAccountInfo(pubKey);
+        return accountInfo !== null;
+    } catch (error) {
+        console.error(`❌ [RPC ERROR] 檢查鏈上狀態失敗 ${mintAddress}:`, error.message);
+        return false;
+    }
+}
+
+// ========================================================
+// 🛡️ 核心輔助函數：獲取市場數據及 OFI/女巫攻擊安檢引擎
+// ========================================================
+async function fetchMarketDataWithOFI(mintAddress) {
+    const delays = [2000, 5000, 10000]; // 2s -> 5s -> 10s 應對 Dexscreener/Helius 索引延遲
+    for (let attempt = 0; attempt < delays.length; attempt++) {
+        try {
+            const response = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintAddress}`);
+            const pairs = response.data?.pairs;
+
+            if (pairs && pairs.length > 0) {
+                const pair = pairs[0]; 
+                const liquidity = pair.liquidity?.usd || 0;
+                const volume = pair.volume?.h1 || 0;
+                const buys = pair.txns?.h1?.buys || 0;
+                const sells = pair.txns?.h1?.sells || 0;
+
+                let ofiStatus = "N/A";
+                let isOFIOk = false;
+                const totalTxns = buys + sells;
+                
+                if (totalTxns > 0) {
+                    const buyRatio = buys / totalTxns;
+                    const ofiRatio = (buys - sells) / totalTxns;
+                    ofiStatus = (ofiRatio * 100).toFixed(2) + "%";
+                    
+                    // 1. 基礎活躍度檢查 (確保唔係死水)
+                    if (buys >= 5 && sells >= 5) {
+                        isOFIOk = true;
+                    }
+
+                    // 2. 🚨 女巫攻擊防禦 (Sybil Wash Trading Shield)
+                    // 真實市場極少出現完美 50:50 的買賣次數。如果交易次數多 (>50)，且比例落在 48% - 52% 之間，極度可疑。
+                    if (totalTxns > 50 && buyRatio > 0.48 && buyRatio < 0.52) {
+                        isOFIOk = false;
+                        console.error(`🚨 [SYBIL DETECTED] 買賣極度對稱 (Buys: ${buys}, Sells: ${sells}, Ratio: ${(buyRatio*100).toFixed(1)}%)。判定為莊家腳本刷單！`);
+                    }
+
+                    // 3. 🚨 換手率異常防禦 (Churn Rate Anomaly)
+                    // 如果 1 小時交易量是流動性池的 5 倍以上，且買賣訂單流失衡率 < 5% (接近 0)，代表資金在空轉。
+                    if (liquidity > 0 && (volume / liquidity) > 5 && totalTxns > 50 && Math.abs(ofiRatio) < 0.05) {
+                        isOFIOk = false;
+                        console.error(`🚨 [CHURN ANOMALY] 換手率極度異常 (Vol: $${volume}, Liq: $${liquidity}) 且 OFI 趨零，刷量特徵明顯！`);
+                    }
+                }
+
+                return { success: true, indexed: true, liquidity, volume, ofiStatus, isOFIOk };
+            }
+        } catch (error) {
+            console.warn(`⚠️ [API WARNING] 獲取 ${mintAddress} 失敗. 嘗試 ${attempt + 1}/${delays.length}`);
+        }
+        console.log(`⏳ [BACKOFF] 等待 ${delays[attempt]}ms 讓 Indexer 建立流動性池資料庫...`);
+        await sleep(delays[attempt]);
+    }
+    return { success: false, indexed: false };
+}
+
+// ========================================================
+// 🚀 Helius Radar Webhook (解決 100ms 404 問題的雷達入口)
+// ========================================================
+app.post('/webhook/radar', async (req, res) => {
+    res.status(200).send('OK'); // 防止 Helius 超時重試
+
+    const mint = extractBase58(req.body[0] || req.body);
+    if (!mint) return;
+
+    console.log(`\n🚀 [RADAR] Helius Webhook 偵測到新幣: ${mint}`);
+
+    const inNursery = await redis.zscore('v9_nursery_queue', mint);
+    if (inNursery) return; // 防大洪水併發：已在處理隊列中
+
+    const marketData = await fetchMarketDataWithOFI(mint);
+    
+    if (!marketData.success || !marketData.indexed) {
+        const exists = await checkOnChainExistence(mint);
+        if (exists) {
+            console.log(`⚠️ [LATENCY ALERT] ${mint} 鏈上存在但 API 未同步，已加入 Nursery 緩衝池等待孵化。`);
+            await redis.zadd('v9_nursery_queue', Date.now(), mint);
+        } else {
+            console.error(`☠️ [GHOST LAUNCH] ${mint} 查無此幣，疑似污染 Payload 或 Rug Pull 放棄發射。`);
+        }
+        return;
+    }
+
+    if (!marketData.isOFIOk) {
+        console.error(`🚨 [OFI SHIELD] 攔截 ${mint} | OFI: ${marketData.ofiStatus} | 判定: 莊家左手交右手刷量或貔貅盤 (Wash Trading/Honeypot)`);
+        return;
+    }
+
+    if (marketData.liquidity > 30000 && marketData.liquidity < 200000) {
+        console.warn(`⚠️ [LIQUIDITY TRAP RISK] ${mint} 流動性 $${marketData.liquidity} 處於半鹹淡危險區間，請保持警惕。`);
+    } else if (marketData.liquidity < 30000) {
+        console.error(`🛑 [LIQUIDITY TOO LOW] ${mint} 流動性只有 $${marketData.liquidity}，直接丟棄。`);
+        return;
+    }
+
+    console.log(`✅ [OFI PASSED] ${mint} 買賣流健康 (${marketData.ofiStatus})，發送至量化安檢...`);
+    try {
+        const secResult = await securityGuard.calculateQuantScore(mint, 'TRENDING');
+        await routerService.routeSignal(mint, 'TRENDING', secResult);
+    } catch (e) {
+        console.error(`❌ [Radar Route] 評估失敗:`, e.message);
+    }
+});
 
 // ========================================================
 // 🚨 Telegram 0 延遲恐慌按鈕 Webhook (V9.2 裝甲化)
@@ -304,7 +438,7 @@ function startActiveSweeper() {
 // 🌐 啟動大本營監控迴圈
 // ========================================================
 function startPositionMonitor() {
-    console.log('👁️ [Monitor] V9.2 終極風控啟動：主動清道夫、LP 拔線、分批止盈、手動斬倉與滿倉節流全數就位。');
+    console.log('👁️ [Monitor] V9.2 終極風控啟動：主動清道夫、LP 拔線、分批止盈、手動斬倉、OFI 防護與滿倉節流全數就位。');
     
     setInterval(async () => {
         try { 
@@ -382,7 +516,6 @@ function startPositionMonitor() {
                     const pos = portfolio.positions.find(p => p.mint_address === mint);
                     if (pos) {
                         pos.current_price_sol = currentPriceSol;
-                        // 更新最高價移至 handleZeroLatencyCheck 判斷後
                     }
                     
                     await handleZeroLatencyCheck(mint, currentPriceSol, 0, portfolio);
@@ -438,10 +571,17 @@ function startPositionMonitor() {
                     return; 
                 }
 
-                console.log(`\n🐟 [Nursery] 倉位充足，捕獲 ${ripeTokens.length} 隻新幣已養足 5 分鐘，出池進行安檢...`);
+                console.log(`\n🐟 [Nursery] 倉位充足，捕獲 ${ripeTokens.length} 隻新幣已養足 5 分鐘，進行 OFI 二次安檢...`);
 
                 const evalPromises = ripeTokens.map(async (mint) => {
                     try {
+                        // 🛡️ OFI 二次防線：阻擋潛伏期 Wash Trading
+                        const marketData = await fetchMarketDataWithOFI(mint);
+                        if (marketData.success && !marketData.isOFIOk) {
+                            console.error(`🚨 [NURSERY OFI SHIELD] 攔截 ${mint} | 判定: 潛伏期造假盤`);
+                            return; 
+                        }
+
                         const secResult = await securityGuard.calculateQuantScore(mint, 'NEWBORN');
                         await routerService.routeSignal(mint, 'NEWBORN', secResult);
                     } catch (e) {
@@ -461,7 +601,7 @@ function startPositionMonitor() {
 
 function startMarketMonitor() {
     app.listen(process.env.PORT || 8080, '0.0.0.0', () => {
-        console.log('🔄 [System] 啟動 V9.2 獨立 Webhook 伺服器與風控中心...');
+        console.log('🔄 [System] 啟動 V9.2 獨立 Webhook 伺服器與風控中心 (OFI Shield Active)...');
         startPositionMonitor();
         startActiveSweeper(); 
     });
