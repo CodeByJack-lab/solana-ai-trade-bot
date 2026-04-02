@@ -1,23 +1,22 @@
 // src/services/environmentService.js
 // 📝 檔案功能用途：V9.2 大市氣候台與自動開關。綜合多維度數據判定氣候，並呼叫獨立的 aiAdvisorService 進行大腦決策。
-// 🚀 V9.2.1 升級：拔除不穩定之 CryptoPanic API，改用 6 路 RSS 矩陣，並將大盤死人開關極速化至 3 分鐘。
+// 🚀 V9.2.2 升級：拔除 CryptoPanic 改用 RSS 矩陣、3分鐘死人開關、新聞 AI Prompt 全面交由 Supabase 熱更新控制。
 
 const axios = require('axios');
 const Parser = require('rss-parser');
 const Redis = require('ioredis');
 const config = require('../config/config');
 const { sendMacroPanicApproval, sendAdminAlert } = require('./telegramService');
-const { aiAdvisorService } = require('./aiAdvisorService'); // 🛡️ V9.2 引入獨立參謀大腦
+const { aiAdvisorService } = require('./aiAdvisorService'); 
 const { healthMonitor } = require('./healthMonitor');
 const { supabase } = require('../config/supabase');
+const { cacheManager } = require('./cacheManager'); // 🛡️ 引入大腦快取
 
 const redis = new Redis(config.cache.redisUrl || process.env.REDIS_URL);
 const parser = new Parser();
 
-// 狀態指針系統
 const MACRO_PROVIDERS = [{ name: 'COINGECKO', keyName: 'COINGECKO_API_KEY' }, { name: 'KUCOIN', keyName: null }];
 
-// 🌟 全 RSS 陣列：完全免費、免 API Key、高穩定性、極難 502
 const NEWS_PROVIDERS = [
     { name: 'COINTELEGRAPH', type: 'RSS', url: 'https://cointelegraph.com/rss' },
     { name: 'DECRYPT', type: 'RSS', url: 'https://decrypt.co/feed' },
@@ -117,14 +116,12 @@ class EnvironmentService {
             const provider = NEWS_PROVIDERS[(activeNewsIdx + i) % NEWS_PROVIDERS.length];
             try {
                 let titles = [];
-                // 🚀 已拔除 CryptoPanic，統一使用 RSS Parser，代碼更乾淨
                 const res = await axios.get(provider.url, { timeout: 8000 });
                 const feed = await parser.parseString(res.data);
                 if (feed?.items) titles = feed.items.slice(0, 20).map(item => item.title);
 
                 if (titles.length > 0) {
                     activeNewsIdx = (activeNewsIdx + i + 1) % NEWS_PROVIDERS.length;
-                    // 🚀 呼叫 Groq AI 進行情緒分析
                     return await this._analyzeTitles(titles);
                 }
             } catch (err) {
@@ -134,44 +131,51 @@ class EnvironmentService {
         return 0; 
     }
 
-    // 🧠 V9.2 升級：Groq Llama-3 智能情緒分析
+    // 🧠 V9.2.2 升級：透過 CacheManager 動態讀取 Supabase 劇本與模型輪替
     async _analyzeTitles(titles) {
         try {
             const groqApiKey = process.env.GROQ_API_KEY_1;
-            if (!groqApiKey) {
-                throw new Error("Missing GROQ_API_KEY_1");
+            if (!groqApiKey) throw new Error("Missing GROQ_API_KEY_1");
+
+            // 將標題陣列格式化為換行字串，注入劇本變數
+            const formattedTitles = titles.map((t, i) => `${i+1}. ${t}`).join('\n');
+            const aiConfig = cacheManager.getPromptConfig('news_sentiment_analyst', { titles: formattedTitles });
+            
+            let responseText = null;
+
+            // 🤖 智能模型輪替 (防死機)
+            for (const model of aiConfig.models) {
+                try {
+                    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+                        model: model,
+                        messages: [{ role: 'user', content: aiConfig.parsedPrompt }],
+                        response_format: { type: "json_object" },
+                        temperature: 0.1
+                    }, {
+                        headers: {
+                            'Authorization': `Bearer ${groqApiKey}`,
+                            'Content-Type': 'application/json'
+                        },
+                        timeout: 8000
+                    });
+                    
+                    responseText = res.data.choices[0].message.content;
+                    break; // 成功獲取則跳出迴圈
+                } catch (apiErr) {
+                    console.warn(`⚠️ [Env Service] 模型 ${model} 新聞分析失敗，嘗試後備...`);
+                }
             }
 
-            const prompt = `You are a top-tier Web3 market sentiment analyst. Analyze these 20 recent crypto news titles. Determine the overall macroeconomic sentiment score from -5 (extreme fear/panic) to 5 (extreme greed/euphoria). 0 is neutral. 
-            Ignore routine individual token news. Focus on macro events (e.g., SEC actions, ETF inflows, major hacks, macro economy).
-            Output ONLY pure JSON.
-            
-            Titles:
-            ${titles.map((t, i) => `${i+1}. ${t}`).join('\n')}
-            
-            Output exact JSON format: {"score": <integer>}`;
+            if (!responseText) throw new Error("所有新聞分析模型均已陣亡");
 
-            const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-                model: 'llama-3.3-70b-versatile',
-                messages: [{ role: 'user', content: prompt }],
-                response_format: { type: "json_object" },
-                temperature: 0.1
-            }, {
-                headers: {
-                    'Authorization': `Bearer ${groqApiKey}`,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 8000
-            });
-
-            const parsed = JSON.parse(res.data.choices[0].message.content);
+            const parsed = JSON.parse(responseText);
             let score = parseInt(parsed.score);
             if (isNaN(score)) score = 0;
             
             return Math.max(-5, Math.min(5, score));
             
         } catch (error) {
-            console.warn(`⚠️ [Env Service] Groq AI 分析失敗 (${error.message})，降級使用關鍵字計分...`);
+            console.warn(`⚠️ [Env Service] AI 分析徹底失敗 (${error.message})，降級使用關鍵字計分...`);
             return this._fallbackAnalyze(titles);
         }
     }
@@ -213,7 +217,6 @@ class EnvironmentService {
         await redis.set('global_env_state', JSON.stringify(envState), 'EX', 3600);
         healthMonitor.setStatus('Macro_Radar', `🟢 氣候: ${currentClimate} (News: ${newsScore})`);
 
-        // 🚀 V9.2 新增：同步將氣候與新聞分數寫入大本營，供 Dashboard 顯示！
         try {
             await supabase.from('system_config').update({
                 macro_climate: currentClimate,
@@ -249,7 +252,6 @@ class EnvironmentService {
             if (!pendingStr) return;
 
             const pendingTime = parseInt(pendingStr, 10);
-            // 🚀 關鍵修復：將大盤死人開關由 15 分鐘 (900000) 極速縮短至 3 分鐘 (180000)
             if (Date.now() - pendingTime >= 180000) { 
                 console.log(`💀 [Macro Failsafe] 3 分鐘未收到指揮官回覆，執行二次大盤評估...`);
                 

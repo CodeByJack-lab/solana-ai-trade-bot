@@ -1,7 +1,7 @@
 // src/services/cacheManager.js
-// 📝 檔案功能用途：V9.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
+// 📝 檔案功能用途：V9.2.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
 // 🛡️ 內建防幻覺機制：當 DB 讀取失敗時，自動降級至純英文後備底稿。
-// 🛠️ 修正版：補回 getStrategy, getVerifiedTokens, updateLocally 確保全系統對接無誤。
+// 🛠️ 包含最新加入的新聞情緒分析師 (news_sentiment_analyst) 後備底稿。
 
 const { supabase } = require('../config/supabase');
 
@@ -29,6 +29,11 @@ class CacheManager {
 
         // 🛡️ 核心後備底稿 (Fallback Prompts) - 確保 100% 英文輸出
         this.fallbackPrompts = {
+            'news_sentiment_analyst': {
+                provider: 'GROQ',
+                models: ['llama-3.3-70b-versatile', 'llama3-8b-8192'],
+                content: `You are a top-tier Web3 market sentiment analyst. Analyze these recent crypto news titles. Determine the overall macroeconomic sentiment score from -5 (extreme fear/panic) to 5 (extreme greed/euphoria). 0 is neutral. Ignore routine individual token news. Focus on macro events (e.g., SEC actions, ETF inflows, major hacks, macro economy). Output ONLY pure JSON. Titles: {{titles}} Output exact JSON format: {"score": <integer>}`
+            },
             'CLIMATE_ADVISOR': {
                 provider: 'GEMINI', 
                 models: ['gemma-3-27b-it', 'gemma-3-12b-it'],
