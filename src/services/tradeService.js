@@ -328,14 +328,16 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         await supabase.from(`active_positions_${tableSuffix}`).insert([{
             mint_address: mintAddress, token_symbol: tokenSymbol, strategy_type: strategyType,
             entry_price_sol: buyPriceSol, highest_price_sol: buyPriceSol, quantity: tokenQuantity, ai_reason: aiReason,
-            buy_dex_label: quoteData.dexLabel, buy_pool_address: quoteData.poolAddress, token_decimals: quoteData.decimals
+            buy_dex_label: quoteData.dexLabel, buy_pool_address: quoteData.poolAddress, token_decimals: quoteData.decimals,
+            ai_score: aiScore
         }]);
 
         await supabase.from(`trade_history_${tableSuffix}`).insert([{
             token_mint: mintAddress, token_symbol: tokenSymbol, action: 'BUY',
             strategy_type: strategyType, price_sol: buyPriceSol, quantity: tokenQuantity,
             total_value_sol: totalCostSol, post_trade_balance: newBalance, 
-            txid: finalTxid, ai_factcheck_result: aiReason, review_history: aiReason 
+            txid: finalTxid, ai_factcheck_result: aiReason, review_history: aiReason,
+            ai_score: aiScore
         }]);
 
         console.log(`✅ 🟢 【買入成功 - ${tokenSymbol}】 🟢 ✅`);
