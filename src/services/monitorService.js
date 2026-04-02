@@ -1,5 +1,5 @@
 // src/services/monitorService.js
-// 📝 檔案功能用途：V9.1.9 終極風控樞紐。結合 Telegram Webhook、LP 驟降逃生、100% 強制翻本、1 分鐘瀑布防線、無差別 Time-Stop、滿倉節流，以及「主動清道夫」清除殭屍倉位。
+// 📝 檔案功能用途：V9.1.9 終極風控樞紐。結合 Telegram Webhook、LP 驟降逃生、100% 強制翻本、1 分鐘瀑布防線、無差別 Time-Stop、滿倉節流，以及「主動清道夫 (具備實時防誤殺機制)」。
 
 const express = require('express');
 const cors = require('cors');
@@ -24,7 +24,7 @@ app.use(express.json());
 let globalSysConfig = { is_running: true };
 let cachedSolPriceUsd = 150;
 
-app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.9 系統正常運行中 (主動清道夫 + 防 Rug 拔線版)'));
+app.get('/', (req, res) => res.status(200).send('🟢 SOL_QUANT V9.1.9 系統正常運行中 (主動清道夫 + 防 Rug 拔線 + 實時防誤殺版)'));
 
 app.use(walletMonitorRouter);
 
@@ -160,7 +160,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
     // ==========================================
     const timeStopMins = config?.trade?.timeStopMinutes || 30;
     const timeStopTarget = config?.trade?.timeStopProfitTarget || 15;
-    // 移除了 strategy_type 的限制，所有幣一視同仁
     if (action === 'HOLD' && pos.created_at) {
         const ageMins = (now - new Date(pos.created_at).getTime()) / 60000;
         if (ageMins >= timeStopMins && pnlPct < timeStopTarget) {
@@ -221,10 +220,10 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
 }
 
 // ========================================================
-// 🧹 獨立主動清道夫 (Active Death Sweeper - 雙軌制版)
+// 🧹 獨立主動清道夫 (Active Death Sweeper - 雙軌制防誤殺版)
 // ========================================================
 function startActiveSweeper() {
-    console.log('🧹 [Sweeper] 主動清道夫已上線，按幣種特性 (Meme/Trending) 執行雙軌清理。');
+    console.log('🧹 [Sweeper] 主動清道夫已上線，具備 2 秒實時查價防誤殺機制。');
     
     setInterval(async () => {
         if (!globalSysConfig.is_running) return;
@@ -236,16 +235,15 @@ function startActiveSweeper() {
             if (!pos.created_at) continue;
             
             const ageMins = (now - new Date(pos.created_at).getTime()) / 60000;
-            const currentPrice = pos.highest_price_sol || pos.entry_price_sol;
-            const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
-            const isHalfSold = pos.strategy_type?.includes('HALF_SOLD');
             
-            // 🔍 判斷身份：係藍籌定土狗？
+            // 🚀 核心修復：優先使用 PriceBot 每 2 秒寫入 RAM 的最新實時價 (current_price_sol)
+            const currentPrice = pos.current_price_sol || pos.highest_price_sol || pos.entry_price_sol;
+            const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
+            
+            const isHalfSold = pos.strategy_type?.includes('HALF_SOLD');
             const isTrending = pos.strategy_type?.includes('TRENDING');
 
-            // 🚦 雙軌制核心：Meme 同 Trending 嘅容忍度完全唔同
-            // Meme 狗盤：跟 Config (預設 30 分鐘無 15% 斬)，120 分鐘未翻本當殭屍
-            // Trending 藍籌：畀足 24 小時 (1440分鐘) 橫盤，48 小時 (2880分鐘) 未郁先當殭屍
+            // 🚦 雙軌制核心
             const timeStopMins = isTrending ? 1440 : (config?.trade?.timeStopMinutes || 30);
             const timeStopTarget = isTrending ? 5 : (config?.trade?.timeStopProfitTarget || 15);
             const zombieMins = isTrending ? 2880 : 120;
@@ -253,10 +251,15 @@ function startActiveSweeper() {
             let shouldSell = false;
             let reason = '';
 
-            // 1. 動態 Time-Stop
-            if (ageMins >= timeStopMins && pnlPct < timeStopTarget) {
-                shouldSell = true;
-                reason = `🧹 [主動清道夫] ${isTrending ? '藍籌' : 'Meme'} 滯留過久 (${ageMins.toFixed(0)} 分鐘未達 +${timeStopTarget}%)，無差別清倉！`;
+            // 1. 動態 Time-Stop 判斷
+            if (ageMins >= timeStopMins) {
+                // 🛡️ 實時防誤殺：如果利潤其實已經大於目標 (+15%)，攔截清道夫！
+                if (pnlPct >= timeStopTarget) {
+                    console.log(`🛡️ [Sweeper] 攔截！${pos.token_symbol} 實時已達標 (+${pnlPct.toFixed(2)}%)，收回屠刀，交由常規雷達止盈！`);
+                } else {
+                    shouldSell = true;
+                    reason = `🧹 [主動清道夫] ${isTrending ? '藍籌' : 'Meme'} 滯留過久 (${ageMins.toFixed(0)} 分鐘未達 +${timeStopTarget}%)，無差別清倉！`;
+                }
             }
 
             // 2. 動態殭屍防線
@@ -267,7 +270,6 @@ function startActiveSweeper() {
 
             if (shouldSell) {
                 const lockKey = `sell_lock:${pos.mint_address}`;
-                // 使用 Redis 鎖確保唔會同 WebSocket 風控撞車
                 const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
                 if (acquired) {
                     console.log(`\n🚨 [Sweeper] 發現違規卡死倉位: $${pos.token_symbol} - ${reason}`);
@@ -295,7 +297,7 @@ function startPositionMonitor() {
     }, 10000);
 
     // ========================================================
-    // 🎧 監聽 Dashboard 手動斬倉指令 (command_queue)
+    // 🎧 監聽 Dashboard 手動斬倉指令
     // ========================================================
     supabase.channel('dashboard-commands')
         .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'command_queue' }, async (payload) => {
@@ -328,44 +330,49 @@ function startPositionMonitor() {
                 });
                 await Promise.allSettled(sellPromises);
             }
-            // 🧹 [新增] 攔截重置模擬盤指令，進行一鍵洗腦！
             else if (cmd.command_type === 'RESET_PAPER') {
                 console.log(`\n🧹 [System] 收到前端重置模擬盤指令！正在進行物理失憶...`);
-                
-                // 1. 清空風控雷達 Map (防跳頻嗰個)
                 tokenStateRadar.clear();
-                
-                // 2. 清除 Redis 可能殘留嘅賣出鎖
                 try {
                     const keys = await redis.keys('sell_lock:*');
                     if (keys.length > 0) await redis.del(keys);
                 } catch(e) {}
-
-                // 3. 呼叫 portfolioService 進行記憶體大掃除
                 try {
                     const { resetPaperMemory } = require('./portfolioService');
                     if (resetPaperMemory) await resetPaperMemory();
                 } catch (e) {
                     console.log(`⚠️ 無法呼叫 resetPaperMemory: ${e.message}`);
                 }
-
                 console.log(`✅ [System] 洗腦完成！幽靈倉位已全數清除，無需重啟系統！`);
             }
-            
-            // 執行完畢後清理隊列，保持資料庫乾淨
             await supabase.from('command_queue').delete().eq('id', cmd.id).then().catch(()=>{});
         }).subscribe();
 
     redisSub.subscribe('price_updates', 'emergency_sell');
     
+    // ========================================================
+    // 🎧 監聽 PriceBot 2 秒報價，實時寫入 RAM
+    // ========================================================
     redisSub.on('message', async (channel, message) => {
         const portfolio = getPortfolio();
         
         if (channel === 'price_updates') {
             try {
                 if (!globalSysConfig.is_running) return; 
-                const { mint, priceUsd, liquidity } = JSON.parse(message);
-                const currentPriceSol = priceUsd / cachedSolPriceUsd; 
+                const { mint, priceUsd, liquidity, priceSol } = JSON.parse(message);
+                
+                // 🚀 核心修復：優先使用 PriceBot 傳來的精確原生 SOL 價
+                const currentPriceSol = priceSol || (priceUsd / cachedSolPriceUsd); 
+
+                // 🧠 將 2 秒最新價硬寫入 RAM，供清道夫與其他雷達使用
+                const pos = portfolio.positions.find(p => p.mint_address === mint);
+                if (pos) {
+                    pos.current_price_sol = currentPriceSol;
+                    if (currentPriceSol > (pos.highest_price_sol || pos.entry_price_sol)) {
+                        pos.highest_price_sol = currentPriceSol;
+                    }
+                }
+
                 // 傳入流動性數據進行 Rug 檢測
                 await handleZeroLatencyCheck(mint, currentPriceSol, liquidity || 0, portfolio);
             } catch (err) {}
@@ -392,7 +399,7 @@ function startPositionMonitor() {
         }
     });
 
-    // 🌟 檢查 Nursery Queue 處理新進標的 (V9.1.8 滿倉節流機制)
+    // 🌟 檢查 Nursery Queue 處理新進標的
     let isNurseryRunning = false;
     setInterval(async () => {
         if (isNurseryRunning || !globalSysConfig.is_running) return;
@@ -402,23 +409,18 @@ function startPositionMonitor() {
             const now = Date.now();
             const fiveMinsAgo = now - (5 * 60 * 1000);
 
-            // 拉取 5 分鐘前入池的幣 (最多 5 隻)
             const ripeTokens = await redis.zrangebyscore('v9_nursery_queue', 0, fiveMinsAgo, 'LIMIT', 0, 5);
             
             if (ripeTokens.length > 0) {
-                // 無論滿唔滿倉，都要將佢哋從 Queue 移除，防止過期垃圾塞爆 Redis
                 await redis.zrem('v9_nursery_queue', ...ripeTokens);
 
-                // 🛑 節流閘口：檢查當前 Meme 倉位是否已滿
                 const portfolio = getPortfolio();
                 const { data: dbConfig } = await supabase.from('system_config').select('max_meme_positions').eq('id', 1).single();
                 const maxMeme = dbConfig?.max_meme_positions || 0;
                 
-                // 計算現有 Meme 數量 (包括 NEWBORN 及 HALF_SOLD 狀態)
                 const currentMemeCount = portfolio.positions.filter(p => p.strategy_type.includes('MEME') || p.strategy_type.includes('NEWBORN')).length;
 
                 if (currentMemeCount >= maxMeme) {
-                    // 滿倉！直接 Return，絕對唔 Call API！
                     console.log(`🛑 [節流閘口] Meme 倉位已滿 (${currentMemeCount}/${maxMeme})，自動捨棄 ${ripeTokens.length} 隻新幣，節省 API 資源！`);
                     return; 
                 }
@@ -448,7 +450,7 @@ function startMarketMonitor() {
     app.listen(process.env.PORT || 8080, '0.0.0.0', () => {
         console.log('🔄 [System] 啟動 V9.1.9 獨立 Webhook 伺服器與風控中心...');
         startPositionMonitor();
-        startActiveSweeper(); // 👈 啟動主動清道夫
+        startActiveSweeper(); 
     });
 }
 

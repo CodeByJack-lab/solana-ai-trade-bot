@@ -1,5 +1,5 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V9.1.8 100分量化安檢中樞。實作「假池秒殺」、「穩定幣攔截」、「藍籌鐵閘過濾」與「OFI 動能質量驗證」，精準裁決分數。
+// 📝 檔案功能用途：V9.1.9 100分量化安檢中樞。實作「假池秒殺」、「穩定幣攔截」、「藍籌鐵閘過濾」、「活人檢測」與「廢除盲狙」，精準裁決分數。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -109,7 +109,7 @@ class SecurityGuard {
     }
 
     /**
-     * 🎯 V9.1.8 量化 100 分核心引擎 (加入貔貅假池與穩定幣攔截)
+     * 🎯 V9.1.9 量化 100 分核心引擎 (終極治本版)
      */
     async calculateQuantScore(mint, type = 'NEWBORN') {
         // 🛡️ 藍籌白名單鐵閘 (只針對 TRENDING 策略，在 Call API 前攔截以節省資源)
@@ -131,7 +131,7 @@ class SecurityGuard {
 
         const upperSymbol = marketData.symbol.toUpperCase();
 
-        // 🛑 [新增一刀切] 穩定幣與假穩定幣攔截 (任何以 USD 開頭的代幣)
+        // 🛑 [一刀切] 穩定幣與假穩定幣攔截
         if (upperSymbol.startsWith('USD')) {
             console.log(`🛡️ [Stablecoin Guard] 觸發攔截！拒絕交易穩定幣或假穩定幣: ${upperSymbol} (${mint})`);
             return { 
@@ -142,8 +142,10 @@ class SecurityGuard {
             };
         }
 
-        // 🚨 [新增一刀切] 假池 / 貔貅盤終極防禦 (高流動性 + 極低交易量)
-        if (marketData.liquidity > 100000 && marketData.volume5m < 1000) {
+        // ==========================================
+        // 🎯 治本方案二：資金效率池過濾 (死水大池)
+        // ==========================================
+        if (marketData.liquidity > 100000 && marketData.volume5m < 5000) {
             console.log(`🚨 [Honeypot Guard] 秒殺假池！流動性 $${marketData.liquidity.toFixed(0)} 但 5m 交易量僅 $${marketData.volume5m.toFixed(0)}: ${upperSymbol}`);
             return {
                 numeric_score: 0,
@@ -151,6 +153,26 @@ class SecurityGuard {
                 reason: `🛑 假池/貔貅攔截: $10萬以上流動性但缺乏真實交易量 ($${marketData.volume5m.toFixed(0)})`,
                 marketData
             };
+        }
+
+        // ==========================================
+        // 🎯 治本方案一：活人真實度與貔貅檢測
+        // ==========================================
+        const totalTxs5m = marketData.buys5m + marketData.sells5m;
+        if (totalTxs5m > 0) {
+            // 1. 只有買沒有賣 (最典型的貔貅 Honeypot)
+            if (marketData.buys5m > 10 && marketData.sells5m === 0) {
+                console.log(`🚨 [Honeypot Guard] 貔貅攔截！完全沒有賣單: ${upperSymbol}`);
+                return { numeric_score: 0, isSafe: false, reason: `🛑 貔貅攔截: 完全沒有賣單 (Buy:${marketData.buys5m}, Sell:0)`, marketData };
+            }
+            
+            // 2. 極低均價連環刷量 (Wash Trading 機房盤)
+            const avgTrade = marketData.volume5m / totalTxs5m;
+            // 如果 5 分鐘內交易超過 100 次，但平均每單少於 $15 美金
+            if (totalTxs5m >= 100 && avgTrade < 15) {
+                console.log(`🚨 [Wash Trading Guard] 刷量攔截！單筆均價極低 ($${avgTrade.toFixed(2)}): ${upperSymbol}`);
+                return { numeric_score: 0, isSafe: false, reason: `🛑 刷量攔截: 異常高頻但單筆均價極低 ($${avgTrade.toFixed(2)})`, marketData };
+            }
         }
 
         // 🌟 終極實體防偽：針對重災區，指定幣種只認可唯一真品地址
@@ -206,23 +228,17 @@ class SecurityGuard {
 
         if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; // 5分
 
-        // 🌊 偽 OFI 動能質量檢查 (三道關卡)
-        const totalTxs = marketData.buys5m + marketData.sells5m;
-        if (totalTxs > 0) {
-            const volOFI = (marketData.buys5m - marketData.sells5m) / totalTxs;
+        // 🌊 偽 OFI 動能質量檢查
+        if (totalTxs5m > 0) {
+            const volOFI = (marketData.buys5m - marketData.sells5m) / totalTxs5m;
             const countRatio = marketData.sells5m > 0 ? (marketData.buys5m / marketData.sells5m) : 2;
-            const avgTrade = marketData.volume5m / totalTxs;
+            const avgTrade = marketData.volume5m / totalTxs5m;
 
-            // 1. 🧟 殭屍刷量過濾 (單筆均價極低)
-            if (totalTxs >= 50 && avgTrade < 10) {
-                return { numeric_score: 0, isSafe: false, reason: `🛑 偵測到殭屍刷量行為 (平均單筆 $${avgTrade.toFixed(2)})`, marketData };
-            }
-
-            // 2. 刷量檢測 (Wash Trading)
-            if (totalTxs >= 20 && avgTrade < 20) {
+            // 刷量檢測 (輕度警告)
+            if (totalTxs5m >= 20 && avgTrade < 20) {
                 reasons.push('疑似納米刷量機器人 (動能無效)');
             } 
-            // 3. OFI 質量達標 -> 額外加分
+            // OFI 質量達標 -> 額外加分
             else if (volOFI > 0.3 && countRatio > 1.5) {
                 momentumScore += 15;
                 reasons.push(`OFI 動能強勁 (VolOFI:${volOFI.toFixed(2)}, Ratio:${countRatio.toFixed(1)})`);
@@ -233,6 +249,15 @@ class SecurityGuard {
         momentumScore = Math.max(0, momentumScore - textAnalysis.fomoPenalty);
 
         score = coreScore + momentumScore;
+
+        // ==========================================
+        // 🎯 治本方案三：廢除 Meme 幣 Fast-Track (盲狙) 特權
+        // ==========================================
+        if (type !== 'TRENDING' && score >= 90) {
+            score = 89; // 強制壓低分數，讓系統必須交給 AI 審批
+            reasons.push('🛡️ 預防盲狙: Meme幣強制降至 89 分等待 AI 審批');
+            console.log(`🛡️ [Anti-Blind Snipe] 偵測到 Meme 幣 (${upperSymbol}) 達 90 分以上，強制降至 89 分交由 AI 審批。`);
+        }
 
         const isSafe = score >= config.quant.rejectThreshold; 
         const finalReason = isSafe 
