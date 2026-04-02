@@ -1,5 +1,5 @@
 // src/services/sourceAggregator.js
-// 📝 檔案功能用途：V9.1.1 多路冗餘數據源聚合器。三路 WebSocket 監聽 (Helius/Official/Alchemy) + 15秒極速緩衝池 + LP/FDV 比例快篩。
+// 📝 檔案功能用途：V9.2 多路冗餘數據源聚合器。三路 WebSocket 監聽 + 15秒極速緩衝池 + 5分鐘壽命防塞車機制 (去 Birdeye 化)。
 
 const WebSocket = require('ws');
 const axios = require('axios');
@@ -14,12 +14,12 @@ const RAYDIUM_V4_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1Mp8";
 
 class SourceAggregator {
     constructor() {
-        this.mintBuffer = new Set();
+        // 🚀 V9.2 修復：將 Buffer 改為 Map，記錄發現時間，防止永遠查不到價的死幣塞爆 RAM
+        this.mintBuffer = new Map(); 
         this.blacklist = ['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', '11111111111111111111111111111111', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'];
         this.isProcessingBuffer = false;
         
-        // 🎣 [V9.1.1 養魚機制] 每 15 秒極速清空緩衝池
-        // 將合格嘅初生幣打上 Timestamp，掉入 Redis 養魚池慢慢等 5 分鐘熟成
+        // 🎣 每 15 秒極速清空緩衝池
         setInterval(() => this._processMintBuffer(), 15000);
     }
 
@@ -86,9 +86,13 @@ class SourceAggregator {
                     const accounts = txInfo?.data?.result?.transaction?.message?.accountKeys || [];
                     const potentialMints = accounts.map(a => a.pubkey).filter(k => !this.blacklist.includes(k) && k.length > 32);
 
+                    const now = Date.now();
                     for (const mint of potentialMints) {
                         const cleanMint = this.sanitizeAddress(mint);
-                        if (cleanMint) this.mintBuffer.add(cleanMint);
+                        // 記錄發現時間
+                        if (cleanMint && !this.mintBuffer.has(cleanMint)) {
+                            this.mintBuffer.set(cleanMint, now);
+                        }
                     }
                 }
             } catch (err) {}
@@ -107,34 +111,29 @@ class SourceAggregator {
         });
     }
 
-    async pollBirdeyeNewListings() {
-        if (!config.external.birdeyeApiKey) return;
-        try {
-            const res = await axios.get('https://public-api.birdeye.so/defi/v2/tokens/new_listing?limit=20', {
-                headers: { 'X-API-KEY': config.external.birdeyeApiKey, 'accept': 'application/json' },
-                timeout: 5000
-            });
-            
-            const tokens = res.data?.data?.items || [];
-            for (const token of tokens) {
-                const mint = this.sanitizeAddress(token.address);
-                if (mint && !this.blacklist.includes(mint)) {
-                    const isProcessed = await redis.get(`processed_mint:${mint}`);
-                    if (!isProcessed) this.mintBuffer.add(mint);
-                }
-            }
-        } catch (err) {}
-    }
-
     async _processMintBuffer() {
         if (this.isProcessingBuffer || this.mintBuffer.size === 0) return;
         this.isProcessingBuffer = true;
 
-        const mintsArray = Array.from(this.mintBuffer).slice(0, 30);
-        mintsArray.forEach(m => this.mintBuffer.delete(m));
+        const now = Date.now();
+        // 🚀 V9.2 防護：清理超過 5 分鐘仍無法在 DexScreener 查到價的死幣
+        for (const [mint, timestamp] of this.mintBuffer.entries()) {
+            if (now - timestamp > 5 * 60 * 1000) {
+                this.mintBuffer.delete(mint);
+            }
+        }
+
+        // 每次抽 30 隻出嚟試
+        const mintsToProcess = Array.from(this.mintBuffer.entries()).slice(0, 30);
+        mintsToProcess.forEach(([m, _]) => this.mintBuffer.delete(m)); // 先移出，失敗再放回
+
+        if (mintsToProcess.length === 0) {
+            this.isProcessingBuffer = false;
+            return;
+        }
 
         try {
-            const addresses = mintsArray.join(',');
+            const addresses = mintsToProcess.map(([m, _]) => m).join(',');
             const url = `https://api.dexscreener.com/latest/dex/tokens/${addresses}`;
             const res = await axios.get(url, { timeout: 5000 });
 
@@ -166,7 +165,10 @@ class SourceAggregator {
                 }
             }
         } catch (err) {
-            mintsArray.forEach(m => this.mintBuffer.add(m)); 
+            // 查價失敗，放回 Buffer 等下次再試（需帶上原本的 timestamp）
+            mintsToProcess.forEach(([m, ts]) => {
+                if (!this.mintBuffer.has(m)) this.mintBuffer.set(m, ts);
+            }); 
         } finally {
             this.isProcessingBuffer = false;
         }
@@ -188,8 +190,6 @@ class SourceAggregator {
 
         const alchemyWsUrl = config.rpc.alchemy.apiKey ? `wss://solana-mainnet.g.alchemy.com/v2/${config.rpc.alchemy.apiKey}` : null;
         this.connectWebSocket('Alchemy', alchemyWsUrl, targets);
-
-        setInterval(() => this.pollBirdeyeNewListings(), 3 * 60 * 1000);
     }
 }
 

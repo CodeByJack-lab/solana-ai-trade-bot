@@ -1,11 +1,12 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：隱形獵人爬蟲。每 2 小時從 GeckoTerminal 獲取 Solana 真實 Volume Top 100，具備防 429 智能重試與去重機制。
+// 📝 檔案功能用途：隱形獵人爬蟲。每 15 分鐘從 GeckoTerminal 獲取 Solana 真實 Volume Top 100，具備動態防偽過濾 (Verified Tokens) 與 2-10s 擬人化防 429 盾。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const { getPortfolio, canBuyTrending } = require('./portfolioService');
 const { healthMonitor } = require('./healthMonitor');
 const { trendingJob } = require('../jobs/trendingJob');
+const { cacheManager } = require('./cacheManager'); // 🛡️ 引入大腦快取
 const configEnv = require('../config/config');
 const Redis = require('ioredis');
 const { sendAdminAlert } = require('./telegramService');
@@ -37,27 +38,27 @@ const trendingMonitorService = {
                     console.log(`📑 [Gecko] 第 ${page} 頁抓取成功！`);
 
                     if (page < targetPages) {
-                        const delay = Math.floor(Math.random() * 2000) + 3000;
+                        // 🤖 擬人化防護：隨機產生 2000ms 至 10000ms (即 2 至 10 秒)
+                        const delay = Math.floor(Math.random() * 8000) + 2000;
+                        console.log(`⏳ [Gecko Crawler] 擬人化防護：等待 ${(delay/1000).toFixed(1)} 秒後再翻下一頁...`);
                         await new Promise(r => setTimeout(r, delay));
                     }
                 } catch (error) {
-                    retryCount++; // ⚠️ 必須加呢行，否則無限 Loop 永遠卡死
+                    retryCount++; 
                     
                     const is429 = error.response?.status === 429 || error.message.includes('429');
                     
-                    console.log(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (嘗試 ${retryCount}/3): ${error.message}`);
+                    console.warn(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (嘗試 ${retryCount}/3): ${error.message}`);
                 
                     if (is429) {
-                        // 🛑 429 冷處理：終極靜音，只在後台等候
                         const penaltyDelay = Math.floor(Math.random() * 5000) + 10000; 
                         console.log(`⏳ 觸發 API 429 保護，後台自動冷卻 ${Math.round(penaltyDelay/1000)} 秒後重試... (已靜音 Telegram)`);
                         await new Promise(r => setTimeout(r, penaltyDelay));
                     } else {
-                        // ⚠️ 真正嚴重錯誤 (如 500/TimeOut)，先至彈 Telegram Alert
                         if (typeof sendAdminAlert === 'function') {
                             sendAdminAlert(`⚠️ [Gecko Crawler] 第 ${page} 頁嚴重異常: ${error.message}`);
                         }
-                        await new Promise(r => setTimeout(r, 3000)); // 普通錯誤等 3 秒
+                        await new Promise(r => setTimeout(r, 3000)); 
                     }
                 }
             }
@@ -66,7 +67,7 @@ const trendingMonitorService = {
     },
 
     start() {
-        console.log('🦎 [Gecko Crawler] 真・Top 100 監控啟動 (每 2 小時大換血，附帶智能重試機制)...');
+        console.log('🦎 [Gecko Crawler] 真・Top 100 監控啟動 (每 15 分鐘大換血，附帶智能重試與防偽過濾機制)...');
         
         const runTask = async () => {
             if (isCrawlerRunning) return;
@@ -82,10 +83,9 @@ const trendingMonitorService = {
                 const { data: config } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
                 if (!config || !config.is_running) { isCrawlerRunning = false; return; }
 
-                const { data: stratParams } = await supabase.from('ai_strategy_params').select('min_liquidity').eq('id', 3).single();
-                
-                // 🟢 預設最低流動性要求由 150,000 改為 50,000 美金
-                const dynamicMinLiquidity = stratParams?.min_liquidity || 50000; 
+                // 🧠 從大腦動態讀取最低流動性要求 (TRENDING)
+                const dbParams = cacheManager.getStrategy('TRENDING');
+                const dynamicMinLiquidity = dbParams?.min_liquidity || 50000; 
 
                 const pools = await this.fetchTop100FromGecko();
                 if (pools.length === 0) { isCrawlerRunning = false; return; }
@@ -106,6 +106,10 @@ const trendingMonitorService = {
                     'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
                 ];
 
+                // 🛡️ 從大腦讀取最新防偽名單
+                const cache = cacheManager.getConfig();
+                const VERIFIED_TOKENS = cache?.verified_tokens || {};
+
                 for (let i = 0; i < pools.length; i++) {
                     const pool = pools[i];
                     const baseTokenId = pool.relationships?.base_token?.data?.id || '';
@@ -114,14 +118,21 @@ const trendingMonitorService = {
                     if (!mintAddress || mintAddress.length < 32) continue;
                     if (blacklist.includes(mintAddress)) continue;
 
+                    const attr = pool.attributes || {};
+                    const symbol = attr.name?.split(' /')[0]?.toUpperCase() || 'UNKNOWN';
+
+                    // 🚨 源頭攔截：如果是防偽名單上的幣種，但地址不符，直接踢走，不准上榜！
+                    if (VERIFIED_TOKENS[symbol] && mintAddress !== VERIFIED_TOKENS[symbol]) {
+                        console.log(`🗑️ [Fake Shield] 發現假冒 ${symbol} (${mintAddress})，直接踢出，拒絕佔用榜單與保溫箱資源！`);
+                        continue; 
+                    }
+
                     if (uniqueMints.has(mintAddress)) continue;
                     uniqueMints.add(mintAddress);
 
                     if (top100Array.length >= 100) break;
 
-                    const attr = pool.attributes || {};
                     const liquidityUsd = parseFloat(attr.reserve_in_usd) || 0;
-                    const symbol = attr.name?.split(' /')[0] || 'UNKNOWN';
 
                     const baseData = {
                         mint_address: mintAddress, 
@@ -135,7 +146,6 @@ const trendingMonitorService = {
 
                     top100Array.push({ ...baseData, rank: currentRank });
 
-                    // 🟢 放寬 Rank 要求，由 Rank 1 至 Rank 100 全數納入考慮
                     if (currentRank >= 1 && currentRank <= 100 && liquidityUsd >= dynamicMinLiquidity) {
                         const isBlacklisted = await redis.get(`scam_blacklist:${mintAddress}`);
                         if (isBlacklisted) {
@@ -149,7 +159,6 @@ const trendingMonitorService = {
                             continue;
                         }
 
-                        // 檢查冷卻時間
                         const { data: tradeHistory } = await supabase
                             .from(`trade_history_${tableSuffix}`)
                             .select('created_at, realized_pnl_pct')
@@ -171,7 +180,8 @@ const trendingMonitorService = {
                     currentRank++;
                 }
 
-                if (top100Array.length > 0) {
+                // 🛡️ 安全降級：確保獲取足夠數據才清空並更新 DB，防止 Gecko 429 導致榜單清空誤殺真幣
+                if (top100Array.length >= 50) {
                     await supabase.from('trending_top100').delete().neq('mint_address', 'dummy'); 
                     const { error: insertErr } = await supabase.from('trending_top100').insert(top100Array);
                     
@@ -180,6 +190,8 @@ const trendingMonitorService = {
                     } else {
                         console.log(`📋 [Gecko Crawler] 成功更新 Top 100 真假幣對照表 (${top100Array.length} 隻不重複代幣)！`);
                     }
+                } else {
+                    console.log(`⚠️ [Gecko Crawler] 獲取數據不足 (${top100Array.length} 隻)，為防對照表斷層，暫不更新 DB。`);
                 }
 
                 if (incubatorArray.length > 0) {
@@ -201,7 +213,8 @@ const trendingMonitorService = {
         };
 
         setTimeout(() => { runTask(); }, 5000); 
-        setInterval(runTask, 2 * 60 * 60 * 1000); 
+        // ⚡ 將大熱幣掃描頻率縮短至 15 分鐘
+        setInterval(runTask, 15 * 60 * 1000); 
     }
 };
 
