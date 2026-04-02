@@ -8,6 +8,7 @@ const config = require('../config/config');
 const { sendMacroPanicApproval, sendAdminAlert } = require('./telegramService');
 const { aiAdvisorService } = require('./aiAdvisorService'); // 🛡️ V9.2 引入獨立參謀大腦
 const { healthMonitor } = require('./healthMonitor');
+const { supabase } = require('../config/supabase');
 
 const redis = new Redis(config.cache.redisUrl || process.env.REDIS_URL);
 const parser = new Parser();
