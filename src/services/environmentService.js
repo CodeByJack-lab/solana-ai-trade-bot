@@ -1,5 +1,5 @@
 // src/services/environmentService.js
-// 📝 檔案功能用途：V9.2 大市氣候台與死人開關。綜合多維度數據判定氣候，並呼叫獨立的 aiAdvisorService 進行大腦決策。
+// 📝 檔案功能用途：V9.2 大市氣候台與自動開關。綜合多維度數據判定氣候，並呼叫獨立的 aiAdvisorService 進行大腦決策。
 
 const axios = require('axios');
 const Parser = require('rss-parser');
@@ -124,14 +124,60 @@ class EnvironmentService {
 
                 if (titles.length > 0) {
                     activeNewsIdx = (activeNewsIdx + i) % NEWS_PROVIDERS.length;
-                    return this._analyzeTitles(titles);
+                    // 🚀 升級：加入 await 呼叫 Groq AI 進行情緒分析
+                    return await this._analyzeTitles(titles);
                 }
-            } catch (err) {}
+            } catch (err) {
+                console.warn(`⚠️ [Env Service] 獲取 ${provider.name} 新聞失敗:`, err.message);
+            }
         }
         return 0; 
     }
 
-    _analyzeTitles(titles) {
+    // 🧠 V9.2 升級：Groq Llama-3 智能情緒分析
+    async _analyzeTitles(titles) {
+        try {
+            const groqApiKey = process.env.GROQ_API_KEY;
+            if (!groqApiKey) {
+                throw new Error("Missing GROQ_API_KEY");
+            }
+
+            const prompt = `You are a top-tier Web3 market sentiment analyst. Analyze these 20 recent crypto news titles. Determine the overall macroeconomic sentiment score from -5 (extreme fear/panic) to 5 (extreme greed/euphoria). 0 is neutral. 
+            Ignore routine individual token news. Focus on macro events (e.g., SEC actions, ETF inflows, major hacks, macro economy).
+            Output ONLY pure JSON.
+            
+            Titles:
+            ${titles.map((t, i) => `${i+1}. ${t}`).join('\n')}
+            
+            Output exact JSON format: {"score": <integer>}`;
+
+            const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+                model: 'llama-3.3-70b-versatile',
+                messages: [{ role: 'user', content: prompt }],
+                response_format: { type: "json_object" },
+                temperature: 0.1
+            }, {
+                headers: {
+                    'Authorization': `Bearer ${groqApiKey}`,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 8000
+            });
+
+            const parsed = JSON.parse(res.data.choices[0].message.content);
+            let score = parseInt(parsed.score);
+            if (isNaN(score)) score = 0;
+            
+            return Math.max(-5, Math.min(5, score));
+            
+        } catch (error) {
+            console.warn(`⚠️ [Env Service] Groq AI 分析失敗 (${error.message})，降級使用關鍵字計分...`);
+            return this._fallbackAnalyze(titles);
+        }
+    }
+
+    // 🛡️ 備用降級方案 (舊版關鍵字計分)
+    _fallbackAnalyze(titles) {
         const fullText = titles.join(' ').toLowerCase();
         const negativeWords = ['scam', 'hack', 'exploit', 'investigation', 'ban', 'lawsuit', 'regulation', 'crackdown', 'crash', 'drop', 'bear', 'sec', 'sell-off'];
         const positiveWords = ['upgrade', 'integration', 'partnership', 'launch', 'success', 'growth', 'bull', 'etf', 'adoption', 'surge', 'all-time high'];
@@ -210,7 +256,7 @@ class EnvironmentService {
                 await redis.del('macro_panic_pending'); 
 
                 if (macro.btcDrop <= -5.0 || macro.solDrop <= -8.0) {
-                    sendAdminAlert(`🚨 <b>【死人開關已觸發】</b>\n\n15 分鐘未收到指揮官回覆，且大市依然處於 BEAR_PANIC 恐慌狀態。\n\n🤖 <b>系統已接管控制權，正在自動執行全線強平！</b>`);
+                    sendAdminAlert(`🚨 <b>【自動開關已觸發】</b>\n\n15 分鐘未收到指揮官回覆，且大市依然處於 BEAR_PANIC 恐慌狀態。\n\n🤖 <b>系統已接管控制權，正在自動執行全線強平！</b>`);
                     
                     const { getPortfolio } = require('./portfolioService');
                     const { runSellPipeline } = require('./tradeService');
@@ -220,7 +266,7 @@ class EnvironmentService {
                         const lockKey = `sell_lock:${pos.mint_address}`;
                         const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                         if (acquired) {
-                            await runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, `🚨 15分鐘死人開關：大盤未見好轉，自動全平倉防禦`, 1.0)
+                            await runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, `🚨 15分鐘自動開關：大盤未見好轉，自動全平倉防禦`, 1.0)
                                 .finally(() => redis.del(lockKey));
                             await new Promise(r => setTimeout(r, 1000));
                         }
