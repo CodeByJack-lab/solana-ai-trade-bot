@@ -45,7 +45,7 @@ const trendingMonitorService = {
                     
                     const is429 = error.response?.status === 429 || error.message.includes('429');
                     
-                    console.error(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (嘗試 ${retryCount}/3): ${error.message}`);
+                    console.log(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (嘗試 ${retryCount}/3): ${error.message}`);
                 
                     if (is429) {
                         // 🛑 429 冷處理：終極靜音，只在後台等候
