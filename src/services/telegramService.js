@@ -37,7 +37,6 @@ async function processQueue() {
             console.error(`❌ [Telegram] 發送失敗: ${error.response?.data?.description || error.message}`);
             if (reject) reject(error);
         }
-        // 🛡️ 強制冷卻 1500ms，徹底杜絕 Telegram Error 429
         await new Promise(r => setTimeout(r, 1500));
     }
     isProcessingQueue = false;
@@ -73,13 +72,12 @@ async function _send(message, token, targetChatId, pin = false, replyMarkup = nu
     return messageId;
 }
 
-// 🛣️ 3 路分流 API
 async function sendTelegramAlert(message, pin = false) { await _send(message, MAIN_BOT_TOKEN, CHANNEL_ID, pin); }
 async function sendAdminAlert(message, pin = false) { await _send(message, MAIN_BOT_TOKEN, CHAT_ID, pin); }
 async function sendStrategyAlert(message, pin = false) { await _send(message, ADMIN_BOT_TOKEN, CHAT_ID, pin); }
 
 // ==========================================
-// 🚨 大市宏觀風控警報 (保留)
+// 🚨 大市宏觀風控警報
 // ==========================================
 async function sendMacroPanicApproval(reason) {
     const { getPortfolio } = require('./portfolioService');
@@ -100,7 +98,8 @@ async function sendMacroPanicApproval(reason) {
         snapshotText += "\n\n📊 <b>【當前倉位快照】</b>\n✅ 目前空倉，無曝險資金。";
     }
 
-    const message = `🚨 <b>【大市宏觀熔斷警報】</b>\n\n⚠️ <b>觸發理由:</b>\n${reason}${snapshotText}\n\n🤖 <b>系統建議:</b> 大盤極度不穩，建議啟動全線市價強平防禦機制！請指揮官裁決：\n(⚠️ 註：若 15 分鐘內未作回應且大市未好轉，系統將自動接管並全平倉)`;
+    // 🚀 文本修正：15 分鐘改為 3 分鐘
+    const message = `🚨 <b>【大市宏觀熔斷警報】</b>\n\n⚠️ <b>觸發理由:</b>\n${reason}${snapshotText}\n\n🤖 <b>系統建議:</b> 大盤極度不穩，建議啟動全線市價強平防禦機制！請指揮官裁決：\n(⚠️ 註：若 3 分鐘內未作回應且大市未好轉，系統將自動接管並全平倉)`;
 
     const keyboard = {
         inline_keyboard: [
@@ -123,7 +122,7 @@ async function sendApprovalRequest(reportText, proposalId) {
 }
 
 // ==========================================
-// 🎮 Webhook 回調處理中心 (處理所有 Inline Keyboard)
+// 🎮 Webhook 回調處理中心
 // ==========================================
 async function processTelegramCallback(callbackQuery) {
     const { supabase } = require('../config/supabase');
@@ -133,7 +132,6 @@ async function processTelegramCallback(callbackQuery) {
     const chatId = callbackQuery.message.chat.id;
     const userName = callbackQuery.from?.first_name || "Boss";
 
-    // 1. 宏觀強平審批
     if (data === 'APPROVE_MACRO_SELL' || data === 'REJECT_MACRO_SELL') {
         const isProcessed = await redis.set(`tg_btn_lock:${messageId}`, '1', 'EX', 86400, 'NX');
         if (!isProcessed) return;
@@ -173,7 +171,6 @@ async function processTelegramCallback(callbackQuery) {
         }
     }
 
-    // 2. AI 戰略參謀提案審批 (熱更新區)
     let responseText = '';
     let isAIProposal = false;
 
@@ -233,7 +230,6 @@ async function processTelegramCallback(callbackQuery) {
         return;
     }
 
-    // 3. 舊有的每週 AI 回測參數審批 (兜底保留)
     if (data.startsWith('APPROVE_') || data.startsWith('REJECT_')) {
         const isProcessed = await redis.set(`tg_btn_lock:${messageId}`, '1', 'EX', 86400, 'NX');
         if (!isProcessed) return;

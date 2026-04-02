@@ -58,12 +58,13 @@ class ConsensusService {
                     const payload = {
                         model: modelName,
                         messages: [{ role: "user", content: prompt }],
-                        response_format: { type: "json_object" } // 強制 JSON 輸出
+                        response_format: { type: "json_object" }, // 強制 JSON 輸出
+                        temperature: 0.1 // 👈 [極重要] 加入絕對低溫鎖，徹底消滅火星文與幻覺
                     };
 
                     const res = await axios.post(apiUrl, payload, {
                         headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' },
-                        timeout: 10000 
+                        timeout: 15000 
                     });
 
                     const rawText = res.data.choices[0].message.content;

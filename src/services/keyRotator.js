@@ -70,32 +70,42 @@ class KeyRotator {
             const task = this.queue.shift();
             
             try {
-                // 取用金鑰
                 const apiKey = this._getNextAvailableKey();
                 
                 if (!apiKey) {
-                    // 全部金鑰癱瘓，直接拋出特定錯誤，讓外層觸發「純量化算分」降級
                     task.reject(new Error('ALL_KEYS_ON_COOLDOWN'));
                 } else {
-                    // 執行真正嘅 AI 請求 (將 apiKey 傳遞畀回呼函數)
                     const result = await task.executeFn(apiKey);
                     task.resolve(result);
                 }
             } catch (error) {
-                // 如果任務自己報錯 (例如網絡錯誤、被伺服器 ban)
+                // 🛡️ V9.2.1 修復：同時攔截 429、Timeout 以及 5xx 伺服器死機
                 const is429 = error.message?.includes('429') || error.response?.status === 429;
-                
+                const isTimeout = error.message?.includes('timeout') || error.code === 'ECONNABORTED';
+                const isServerError = error.response?.status >= 500;
+
                 if (is429 && task.apiKeyUsed) {
                     this._markKeyOnCooldown(task.apiKeyUsed);
-                    // 重新推回隊列前面，畀下一次用新 Key 重試
-                    this.queue.unshift(task);
+                }
+
+                // 如果係 429 或者 Timeout/Server 死機，我哋都應該進行重試！
+                if ((is429 || isTimeout || isServerError) && task.apiKeyUsed) {
+                    task.retryCount = (task.retryCount || 0) + 1;
+                    
+                    if (task.retryCount <= 3) { // 最多允許重試 3 次
+                        console.warn(`🔄 [KeyRotator] 遇到 ${is429 ? '429限流' : 'Timeout/死機'}，將於隊列前方無縫重試 (嘗試 ${task.retryCount}/3)...`);
+                        this.queue.unshift(task);
+                    } else {
+                        console.error(`❌ [KeyRotator] 任務重試 3 次後依然失敗，宣告陣亡。`);
+                        task.reject(new Error(`MAX_RETRIES_EXCEEDED: ${error.message}`));
+                    }
                 } else {
-                    // 非 429 錯誤，直接宣告失敗
+                    // 非網絡連線問題 (例如 400 Bad Request、Prompt 格式錯)，直接報錯
                     task.reject(error);
                 }
             }
 
-            // ⏳ V9.1 鐵律：每次 AI 呼叫完畢後，強制等待 1000 毫秒
+            // ⏳ 強制等待 1000 毫秒，保護 API
             await new Promise(resolve => setTimeout(resolve, 1000));
         }
 
