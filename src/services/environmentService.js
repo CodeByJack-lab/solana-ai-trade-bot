@@ -166,14 +166,20 @@ class EnvironmentService {
         await redis.set('global_env_state', JSON.stringify(envState), 'EX', 3600);
         healthMonitor.setStatus('Macro_Radar', `🟢 氣候: ${currentClimate} (News: ${newsScore})`);
 
-        // 🤖 V9.2：觸發獨立的 AI 大腦進行決策
+        // 🚀 V9.2 新增：同步將氣候與新聞分數寫入大本營，供 Dashboard 顯示！
+        try {
+            await supabase.from('system_config').update({
+                macro_climate: currentClimate,
+                latest_news_score: newsScore
+            }).eq('id', 1);
+        } catch(e) { console.warn(`⚠️ 同步氣候至 DB 失敗`); }
+
         const prevClimate = await redis.get('prev_climate_state');
         if (prevClimate !== currentClimate) {
             console.log(`\n🌩️ [天文台] 偵測到大市氣候由 ${prevClimate || 'UNKNOWN'} 轉變為 ${currentClimate}，已交由 AI 參謀總部研判！`);
             await redis.set('prev_climate_state', currentClimate);
             
             try {
-                // 將情報交給專屬大腦處理 (抽離了舊有的 telegram 發送)
                 await aiAdvisorService.evaluateClimateChange(currentClimate, envState);
             } catch (err) {
                 console.warn(`⚠️ 呼叫 AI 大腦失敗: ${err.message}`);
@@ -226,7 +232,7 @@ class EnvironmentService {
     }
 
     start() {
-        console.log(`🌍 [Env Service] 天文台與死人開關已就位...`);
+        console.log(`🌍 [Env Service] 天文台與TimeStop已就位...`);
         this.updateEnvironment();
         setInterval(() => this.updateEnvironment(), 15 * 60 * 1000);
         setInterval(() => this._checkDeadManSwitch(), 60000);

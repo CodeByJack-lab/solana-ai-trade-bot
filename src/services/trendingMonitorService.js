@@ -197,7 +197,7 @@ const trendingMonitorService = {
                 if (incubatorArray.length > 0) {
                     const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
                     if (!error) {
-                        console.log(`🦎 [Gecko Crawler] 成功將 ${incubatorArray.length} 隻 Rank 1-100 的藍籌幣送入保溫箱！`);
+                        console.log(`🦎 [Gecko Crawler] 成功將 ${incubatorArray.length} 隻 Rank 1-100 的Trending幣送入保溫箱！`);
                         healthMonitor.setStatus('Top200_Crawler', `🟢 已佈局 ${incubatorArray.length} 隻大藍籌`);
                         
                         if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {

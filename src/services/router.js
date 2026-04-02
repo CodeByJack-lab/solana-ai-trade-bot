@@ -1,5 +1,5 @@
 // src/services/router.js
-// 📝 檔案功能用途：V9.1 漏斗大腦分流器。掛載「2D 動態倉位矩陣」，結合大市風險級別 (Risk Level) 與質素分數 (Score) 精準調配火力與 AI 權限。
+// 📝 檔案功能用途：V9.2 漏斗大腦分流器。掛載「2D 動態倉位矩陣」，結合大市氣候標籤 (Climate) 與質素分數 (Score) 精準調配火力與 AI 權限。
 
 const config = require('../config/config');
 const { supabase } = require('../config/supabase');
@@ -27,32 +27,32 @@ class Router {
         const score = secResult.numeric_score;
         const marketData = secResult.marketData;
 
-        // 🌍 0 毫秒極速讀取大市環境狀態 (O(1) Redis Lookup)
+        // 🌍 0 毫秒極速讀取大市環境狀態 (O(1) Redis Lookup) - V9.2 氣候對接
         const envStateStr = await redis.get('global_env_state');
-        const envState = envStateStr ? JSON.parse(envStateStr) : { riskLevel: 'LOW', newsScore: 0 };
-        const { riskLevel, newsScore } = envState;
+        const envState = envStateStr ? JSON.parse(envStateStr) : { climate: 'CHOPPY', newsScore: 0 };
+        const { climate, newsScore } = envState;
 
         // 🧠 套用 2D 動態倉位矩陣 (Dynamic Position Sizing Matrix)
         let multiplier = 0;
-        if (riskLevel === 'LOW') {
+        if (climate === 'RAGING_BULL') {
             multiplier = score >= 90 ? 1.5 : 1.0;
-        } else if (riskLevel === 'MEDIUM') {
+        } else if (climate === 'CHOPPY') {
             multiplier = score >= 90 ? 1.0 : 0.5;
-        } else if (riskLevel === 'HIGH') {
+        } else if (climate === 'BEAR_PANIC') {
             multiplier = score >= 90 ? 0.5 : 0;
         }
 
-        // 🛡️ 風控矩陣：大市極差且質素平庸 (HIGH + 60-89) -> 直接 0x 攔截
+        // 🛡️ 風控矩陣：大市極差且質素平庸 (BEAR_PANIC + 60-89) -> 直接 0x 攔截
         if (multiplier === 0) {
-            console.log(`[Router] 🛑 風控矩陣攔截: 大市高危 (${riskLevel}) 且質素平庸 (${score}分)。放棄建倉，節省彈藥！`);
+            console.log(`[Router] 🛑 風控矩陣攔截: 大市高危 (${climate}) 且質素平庸 (${score}分)。放棄建倉，節省彈藥！`);
             return false;
         }
 
-        console.log(`[Router] 🌍 大市環境: ${riskLevel} | 分數: ${score} | 預期倉位乘數: ${multiplier}x`);
+        console.log(`[Router] 🌍 大市環境: ${climate} | 分數: ${score} | 預期倉位乘數: ${multiplier}x`);
 
         // 🚀 >= 90 分 (Fast-Track)，跳過 AI 審批
         if (score >= config.quant.fastTrackThreshold) {
-            console.log(`[Router] 🚀 極品湧現！${mint} 獲得 ${score} 分，啟動 Fast-Track 跳過 AI 直購！`);
+            console.log(`[Router] 🚀 高質幣湧現！${mint} 獲得 ${score} 分，啟動 Fast-Track 跳過 AI 直購！`);
             return await this._handleFastTrack(mint, poolType, score, marketData, multiplier);
         } 
         // ⚖️ 60-89 分，進入 AI 議事廳微調
@@ -83,7 +83,7 @@ class Router {
         const baseAmount = await this._getTradeAmount(isMeme);
         const finalAmount = baseAmount * multiplier;
         
-        return await executeBuy(mint, marketData.symbol, strategyBase, score, `🌟 量化 90+ 極品，Fast-Track (倍數: ${multiplier}x)`, finalAmount);
+        return await executeBuy(mint, marketData.symbol, strategyBase, score, `🌟 量化 90+ 高質幣，Fast-Track (倍數: ${multiplier}x)`, finalAmount);
     }
 
     /**
@@ -139,7 +139,7 @@ class Router {
         // 動態標記：若 AI 微調後分數仍落於 60-79 區間，強制套用 30 分鐘 Time-Stop 標記
         if (finalScore >= config.trade.sizeHalfPts && finalScore < config.trade.sizeFullPts) {
             strategySuffix += '_TIMESTOP';
-            console.log(`[Router] ⚖️ 最終分數 ${finalScore} 落在 60-79 區間，套用 30m TimeStop 規則 (投入: ${finalAmount} SOL)`);
+            console.log(`[Router] ⚖️ 最終分數 ${finalScore} 落在 60-79 區間，套用 TimeStop 規則 (投入: ${finalAmount} SOL)`);
         } else {
             console.log(`[Router] ⚖️ 最終分數 ${finalScore} >= 80，優質建倉 (投入: ${finalAmount} SOL)`);
         }

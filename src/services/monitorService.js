@@ -272,7 +272,7 @@ function startActiveSweeper() {
 
             if (ageMins >= timeStopMins) {
                 if (pnlPct >= timeStopTarget) {
-                    console.log(`🛡️ [Sweeper] 攔截！${pos.token_symbol} 實時已達標 (+${pnlPct.toFixed(2)}%)，收回屠刀，交由常規雷達止盈！`);
+                    console.log(`🛡️ [Sweeper] 攔截！${pos.token_symbol} 實時已達標 (+${pnlPct.toFixed(2)}%)，交由常規雷達止盈！`);
                 } else {
                     shouldSell = true;
                     reason = `🧹 [主動清道夫] ${isTrending ? '藍籌' : 'Meme'} 滯留過久 (${ageMins.toFixed(0)} 分鐘未達 +${timeStopTarget}%)，無差別清倉！`;
