@@ -1,5 +1,6 @@
 // src/config/solana.js
 // 📝 檔案功能用途：V9.2 Solana 區塊鏈連線引擎。支援 RPC 智能輪替、防併發切換風暴 (Debounce)、429 攔截及 Promise.any 極限併發廣播。
+// 🚀 V9.2.4 升級：動態放寬 getTokenLargestAccounts 超時限制，防範安檢中樞 Fail-Open 漏洞。
 
 const { Connection, PublicKey, Keypair } = require('@solana/web3.js');
 
@@ -87,8 +88,14 @@ const connection = new Proxy(dummyTarget, {
                         if (NO_TIMEOUT_METHODS.includes(propKey)) {
                             return await methodToRun.apply(activeConn, args);
                         } else {
-                            // V9.2 針對查籌碼 (getParsedAccountInfo 等) 縮短 Timeout 至 3.5 秒，強制及早 Failover
-                            const timeoutMs = propKey.includes('get') ? 3500 : 5000;
+                            // 🚀 V9.2.4 動態分配 Timeout：針對重型查詢放寬限制
+                            let timeoutMs = 5000;
+                            if (propKey === 'getTokenLargestAccounts') {
+                                timeoutMs = 6500; // 畀夠 6.5 秒佢查 Top 10 籌碼
+                            } else if (propKey.includes('get')) {
+                                timeoutMs = 3500; // 其他普通 get 維持 3.5 秒極速 Failover
+                            }
+                            
                             return await withTimeout(methodToRun.apply(activeConn, args), timeoutMs, propKey);
                         }
                     } catch (err) {

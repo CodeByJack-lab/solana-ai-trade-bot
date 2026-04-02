@@ -1,5 +1,6 @@
 // src/services/priceService.js
-// 📝 檔案功能及用途：跨鏈資產報價中心。實裝「狀態指針輪替」與「三振出局溯源」，四路水喉 (CoinGecko/Birdeye/JupV3/JupV6) 動態切換，附帶 RAM 記憶體終極保底。
+// 📝 檔案功能及用途：跨鏈資產報價中心。實裝「狀態指針輪替」與「三振出局溯源」，三路水喉 (CoinGecko/JupV3/JupV6) 動態切換，附帶 RAM 記憶體終極保底。
+// 🚀 V9.2.4 升級：徹底拔除不穩定之 Birdeye API。
 
 const axios = require('axios');
 const { getUSDHKDRate } = require('../utils/currency');
@@ -8,16 +9,15 @@ const { sendAdminAlert } = require('./telegramService');
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-// 🔄 狀態指針系統 (Stateful Pointer)
+// 🔄 狀態指針系統 (Stateful Pointer) - 已移除 BIRDEYE
 const PROVIDERS = [
     { name: 'COINGECKO', keyName: 'COINGECKO_API_KEY' },
-    { name: 'BIRDEYE', keyName: 'BIRDEYE_API_KEY' },
-    { name: 'JUPITER_V3', keyName: 'JUPITER_API_KEY' },
-    { name: 'JUPITER_V6', keyName: null }
+    { name: 'JUPITER_V6', keyName: null }, // 免費又快，提早上位
+    { name: 'JUPITER_V3', keyName: 'JUPITER_API_KEY' }
 ];
 
 let activeProviderIdx = 0;
-const providerErrorCounts = { COINGECKO: 0, BIRDEYE: 0, JUPITER_V3: 0, JUPITER_V6: 0 };
+const providerErrorCounts = { COINGECKO: 0, JUPITER_V3: 0, JUPITER_V6: 0 };
 
 // 🚀 全局記憶體：記住最後一次成功獲取嘅 SOL 價格 (預設 150 USD)
 let lastValidPriceUsd = 150;
@@ -42,21 +42,15 @@ async function fetchPrice(provider) {
             if (res.data?.solana?.usd) return parseFloat(res.data.solana.usd);
             throw new Error("回傳格式無效");
         }
-        if (provider.name === 'BIRDEYE') {
-            const config = { timeout: 3000, headers: { 'X-API-KEY': apiKey.replace(/['"]/g, '').trim() } };
-            const res = await axios.get(`https://public-api.birdeye.so/defi/price?address=${SOL_MINT}`, config);
-            if (res.data?.data?.value) return parseFloat(res.data.data.value);
+        if (provider.name === 'JUPITER_V6') {
+            const res = await axios.get(`https://price.jup.ag/v6/price?ids=${SOL_MINT}`, { timeout: 3000 });
+            if (res.data?.data?.[SOL_MINT]?.price) return parseFloat(res.data.data[SOL_MINT].price);
             throw new Error("回傳格式無效");
         }
         if (provider.name === 'JUPITER_V3') {
             const config = { timeout: 3000, headers: { 'x-api-key': apiKey.replace(/['"]/g, '').trim() } };
             const res = await axios.get(`https://api.jup.ag/price/v3?ids=${SOL_MINT}`, config);
             if (res.data?.[SOL_MINT]?.usdPrice) return parseFloat(res.data[SOL_MINT].usdPrice);
-            throw new Error("回傳格式無效");
-        }
-        if (provider.name === 'JUPITER_V6') {
-            const res = await axios.get(`https://price.jup.ag/v6/price?ids=${SOL_MINT}`, { timeout: 3000 });
-            if (res.data?.data?.[SOL_MINT]?.price) return parseFloat(res.data.data[SOL_MINT].price);
             throw new Error("回傳格式無效");
         }
     } catch (e) {
