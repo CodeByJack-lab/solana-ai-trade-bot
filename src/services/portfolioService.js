@@ -1,5 +1,6 @@
 // src/services/portfolioService.js
-// 📝 檔案功能用途：倉位與資產大管家。維護 RAM 中的持倉狀態，控制 Meme 與 Trending 雙軌額度，防止資金互相擠佔。
+// 📝 檔案功能用途：倉位與資產大管家。維護 RAM 中的持倉狀態，控制 Meme 與 Trending 雙軌額度。
+// 🚀 V9.3 實裝：真・鏈上同步心跳，確保實盤數據與 RPC 節點自動對齊。
 
 const { supabase } = require('../config/supabase'); 
 const { connection } = require('../config/solana');
@@ -55,7 +56,7 @@ async function updateSystemStatus(msg) {
 
 async function initPortfolio() {
     try {
-        console.log("🏰 [Portfolio] 正在初始化記憶體並執行上帝視角對齊...");
+        console.log("🏰 [Portfolio] 正在初始化記憶體並執行上帝視視角對齊...");
         await updateSystemStatus("🔄 正在初始化記憶體...");
         
         const { data: config, error: configErr } = await supabase.from('system_config').select('*').eq('id', 1).maybeSingle();
@@ -69,11 +70,16 @@ async function initPortfolio() {
 
         const tableName = my_portfolio.mode === 'PAPER' ? 'active_positions_paper' : 'active_positions_live';
 
-        // ⚠️ 禁止平時巡邏查真倉！直接讀取 DB 上次紀錄
+        // ⚠️ LIVE 模式優化：初始化後啟動定時心跳同步
         if (my_portfolio.mode === 'LIVE') {
              my_portfolio.cash_sol = config?.live_wallet_balance || 0;
              my_portfolio.reference_capital = my_portfolio.cash_sol;
-             console.log(`💰 [Portfolio] LIVE 模式：從 DB 讀取上次真倉餘額 (${my_portfolio.cash_sol} SOL)，跳過 RPC 查詢。`);
+             console.log(`💰 [Portfolio] LIVE 模式：初步載入 DB 餘額 (${my_portfolio.cash_sol} SOL)`);
+             
+             // 🚀 啟動「真・鏈上同步」心跳：每 30 秒強制對齊一次 RPC
+             console.log("🧬 [Portfolio] 鏈上餘額自動校準已上線 (30s 頻率)");
+             setInterval(() => syncLiveBalanceToDB(), 30000);
+             syncLiveBalanceToDB(); // 啟動時即刻同步一次
         }
 
         if (my_portfolio.mode === 'PAPER') {
@@ -105,17 +111,23 @@ async function initPortfolio() {
     }
 }
 
-// ⚠️ 只允許喺真正交易後被 TradeService 呼叫
+// 🏦 強化版同步：不只更新 DB，同時更新記憶體 my_portfolio
 async function syncLiveBalanceToDB() {
     if (walletPublicKey) {
         try {
             const lamports = await connection.getBalance(walletPublicKey);
             const liveSol = lamports / 1e9;
+            
+            // 1. 同步到 Supabase 供 Dashboard 顯示
             await supabase.from('system_config').update({ live_wallet_balance: liveSol }).eq('id', 1);
+            
+            // 2. 核心：即時同步到記憶體快取
             if (my_portfolio.mode === 'LIVE') {
                 my_portfolio.cash_sol = liveSol;
+                my_portfolio.nav_sol = liveSol; // 更新淨值基準
             }
-            console.log(`🏦 [RPC] 已成功同步最新真倉餘額: ${liveSol} SOL`);
+            
+            console.log(`🏦 [RPC Sync] 已校準最新真倉餘額: ${liveSol} SOL`);
         } catch (err) {
             console.error("⚠️ [RPC Error] 同步真倉餘額失敗:", err.message);
         }
@@ -156,19 +168,13 @@ function updateCache(action, solAmount, positionData = null) {
     }
 }
 
-// 🧹 [新增] 專門用來清洗模擬盤記憶體 (一鍵失憶)
 async function resetPaperMemory() {
-    if (portfolio.mode !== 'PAPER') return;
-    
-    // 1. 強制清空記憶體中的持倉
-    portfolio.positions = [];
-    
-    // 2. 重新去資料庫讀取 (因為資料庫已經被 Dashboard 清空，所以會讀返 0 出嚟)
+    if (my_portfolio.mode !== 'PAPER') return;
+    my_portfolio.positions = [];
     try {
-        const { supabase } = require('../config/supabase');
         const { data: dbConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
-        if (dbConfig) portfolio.cash_sol = dbConfig.simulated_balance;
-        console.log(`🧠 [Portfolio] 記憶體已被強制重置！目前模擬盤餘額: ${portfolio.cash_sol} SOL，持倉數: 0`);
+        if (dbConfig) my_portfolio.cash_sol = dbConfig.simulated_balance;
+        console.log(`🧠 [Portfolio] 記憶體已被強制重置！目前模擬盤餘額: ${my_portfolio.cash_sol} SOL，持倉數: 0`);
     } catch (e) {
         console.error("無法重置 Portfolio 餘額:", e.message);
     }
