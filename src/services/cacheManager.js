@@ -1,6 +1,7 @@
 // src/services/cacheManager.js
 // 📝 檔案功能用途：V9.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
 // 🛡️ 內建防幻覺機制：當 DB 讀取失敗時，自動降級至純英文後備底稿。
+// 🛠️ 修正版：補回 getStrategy, getVerifiedTokens, updateLocally 確保全系統對接無誤。
 
 const { supabase } = require('../config/supabase');
 
@@ -119,9 +120,27 @@ class CacheManager {
         }
     }
 
+    // 🚀 核心：讀取戰略參數 (支援新舊兩種叫法，防止其他 Service 報錯)
     getConfig(type = 'MEME') {
         const safeType = (type && type.includes('TRENDING')) ? 'TRENDING' : 'MEME';
         return this.cache.strategies[safeType];
+    }
+
+    // 🛠️ 補回：為咗兼容 securityGuard.js 同 trendingMonitorService.js
+    getStrategy(type = 'MEME') {
+        return this.getConfig(type);
+    }
+
+    // 🛠️ 補回：為咗 Gecko Crawler 嘅防偽名單可以正常運作
+    getVerifiedTokens() {
+        return this.cache.verified_tokens || {};
+    }
+
+    // 🛠️ 補回：為咗 Telegram Webhook 撳掣改參數嗰陣可以熱更新 RAM
+    updateLocally(type, dataObj) {
+        const safeType = (type && type.includes('TRENDING')) ? 'TRENDING' : 'MEME';
+        this.cache.strategies[safeType] = { ...this.cache.strategies[safeType], ...dataObj };
+        console.log(`🔄 [Cache Manager] 已熱更新 ${safeType} 的 RAM 參數。`);
     }
 
     getPromptConfig(promptId, dataObj = {}) {

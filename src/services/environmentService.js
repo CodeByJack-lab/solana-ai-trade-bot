@@ -1,5 +1,6 @@
 // src/services/environmentService.js
 // 📝 檔案功能用途：V9.2 大市氣候台與自動開關。綜合多維度數據判定氣候，並呼叫獨立的 aiAdvisorService 進行大腦決策。
+// 🚀 V9.2.1 升級：拔除不穩定之 CryptoPanic API，改用 6 路 RSS 矩陣，並將大盤死人開關極速化至 3 分鐘。
 
 const axios = require('axios');
 const Parser = require('rss-parser');
@@ -15,10 +16,15 @@ const parser = new Parser();
 
 // 狀態指針系統
 const MACRO_PROVIDERS = [{ name: 'COINGECKO', keyName: 'COINGECKO_API_KEY' }, { name: 'KUCOIN', keyName: null }];
+
+// 🌟 全 RSS 陣列：完全免費、免 API Key、高穩定性、極難 502
 const NEWS_PROVIDERS = [
-    { name: 'CRYPTOPANIC', type: 'API' }, 
     { name: 'COINTELEGRAPH', type: 'RSS', url: 'https://cointelegraph.com/rss' },
-    { name: 'DECRYPT', type: 'RSS', url: 'https://decrypt.co/feed' }
+    { name: 'DECRYPT', type: 'RSS', url: 'https://decrypt.co/feed' },
+    { name: 'COINDESK', type: 'RSS', url: 'https://www.coindesk.com/arc/outboundfeeds/rss/' },
+    { name: 'CRYPTOSLATE', type: 'RSS', url: 'https://cryptoslate.com/feed/' },
+    { name: 'NEWSBTC', type: 'RSS', url: 'https://www.newsbtc.com/feed/' },
+    { name: 'BITCOIN_COM', type: 'RSS', url: 'https://news.bitcoin.com/feed/' }
 ];
 
 let activeMacroIdx = 0;
@@ -111,20 +117,14 @@ class EnvironmentService {
             const provider = NEWS_PROVIDERS[(activeNewsIdx + i) % NEWS_PROVIDERS.length];
             try {
                 let titles = [];
-                if (provider.name === 'CRYPTOPANIC') {
-                    const apiKey = process.env.CRYPTOPANIC_API_KEY;
-                    if (!apiKey) throw new Error("Missing CryptoPanic Key");
-                    const res = await axios.get(`https://cryptopanic.com/api/v1/posts/?auth_token=${apiKey}&kind=news`, { timeout: 8000 });
-                    if (res.data?.results) titles = res.data.results.slice(0, 20).map(item => item.title);
-                } else {
-                    const res = await axios.get(provider.url, { timeout: 8000 });
-                    const feed = await parser.parseString(res.data);
-                    if (feed?.items) titles = feed.items.slice(0, 20).map(item => item.title);
-                }
+                // 🚀 已拔除 CryptoPanic，統一使用 RSS Parser，代碼更乾淨
+                const res = await axios.get(provider.url, { timeout: 8000 });
+                const feed = await parser.parseString(res.data);
+                if (feed?.items) titles = feed.items.slice(0, 20).map(item => item.title);
 
                 if (titles.length > 0) {
-                    activeNewsIdx = (activeNewsIdx + i) % NEWS_PROVIDERS.length;
-                    // 🚀 升級：加入 await 呼叫 Groq AI 進行情緒分析
+                    activeNewsIdx = (activeNewsIdx + i + 1) % NEWS_PROVIDERS.length;
+                    // 🚀 呼叫 Groq AI 進行情緒分析
                     return await this._analyzeTitles(titles);
                 }
             } catch (err) {
@@ -249,14 +249,15 @@ class EnvironmentService {
             if (!pendingStr) return;
 
             const pendingTime = parseInt(pendingStr, 10);
-            if (Date.now() - pendingTime >= 900000) { 
-                console.log(`💀 [Macro Failsafe] 15 分鐘未收到指揮官回覆，執行二次大盤評估...`);
+            // 🚀 關鍵修復：將大盤死人開關由 15 分鐘 (900000) 極速縮短至 3 分鐘 (180000)
+            if (Date.now() - pendingTime >= 180000) { 
+                console.log(`💀 [Macro Failsafe] 3 分鐘未收到指揮官回覆，執行二次大盤評估...`);
                 
                 const macro = await this._fetchMacroData();
                 await redis.del('macro_panic_pending'); 
 
                 if (macro.btcDrop <= -5.0 || macro.solDrop <= -8.0) {
-                    sendAdminAlert(`🚨 <b>【自動開關已觸發】</b>\n\n15 分鐘未收到指揮官回覆，且大市依然處於 BEAR_PANIC 恐慌狀態。\n\n🤖 <b>系統已接管控制權，正在自動執行全線強平！</b>`);
+                    sendAdminAlert(`🚨 <b>【自動開關已觸發】</b>\n\n3 分鐘未收到指揮官回覆，且大市依然處於 BEAR_PANIC 恐慌狀態。\n\n🤖 <b>系統已接管控制權，正在自動執行全線強平！</b>`);
                     
                     const { getPortfolio } = require('./portfolioService');
                     const { runSellPipeline } = require('./tradeService');
@@ -266,13 +267,13 @@ class EnvironmentService {
                         const lockKey = `sell_lock:${pos.mint_address}`;
                         const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                         if (acquired) {
-                            await runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, `🚨 15分鐘自動開關：大盤未見好轉，自動全平倉防禦`, 1.0)
+                            await runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, `🚨 3分鐘自動開關：大盤未見好轉，自動全平倉防禦`, 1.0)
                                 .finally(() => redis.del(lockKey));
                             await new Promise(r => setTimeout(r, 1000));
                         }
                     }
                 } else {
-                    sendAdminAlert(`✅ <b>【危機自然解除】</b>\n\n15 分鐘過去，大市跌幅已收斂。\n🤖 系統自動取消強平機制，維持正常運作。`);
+                    sendAdminAlert(`✅ <b>【危機自然解除】</b>\n\n3 分鐘過去，大市跌幅已收斂。\n🤖 系統自動取消強平機制，維持正常運作。`);
                 }
             }
         } catch (err) {}
