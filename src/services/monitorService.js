@@ -139,18 +139,20 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
 
     const pnlPct = ((currentPriceSol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
     const isHalfSold = pos.strategy_type?.includes('HALF_SOLD') || radarState.halfSellTriggered === 'true';
+    const isTrending = pos.strategy_type?.includes('TRENDING'); // 🚀 新增：判斷幣種
 
-    // 🧠 V9.2 讀取大腦戰略參數 (0 延遲 O(1))
-    const cache = cacheManager.getConfig();
-    const timeStopMins = cache.time_stop_mins || 30;
-    const timeStopTarget = cache.time_stop_target_pct || 15.0;
-    const stopLossLimit = cache.stop_loss_pct || -15.0;
+    // 🧠 V9.2 讀取大腦戰略參數 (精準區分 MEME 與 TRENDING)
+    const cache = cacheManager.getConfig(isTrending ? 'TRENDING' : 'MEME');
+    
+    const timeStopMins = cache.time_stop_mins || (isTrending ? 90 : 30);
+    const timeStopTarget = cache.time_stop_target_pct || (isTrending ? 5.0 : 15.0);
+    const stopLossLimit = cache.stop_loss_pct || (isTrending ? -20.0 : -25.0);
     
     // 🚀 [修復] 動態讀取追蹤止損的啟動點與回撤點
     const trailingTpTrigger = cache.trailing_tp_trigger || 50.0; 
-    const trailingPullback = cache.trailing_pullback || 20.0;
+    const trailingPullback = cache.trailing_pullback || (isTrending ? 10.0 : 20.0);
     
-    const tpLevel1 = cache.tp_level_1_pct || 50.0;
+    const tpLevel1 = cache.tp_level_1_pct || (isTrending ? 30.0 : 50.0);
     const tpLevel2 = cache.tp_level_2_pct || 100.0;
 
     let action = 'HOLD';
@@ -251,7 +253,6 @@ function startActiveSweeper() {
         
         const portfolio = getPortfolio();
         const now = Date.now();
-        const cache = cacheManager.getConfig();
 
         for (const pos of portfolio.positions) {
             if (!pos.created_at) continue;
@@ -263,25 +264,32 @@ function startActiveSweeper() {
             const isHalfSold = pos.strategy_type?.includes('HALF_SOLD');
             const isTrending = pos.strategy_type?.includes('TRENDING');
 
-            const timeStopMins = isTrending ? 1440 : (cache.time_stop_mins || 30);
-            const timeStopTarget = isTrending ? 5 : (cache.time_stop_target_pct || 15);
-            const zombieMins = isTrending ? 2880 : 120;
+            // 🚦 雙軌制核心 (精準讀取 RAM 快取，剷除所有 Hardcode)
+            const posCache = cacheManager.getConfig(isTrending ? 'TRENDING' : 'MEME');
+            
+            const timeStopMins = posCache.time_stop_mins || (isTrending ? 90 : 30);
+            const timeStopTarget = posCache.time_stop_target_pct || (isTrending ? 5.0 : 15.0);
+            
+            // 🧟 殭屍防線：Time-Stop 的 4 倍時間 (Meme: 預設 120m)
+            const zombieMins = timeStopMins * 4; 
 
             let shouldSell = false;
             let reason = '';
 
+            // ⏱️ 第一關：常規時間止損 (Meme 與 Trending 均適用)
             if (ageMins >= timeStopMins) {
                 if (pnlPct >= timeStopTarget) {
-                    console.log(`🛡️ [Sweeper] 攔截！${pos.token_symbol} 實時已達標 (+${pnlPct.toFixed(2)}%)，交由常規雷達止盈！`);
+                    console.log(`🛡️ [Sweeper] 攔截！${pos.token_symbol} 實時已達標 (+${pnlPct.toFixed(2)}%)，收回屠刀，交由常規雷達止盈！`);
                 } else {
                     shouldSell = true;
-                    reason = `🧹 [主動清道夫] ${isTrending ? '藍籌' : 'Meme'} 滯留過久 (${ageMins.toFixed(0)} 分鐘未達 +${timeStopTarget}%)，無差別清倉！`;
+                    reason = `🧹 [主動清道夫] ${isTrending ? 'Top 100 熱門幣' : 'Meme'} 滯留過久 (${ageMins.toFixed(0)} 分鐘未達 +${timeStopTarget}%)，無差別清倉！`;
                 }
             }
 
-            if (!shouldSell && ageMins >= zombieMins && !isHalfSold) {
+            // 🧟 第二關：殭屍防線 (🚀 V9.2 修正：加入 !isTrending，只掃蕩新 Meme 幣)
+            if (!shouldSell && !isTrending && ageMins >= zombieMins && !isHalfSold) {
                 shouldSell = true;
-                reason = `🧟 [主動清道夫] ${isTrending ? '藍籌' : 'Meme'} 殭屍幣超時 (${ageMins.toFixed(0)} 分鐘未翻本)，強制火化拔線！`;
+                reason = `🧟 [主動清道夫] Meme 殭屍幣超時 (${ageMins.toFixed(0)} 分鐘未翻本)，強制火化拔線！`;
             }
 
             if (shouldSell) {
