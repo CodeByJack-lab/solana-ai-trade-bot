@@ -1,6 +1,7 @@
 // src/services/securityGuard.js
 // 📝 檔案功能用途：V9.2 100分量化安檢中樞。實裝「懶漢判定法」保護 RPC、防 429 智能重試、原生 RPC Top 10 籌碼分佈檢查，以及動態防偽名單。
 // 🚀 V9.2.3 升級：新增 0 成本 Metaplex Metadata isMutable 掃描 (防換圖騙局)。
+// 🛡️ V9.2.4 升級：實裝終極 OFI 裝甲 (硬截斷 OFI 缺失、女巫對稱刷單與異常換手率)，拒絕 AI 幻覺。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -236,16 +237,41 @@ class SecurityGuard {
             return { numeric_score: 0, isSafe: false, reason: `🛑 假池/貔貅攔截: $10萬以上流動性但交易量不足 $${deadPoolVolReq}`, marketData };
         }
 
-        // 🛑 [0 成本] 活人真實度與貔貅檢測
-        const totalTxs5m = marketData.buys5m + marketData.sells5m;
-        if (totalTxs5m > 0) {
-            if (marketData.buys5m > 10 && marketData.sells5m === 0) {
-                return { numeric_score: 0, isSafe: false, reason: `🛑 貔貅攔截: 完全沒有賣單 (Buy:${marketData.buys5m}, Sell:0)`, marketData };
-            }
-            const avgTrade = marketData.volume5m / totalTxs5m;
-            if (totalTxs5m >= 100 && avgTrade < 15) {
-                return { numeric_score: 0, isSafe: false, reason: `🛑 刷量攔截: 異常高頻但單筆均價極低 ($${avgTrade.toFixed(2)})`, marketData };
-            }
+        // ==========================================
+        // 🛡️ [0 成本] 終極 OFI 裝甲與活人真實度檢測
+        // ==========================================
+        const buys = marketData.buys5m;
+        const sells = marketData.sells5m;
+        const totalTxs5m = buys + sells;
+
+        // 1. OFI 缺失 / 死水攔截
+        if (totalTxs5m < 5) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 OFI 缺失攔截: 5分鐘內真實交易極低 (Buys:${buys}, Sells:${sells})，無法計算有效訂單流，拒絕盲狙`, marketData };
+        }
+
+        // 2. 貔貅盤攔截
+        if (buys > 10 && sells === 0) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 貔貅攔截: 完全沒有賣單 (Buy:${buys}, Sell:0)`, marketData };
+        }
+
+        // 3. 納米刷量機器人攔截
+        const avgTradeSize = marketData.volume5m / totalTxs5m;
+        if (totalTxs5m >= 100 && avgTradeSize < 15) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 刷量攔截: 異常高頻但單筆均價極低 ($${avgTradeSize.toFixed(2)})`, marketData };
+        }
+
+        // 4. 女巫攻擊 / 完美對稱刷量攔截 (Sybil Shield)
+        const buyRatio = buys / totalTxs5m;
+        const ofiRatio = (buys - sells) / totalTxs5m;
+        
+        // 如果交易大於 30 筆，且買賣單比例落在 45% - 55% 之間，極高機率是腳本左右手互刷
+        if (totalTxs5m > 30 && buyRatio > 0.45 && buyRatio < 0.55) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 女巫刷量攔截: 買賣極度對稱 (Buys:${buys}, Sells:${sells}, Ratio:${(buyRatio*100).toFixed(1)}%)，判定為腳本對沖`, marketData };
+        }
+
+        // 5. 換手率異常防禦 (資金空轉刷量)
+        if (marketData.liquidity > 0 && (marketData.volume5m / marketData.liquidity) > 3 && Math.abs(ofiRatio) < 0.05) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 換手異常攔截: 資金空轉刷量 (Vol/Liq > 3倍) 且 OFI 趨近零失衡`, marketData };
         }
 
         // 🌟 [0 成本] 終極實體防偽 (從 DB Cache 讀取)
@@ -307,14 +333,12 @@ class SecurityGuard {
 
         if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; 
 
+        // 經過上面嚴格嘅 OFI 裝甲，嚟到呢度嘅必定係真實交易
         if (totalTxs5m > 0) {
-            const volOFI = (marketData.buys5m - marketData.sells5m) / totalTxs5m;
-            const countRatio = marketData.sells5m > 0 ? (marketData.buys5m / marketData.sells5m) : 2;
-            const avgTrade = marketData.volume5m / totalTxs5m;
+            const volOFI = (buys - sells) / totalTxs5m;
+            const countRatio = sells > 0 ? (buys / sells) : 2;
 
-            if (totalTxs5m >= 20 && avgTrade < 20) {
-                reasons.push('疑似納米刷量機器人 (動能無效)');
-            } else if (volOFI > 0.3 && countRatio > 1.5) {
+            if (volOFI > 0.3 && countRatio > 1.5) {
                 momentumScore += 15;
                 reasons.push(`OFI 動能強勁`);
             }
