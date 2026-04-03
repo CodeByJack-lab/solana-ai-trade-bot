@@ -2,6 +2,7 @@
 // 📝 檔案功能用途：V9.2.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
 // 🛡️ 內建防幻覺機制：當 DB 讀取失敗時，自動降級至純英文後備底稿。
 // 🛠️ 包含最新加入的新聞情緒分析師 (news_sentiment_analyst) 後備底稿。
+// 🚀 V9.2.5 升級：嚴格強制啟動校驗 (Strict Startup Verification) 與深度快取狀態檢查。
 
 const { supabase } = require('../config/supabase');
 
@@ -58,12 +59,15 @@ class CacheManager {
     }
 
     /**
-     * 🚀 初始化 RAM 快取
+     * 🚀 初始化 RAM 快取 (保證啟動時強制抓取與驗證)
      */
     async init() {
-        console.log('🧠 [Cache Manager] 啟動中...');
+        console.log('🧠 [Cache Manager] 系統大腦啟動中，準備與 Supabase 進行神經同步...');
+        
+        // 強制等待第一次同步完成
         await this.refreshFromDB();
         
+        // 每 5 分鐘自動背景同步
         setInterval(() => this.refreshFromDB(), 5 * 60 * 1000); 
 
         // ⚡ 監聽 bot_prompts 表格熱更新
@@ -87,21 +91,25 @@ class CacheManager {
     }
 
     /**
-     * 🔄 同步資料庫數據至 RAM
+     * 🔄 同步資料庫數據至 RAM (包含嚴格 Error Checking 與深度驗證)
      */
     async refreshFromDB() {
         try {
+            console.log('📡 [Cache Manager] 正在向 Supabase 請求最新數據...');
+
             // 1. 同步戰略參數
-            const { data: aiParams } = await supabase.from('ai_strategy_params').select('*').in('id', [2, 3]);
-            if (aiParams) {
+            const { data: aiParams, error: paramError } = await supabase.from('ai_strategy_params').select('*').in('id', [2, 3]);
+            if (paramError) throw new Error(`戰略參數讀取失敗: ${paramError.message}`);
+            if (aiParams && aiParams.length > 0) {
                 aiParams.forEach(row => {
                     const key = row.id === 2 ? 'MEME' : 'TRENDING';
                     this.cache.strategies[key] = { ...this.cache.strategies[key], ...row };
                 });
             }
 
-            // 2. 同步白名單
-            const { data: tokensData } = await supabase.from('verified_tokens').select('token_symbol, mint_address').eq('is_active', true);
+            // 2. 同步黑白名單 (終極防偽盾)
+            const { data: tokensData, error: tokenError } = await supabase.from('verified_tokens').select('token_symbol, mint_address').eq('is_active', true);
+            if (tokenError) throw new Error(`防偽名單讀取失敗: ${tokenError.message}`);
             if (tokensData) {
                 const tokenDict = {};
                 tokensData.forEach(row => { tokenDict[row.token_symbol] = row.mint_address; });
@@ -109,8 +117,11 @@ class CacheManager {
             }
 
             // 3. 🎯 同步 AI 劇本 (對準 bot_prompts)
-            const { data: promptsData } = await supabase.from('bot_prompts').select('*');
+            const { data: promptsData, error: promptError } = await supabase.from('bot_prompts').select('*');
+            if (promptError) throw new Error(`AI 劇本讀取失敗: ${promptError.message}`);
             if (promptsData) {
+                // 清空舊快取，確保被刪除的 Prompt 不會殘留
+                this.cache.prompts.clear(); 
                 promptsData.forEach(p => {
                     this.cache.prompts.set(p.prompt_id, {
                         provider: p.provider || 'GROQ',
@@ -118,11 +129,39 @@ class CacheManager {
                         content: p.content
                     });
                 });
-                console.log(`✅ [Cache Manager] 已從 DB 載入 ${promptsData.length} 條劇本。`);
             }
+
+            // 🔍 終極校驗：印出 RAM 快取真實狀態，證明成功 Cache 落嚟
+            this._verifyCacheState();
+
         } catch (err) {
-            console.error('⚠️ [Cache Manager] 同步 DB 失敗:', err.message);
+            console.error('\n❌ [Cache Manager Fatal Error] 無法與 Supabase 同步數據！');
+            console.error('⚠️ 詳細原因:', err.message);
+            console.error('⚠️ 系統將繼續使用上一次成功的 RAM 數據或本地 Fallback 底稿維持運作！\n');
         }
+    }
+
+    /**
+     * 🔍 深度檢查 RAM 狀態 (證明 DB 數據真係入咗屋)
+     */
+    _verifyCacheState() {
+        const memeKeys = Object.keys(this.cache.strategies.MEME).length;
+        const trendingKeys = Object.keys(this.cache.strategies.TRENDING).length;
+        const tokenCount = Object.keys(this.cache.verified_tokens).length;
+        const promptCount = this.cache.prompts.size;
+
+        console.log(`\n✅ [Cache Verification] RAM 快取狀態核實完畢:`);
+        console.log(`   🔸 戰略參數: MEME (${memeKeys} 參數), TRENDING (${trendingKeys} 參數)`);
+        console.log(`   🔸 防偽名單: 成功防護 ${tokenCount} 個熱門/巨頭代幣名`);
+        console.log(`   🔸 AI 劇本 : 成功裝載 ${promptCount} 條自訂 Prompt`);
+
+        if (tokenCount === 0) {
+            console.warn(`   ⚠️ [警告] 防偽名單為空，請確認 Database 是否已被清空！`);
+        }
+        if (promptCount === 0) {
+            console.warn(`   ⚠️ [警告] 未能從 DB 載入任何 AI 劇本，將全面依賴本地 Fallback 英文底稿！`);
+        }
+        console.log('--------------------------------------------------\n');
     }
 
     // 🚀 核心：讀取戰略參數 (支援新舊兩種叫法，防止其他 Service 報錯)
