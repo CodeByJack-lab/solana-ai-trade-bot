@@ -2,6 +2,7 @@
 // 📝 檔案功能用途：V9.2 100分量化安檢中樞。實裝「懶漢判定法」保護 RPC、防 429 智能重試、原生 RPC Top 10 籌碼分佈檢查，以及動態防偽名單。
 // 🚀 V9.2.3 升級：新增 0 成本 Metaplex Metadata isMutable 掃描 (防換圖騙局)。
 // 🛡️ V9.2.4 升級：實裝終極 OFI 裝甲 (硬截斷 OFI 缺失、女巫對稱刷單與異常換手率)，拒絕 AI 幻覺。
+// 🐛 V9.2.5 修正：修復防偽名單讀取路徑，正確對接 cacheManager.getVerifiedTokens()。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -210,8 +211,6 @@ class SecurityGuard {
      * 🎯 V9.2 量化 100 分核心引擎 (懶漢判定法：先快篩，後 RPC)
      */
     async calculateQuantScore(mint, type = 'NEWBORN') {
-        const cache = cacheManager.getConfig();
-        
         // 🧠 動態讀取 Database 參數
         const dbParams = cacheManager.getStrategy(type);
 
@@ -274,8 +273,8 @@ class SecurityGuard {
             return { numeric_score: 0, isSafe: false, reason: `🛑 換手異常攔截: 資金空轉刷量 (Vol/Liq > 3倍) 且 OFI 趨近零失衡`, marketData };
         }
 
-        // 🌟 [0 成本] 終極實體防偽 (從 DB Cache 讀取)
-        const VERIFIED_TOKENS = cache.verified_tokens || {};
+        // 🌟 [0 成本] 終極實體防偽 (精準調用 getVerifiedTokens)
+        const VERIFIED_TOKENS = cacheManager.getVerifiedTokens();
         if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) {
             console.log(`🛡️ [Fake Shield] 觸發終極防偽！秒殺假冒 ${upperSymbol} (${mint})`);
             return { numeric_score: 0, isSafe: false, reason: `🛑 終極防偽攔截: 假冒 ${upperSymbol} 幣`, marketData };
