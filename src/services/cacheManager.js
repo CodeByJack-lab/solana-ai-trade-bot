@@ -2,7 +2,7 @@
 // 📝 檔案功能用途：V9.2.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
 // 🛡️ 內建防幻覺機制：當 DB 讀取失敗時，自動降級至純英文後備底稿。
 // 🛠️ 包含最新加入的新聞情緒分析師 (news_sentiment_analyst) 後備底稿。
-// 🚀 V9.2.5 升級：嚴格強制啟動校驗 (Strict Startup Verification) 與深度快取狀態檢查。
+// 🚀 V9.2.6 升級：全域真·熱更新 (Realtime Hot Update)。毫秒級監聽 Prompts、防偽名單與戰略參數。
 
 const { supabase } = require('../config/supabase');
 
@@ -67,25 +67,45 @@ class CacheManager {
         // 強制等待第一次同步完成
         await this.refreshFromDB();
         
-        // 每 5 分鐘自動背景同步
+        // 每 5 分鐘自動背景同步 (兜底保險)
         setInterval(() => this.refreshFromDB(), 5 * 60 * 1000); 
 
-        // ⚡ 監聽 bot_prompts 表格熱更新
-        supabase.channel('bot_prompts_realtime')
-            .on('postgres_changes', { event: '*', schema: 'public', table: 'bot_prompts' }, (payload) => {
-                const pId = payload.new?.prompt_id || payload.old?.prompt_id;
-                if (payload.eventType === 'DELETE') {
-                    this.cache.prompts.delete(pId);
-                } else {
-                    const p = payload.new;
-                    this.cache.prompts.set(pId, {
-                        provider: p.provider || 'GROQ',
-                        models: [p.model_main, p.model_backup_1, p.model_backup_2].filter(m => m),
-                        content: p.content
-                    });
-                }
-                console.log(`🔄 [Cache Manager] AI 劇本 [${pId}] 已同步熱更新！`);
-            }).subscribe();
+        // ⚡ 終極全域熱更新監聽 (Realtime Hot Update)
+        const systemChannel = supabase.channel('system_realtime_updates');
+
+        // 1. 監聽 AI 劇本變更
+        systemChannel.on('postgres_changes', { event: '*', schema: 'public', table: 'bot_prompts' }, (payload) => {
+            console.log(`⚡ [Hot Update] 偵測到 bot_prompts 變更！正在熱重載 AI 劇本...`);
+            const pId = payload.new?.prompt_id || payload.old?.prompt_id;
+            if (payload.eventType === 'DELETE') {
+                this.cache.prompts.delete(pId);
+            } else {
+                const p = payload.new;
+                this.cache.prompts.set(pId, {
+                    provider: p.provider || 'GROQ',
+                    models: [p.model_main, p.model_backup_1, p.model_backup_2].filter(m => m),
+                    content: p.content
+                });
+            }
+        });
+
+        // 2. 監聽防偽名單 (黑/白名單) 變更
+        systemChannel.on('postgres_changes', { event: '*', schema: 'public', table: 'verified_tokens' }, (payload) => {
+            console.log(`⚡ [Hot Update] 偵測到 verified_tokens 變更！正在熱重載防偽裝甲...`);
+            this.refreshFromDB(); // 觸發全域刷新以確保名單一致性
+        });
+
+        // 3. 監聽戰略參數 (止盈止損、流動性門檻等) 變更
+        systemChannel.on('postgres_changes', { event: '*', schema: 'public', table: 'ai_strategy_params' }, (payload) => {
+            console.log(`⚡ [Hot Update] 偵測到 ai_strategy_params 變更！正在熱重載戰略參數...`);
+            this.refreshFromDB(); // 觸發全域刷新以確保策略一致性
+        });
+
+        systemChannel.subscribe((status) => {
+            if (status === 'SUBSCRIBED') {
+                console.log('🔗 [Cache Manager] Realtime Websocket 已成功連線，全域熱更新啟動！');
+            }
+        });
             
         this.isLoaded = true;
     }
