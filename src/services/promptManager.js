@@ -1,5 +1,6 @@
 // src/services/promptManager.js
 // 📝 檔案功能用途：AI 劇本記憶體庫。負責載入 DB 提示詞與「多級後備模型輪替配置」。內建 V9.2 英文思維鏈 (Chain-of-Thought) 防崩潰底稿。
+// 🛠️ V9.2.7 修正：加入深度 Debug 日誌，精準識別 DB 讀取狀態，徹底解決「大腦分裂」與「永遠讀 Code」之謎。
 
 const { supabase } = require('../config/supabase');
 
@@ -54,28 +55,38 @@ class PromptManager {
     }
 
     async init() {
-        console.log('🧠 [Prompt Manager] 正在將 AI 劇本與模型輪替配置載入 RAM 緩存...');
+        console.log('🧠 [Prompt Manager] 正在向 Supabase 請求 AI 劇本與模型配置...');
         const { data, error } = await supabase.from('bot_prompts').select('*');
         
-        if (!error && data) {
+        if (error) {
+            console.error(`❌ [Prompt Manager] 讀取 Supabase 發生錯誤: ${error.message}`);
+        } else if (data && data.length === 0) {
+            console.warn(`⚠️ [Prompt Manager] 讀取成功，但 bot_prompts 內無數據！(請檢查表是否為空，或是否被 RLS 權限阻擋)`);
+        } else if (data) {
+            this.cache.clear();
             data.forEach(p => {
-                this.cache.set(p.prompt_id, {
-                    provider: p.provider || 'GROQ',
-                    models: [p.model_main, p.model_backup_1, p.model_backup_2].filter(m => m), 
-                    content: p.content
-                });
+                const cleanId = (p.prompt_id || '').trim();
+                if (cleanId) {
+                    this.cache.set(cleanId, {
+                        provider: p.provider || 'GROQ',
+                        models: [p.model_main, p.model_backup_1, p.model_backup_2].filter(m => m), 
+                        content: p.content
+                    });
+                }
             });
-            console.log(`✅ [Prompt Manager] 成功從 DB 載入 ${data.length} 個 AI 劇本與模型配置！`);
-        } else {
-            console.error(`⚠️ [Prompt Manager] 載入劇本失敗，將依賴內建 Fallback 陣列運作。`);
+            console.log(`✅ [Prompt Manager] 成功從 DB 載入 ${this.cache.size} 個 AI 劇本與模型配置！`);
         }
 
+        // 熱更新監聽 (需確保 Supabase 後台 Replication 已開啟)
         supabase.channel('bot_prompts_hot_swap')
             .on('postgres_changes', { event: '*', schema: 'public', table: 'bot_prompts' }, (payload) => {
-                    const promptId = payload.new?.prompt_id || payload.old?.prompt_id;
-                    console.log(`\n🔄 [Hot-Swap] 偵測到 AI 劇本 [${promptId}] 更新，RAM 記憶體已同步刷新！`);
-                    if (payload.eventType === 'DELETE') this.cache.delete(promptId);
-                    else {
+                    const promptId = (payload.new?.prompt_id || payload.old?.prompt_id || '').trim();
+                    if (!promptId) return;
+                    
+                    console.log(`\n🔄 [Hot-Swap] 偵測到 AI 劇本 [${promptId}] 於 DB 更新，RAM 記憶體已同步刷新！`);
+                    if (payload.eventType === 'DELETE') {
+                        this.cache.delete(promptId);
+                    } else {
                         const p = payload.new;
                         this.cache.set(promptId, {
                             provider: p.provider || 'GROQ',
@@ -84,21 +95,45 @@ class PromptManager {
                         });
                     }
                 }
-            ).subscribe();
+            ).subscribe((status) => {
+                if (status === 'SUBSCRIBED') {
+                    console.log('🔗 [Prompt Manager] 劇本熱更新 Websocket 已成功連線！');
+                }
+            });
             
         this.isInitialized = true;
     }
 
     getPromptConfig(promptId, dataObj = {}) {
-        const config = this.cache.get(promptId) || this.fallbackConfigs[promptId];
-        if (!config) return { provider: 'UNKNOWN', models: [], parsedPrompt: `{"decision": "VETO", "reason": "找不到 Prompt: ${promptId}"}` };
+        const cleanId = (promptId || '').trim();
+        let isUsingDB = true;
+        
+        let config = this.cache.get(cleanId);
+        
+        // 🛡️ 如果 DB 搵唔到 (例如斷網、串錯字、無開 RLS)，跌落 Fallback 底稿
+        if (!config) {
+            isUsingDB = false;
+            config = this.fallbackConfigs[cleanId];
+            
+            if (!config) {
+                console.error(`🚨 [Prompt Manager] 嚴重錯誤：完全找不到劇本 [${cleanId}]！`);
+                return { provider: 'UNKNOWN', models: [], parsedPrompt: `{"decision": "VETO", "reason": "找不到 Prompt: ${cleanId}"}` };
+            }
+        }
+        
+        // 🔦 高調 Debug 照妖鏡：印出到底係用緊 DB 定 Code
+        console.log(`📜 [Prompt Request] 索取劇本 [${cleanId}] -> 來源: ${isUsingDB ? '☁️ 雲端 DB (Supabase)' : '💻 本地 Code (Fallback)'}`);
         
         let parsedContent = config.content;
         for (const [key, value] of Object.entries(dataObj)) {
             parsedContent = parsedContent.replace(new RegExp(`{{${key}}}`, 'g'), value !== undefined && value !== null ? value : 'UNKNOWN');
         }
 
-        return { provider: config.provider, models: config.models.length > 0 ? config.models : this.fallbackConfigs[promptId]?.models || ['llama-3.3-70b-versatile'], parsedPrompt: parsedContent };
+        return { 
+            provider: config.provider, 
+            models: config.models.length > 0 ? config.models : (this.fallbackConfigs[cleanId]?.models || ['llama-3.3-70b-versatile']), 
+            parsedPrompt: parsedContent 
+        };
     }
 }
 
