@@ -1,6 +1,7 @@
 // src/services/sourceAggregator.js
 // 📝 檔案功能用途：V9.2 多路冗餘數據源聚合器。三路 WebSocket 監聽 + 15秒極速緩衝池 + 5分鐘壽命防塞車機制 (去 Birdeye 化)。
 // 🚀 V9.2.3 升級：加入 1nc1nerator 焚化爐監聽，捕捉 LP Burn 訊號極速搶跑。
+// 🛠️ V9.2.4 升級：修復 429 靜默吞幣 Bug，並放寬 Pump.fun 畢業盤健康比例 (5% - 150%)。
 
 const WebSocket = require('ws');
 const axios = require('axios');
@@ -186,7 +187,8 @@ class SourceAggregator {
                     if (liquidity >= 5000) {
                         if (fdv > 0) {
                             const ratio = liquidity / fdv;
-                            if (ratio >= 0.05 && ratio <= 0.18) lpRatioPass = true;
+                            // 🛠️ 修正：放寬 Pump.fun 畢業盤的健康比例 (大於 5% 且小於 150% 容錯)
+                            if (ratio >= 0.05 && ratio <= 1.50) lpRatioPass = true;
                         } else {
                             lpRatioPass = true; 
                         }
@@ -200,6 +202,10 @@ class SourceAggregator {
                 }
             }
         } catch (err) {
+            // 🚨 修正：加入高調警告，不再死得不明不白
+            const errMsg = err.response?.status === 429 ? '觸發 429 限制' : err.message;
+            console.warn(`⚠️ [Aggregator] 查價失敗 (${errMsg})，將 ${mintsToProcess.length} 隻幣退回緩衝池...`);
+            
             // 查價失敗，放回 Buffer 等下次再試（需帶上原本的 timestamp）
             mintsToProcess.forEach(([m, ts]) => {
                 if (!this.mintBuffer.has(m)) this.mintBuffer.set(m, ts);
