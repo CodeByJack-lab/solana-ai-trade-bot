@@ -1,5 +1,6 @@
 // src/jobs/trendingJob.js
 // 📝 檔案功能用途：V9.1 數學雷達排程器。動態讀取 DB 的 V/L 階梯比例，利用 DexScreener 批量查價，精確喚醒 100 分量化漏斗與大腦分流器。
+// 🛠️ 修正版：加入 15秒 Timeout 放寬及 3 次智能防 429 重試機制，徹底解決批次查價失敗問題。
 
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
@@ -68,29 +69,49 @@ const trendingJob = {
             
             for (let i = 0; i < mintsArray.length; i += 30) {
                 const batch = mintsArray.slice(i, i + 30);
-                try {
-                    const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`, { timeout: 5000 });
-                    if (res.data && res.data.pairs) {
-                        for (const pair of res.data.pairs) {
-                            if (pair.chainId !== 'solana') continue;
-                            const mint = pair.baseToken.address;
-                            // 儲存流動性最高嗰個池嘅數據
-                            if (!batchMarketData[mint] || (pair.liquidity?.usd > batchMarketData[mint].liquidity)) {
-                                batchMarketData[mint] = {
-                                    h1: parseFloat(pair.priceChange?.h1) || 0,
-                                    volume5m: pair.volume?.m5 || 0,
-                                    liquidity: pair.liquidity?.usd || 0,
-                                    buys5m: pair.txns?.m5?.buys || 0,
-                                    sells5m: pair.txns?.m5?.sells || 0
-                                };
+                let success = false;
+                let retry = 0;
+                
+                while (!success && retry < 3) {
+                    try {
+                        // 🚀 核心修改：放寬 Timeout 至 15 秒 (15000ms)
+                        const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${batch.join(',')}`, { timeout: 15000 });
+                        
+                        if (res.data && res.data.pairs) {
+                            for (const pair of res.data.pairs) {
+                                if (pair.chainId !== 'solana') continue;
+                                const mint = pair.baseToken.address;
+                                // 儲存流動性最高嗰個池嘅數據
+                                if (!batchMarketData[mint] || (pair.liquidity?.usd > batchMarketData[mint].liquidity)) {
+                                    batchMarketData[mint] = {
+                                        h1: parseFloat(pair.priceChange?.h1) || 0,
+                                        volume5m: pair.volume?.m5 || 0,
+                                        liquidity: pair.liquidity?.usd || 0,
+                                        buys5m: pair.txns?.m5?.buys || 0,
+                                        sells5m: pair.txns?.m5?.sells || 0
+                                    };
+                                }
                             }
                         }
+                        success = true; // 成功獲取，跳出 Retry 迴圈
+                    } catch (err) {
+                        retry++;
+                        const is429 = err.response?.status === 429 || err.message.includes('429');
+                        console.warn(`⚠️ [Trending] 批次查價失敗 (嘗試 ${retry}/3): ${err.message}`);
+                        
+                        if (is429) {
+                            // 如果中咗 429，就停耐啲 (5-10秒)
+                            const penalty = Math.floor(Math.random() * 5000) + 5000;
+                            await new Promise(r => setTimeout(r, penalty));
+                        } else {
+                            // 普通 Timeout，停 2 秒再試
+                            await new Promise(r => setTimeout(r, 2000));
+                        }
                     }
-                } catch (err) {
-                    console.warn(`⚠️ [Trending] 批次查價失敗: ${err.message}`);
                 }
-                // 每次查完停 1 秒，防封鎖
-                await new Promise(r => setTimeout(r, 1000));
+                
+                // 每次查完一個 Batch (30隻幣) 停 1.5 秒，防封鎖
+                await new Promise(r => setTimeout(r, 1500));
             }
 
             let triggeredCount = 0;
