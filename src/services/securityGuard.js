@@ -1,9 +1,6 @@
 // src/services/securityGuard.js
 // 📝 檔案功能用途：V9.2 100分量化安檢中樞。實裝「懶漢判定法」保護 RPC、防 429 智能重試、原生 RPC Top 10 籌碼分佈檢查，以及動態防偽名單。
-// 🚀 V9.2.3 升級：新增 0 成本 Metaplex Metadata isMutable 掃描 (防換圖騙局)。
-// 🛡️ V9.2.4 升級：實裝終極 OFI 裝甲 (硬截斷 OFI 缺失、女巫對稱刷單與異常換手率)，拒絕 AI 幻覺。
-// 🐛 V9.2.5 修正：修復防偽名單讀取路徑，正確對接 cacheManager.getVerifiedTokens()。
-// 🗡️ V9.2.6 升級：收緊狗莊刷量攔截閾值 (AvgTrade < $20) 及加入強賣壓惡劣 OFI 強制處決，徹底封殺洗盤。
+// 🚀 V9.2.6 升級：實裝終極 OFI 裝甲 (硬截斷 OFI 缺失、微型洗盤、女巫對稱刷單與異常換手率)，拒絕狗莊與 AI 幻覺。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -20,7 +17,6 @@ class SecurityGuard {
         const fullText = `${symbol} ${name} ${description}`.toLowerCase();
         let result = { isFatal: false, safetyPenalty: 0, fomoPenalty: 0, requireAuthCheck: false, requireLpCheck: false, reasons: [] };
 
-        // 1. 空投/免費 (Airdrop/Promo) -> 直接封殺
         const airdropPatterns = [/free mint/i, /free claim/i, /airdrop/i, /claim now/i, /connect wallet/i];
         for (const p of airdropPatterns) {
             if (p.test(fullText)) {
@@ -30,13 +26,11 @@ class SecurityGuard {
             }
         }
 
-        // 假鎖定聲稱 -> 必須觸發鏈上 LP 驗證
         if (/lp locked/i.test(fullText) || /burned lp/i.test(fullText)) {
             result.requireLpCheck = true;
             result.reasons.push('聲稱鎖定 LP (需鏈上核實)');
         }
 
-        // 2. 供應分配/私募 (Supply/Allocation) -> 扣安全分 30 分
         const allocationPatterns = [/presale/i, /private sale/i, /team token/i, /marketing wallet/i, /seed/i];
         for (const p of allocationPatterns) {
             if (p.test(fullText)) {
@@ -46,7 +40,6 @@ class SecurityGuard {
             }
         }
 
-        // 3. 權限控制 (Authority Control) -> 觸發深層權限檢查
         const authorityPatterns = [/mint authority/i, /freeze authority/i, /update authority/i, /we keep control/i];
         for (const p of authorityPatterns) {
             if (p.test(fullText)) {
@@ -55,7 +48,6 @@ class SecurityGuard {
             }
         }
 
-        // 4. FOMO / 情緒誘騙 (FOMO Marketing) -> 扣動能分 20 分
         const fomoPatterns = [/100x/i, /1000x/i, /to the moon/i, /guaranteed profit/i, /🚀/];
         let hasFomo = false;
         for (const p of fomoPatterns) {
@@ -111,7 +103,7 @@ class SecurityGuard {
     }
 
     /**
-     * 🛡️ 原生 RPC 權限與 Metadata 審計 (0 成本、防隱形稅、防換圖)
+     * 🛡️ 原生 RPC 權限與 Metadata 審計
      */
     async _checkContractSafety(mint, requireAuthCheck) {
         try {
@@ -121,7 +113,6 @@ class SecurityGuard {
             
             if (!info) return { isSafe: false, isMutable: false };
             
-            // 1. 防隱形抽水：檢查 Token-2022 Transfer Fee
             const extensions = info.extensions || [];
             const hasTransferFee = extensions.some(ext => ext.extension === 'transferFeeConfig');
             if (hasTransferFee) {
@@ -129,16 +120,13 @@ class SecurityGuard {
                 return { isSafe: false, isMutable: false };
             }
 
-            // 2. 檢查基本鑄幣/凍結權限
             if (info.mintAuthority || (requireAuthCheck && info.freezeAuthority)) {
                 return { isSafe: false, isMutable: false };
             }
 
-            // 🌟 3. 終極防禦：零成本讀取 Metaplex Metadata 檢查 isMutable
             let isMutable = false;
             try {
                 const metaplexProgramId = new PublicKey('metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s');
-                // 找出 Metadata 的 PDA (Program Derived Address)
                 const [metadataPDA] = PublicKey.findProgramAddressSync(
                     [Buffer.from('metadata'), metaplexProgramId.toBuffer(), mintPubkey.toBuffer()],
                     metaplexProgramId
@@ -147,21 +135,19 @@ class SecurityGuard {
                 const metadataAcc = await connection.getAccountInfo(metadataPDA);
                 
                 if (metadataAcc && metadataAcc.data && metadataAcc.data[0] === 4) {
-                    // 極速 Buffer 解析 (無視變長字串，精準定位 isMutable Byte)
-                    let offset = 1 + 32 + 32; // Key(1) + UpdateAuthority(32) + Mint(32)
+                    let offset = 1 + 32 + 32; 
                     const nameLen = metadataAcc.data.readUInt32LE(offset); offset += 4 + nameLen;
                     const symbolLen = metadataAcc.data.readUInt32LE(offset); offset += 4 + symbolLen;
                     const uriLen = metadataAcc.data.readUInt32LE(offset); offset += 4 + uriLen;
-                    offset += 2; // SellerFeeBasisPoints
+                    offset += 2; 
                     
                     const hasCreators = metadataAcc.data.readUInt8(offset); offset += 1;
                     if (hasCreators === 1) {
                         const creatorsLen = metadataAcc.data.readUInt32LE(offset); 
-                        offset += 4 + (creatorsLen * 34); // Creator Address(32) + Verified(1) + Share(1)
+                        offset += 4 + (creatorsLen * 34); 
                     }
-                    offset += 1; // PrimarySaleHappened
+                    offset += 1; 
                     
-                    // 🎯 拿取 isMutable 旗標 (1 = true, 0 = false)
                     isMutable = metadataAcc.data.readUInt8(offset) === 1;
                 }
             } catch (metaErr) {
@@ -175,7 +161,7 @@ class SecurityGuard {
     }
 
     /**
-     * 🦅 原生 RPC 籌碼分佈探測 (取代 Birdeye)
+     * 🦅 原生 RPC 籌碼分佈探測
      */
     async _checkTop10Holders(mint) {
         try {
@@ -209,10 +195,9 @@ class SecurityGuard {
     }
 
     /**
-     * 🎯 V9.2 量化 100 分核心引擎 (懶漢判定法：先快篩，後 RPC)
+     * 🎯 V9.2 量化 100 分核心引擎
      */
     async calculateQuantScore(mint, type = 'NEWBORN') {
-        // 🧠 動態讀取 Database 參數
         const dbParams = cacheManager.getStrategy(type);
 
         const marketData = await this._fetchMarketData(mint);
@@ -220,18 +205,14 @@ class SecurityGuard {
 
         const upperSymbol = marketData.symbol.toUpperCase();
 
-        // 🛑 [0 成本] 穩定幣攔截
         if (upperSymbol.startsWith('USD')) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 穩定幣攔截: 系統不交易 ${upperSymbol} 系列代幣`, marketData };
         }
 
-        // 🛑 [0 成本] 絕對流動性底線 (讀取 DB)
         if (marketData.liquidity < dbParams.min_liquidity) {
-            console.log(`🚨 [Liquidity Guard] 流動性極度枯竭！僅有 $${marketData.liquidity.toFixed(0)}: ${upperSymbol}`);
             return { numeric_score: 0, isSafe: false, reason: `🛑 流動性過低攔截: 僅有 $${marketData.liquidity.toFixed(0)} (底線: $${dbParams.min_liquidity})`, marketData };
         }
 
-        // 🛑 [0 成本] 死水大池與假池過濾 (動態比例)
         const deadPoolVolReq = dbParams.min_vol_5m * 5; 
         if (marketData.liquidity > 100000 && marketData.volume5m < deadPoolVolReq) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 假池/貔貅攔截: $10萬以上流動性但交易量不足 $${deadPoolVolReq}`, marketData };
@@ -254,7 +235,7 @@ class SecurityGuard {
             return { numeric_score: 0, isSafe: false, reason: `🛑 貔貅攔截: 完全沒有賣單 (Buy:${buys}, Sell:0)`, marketData };
         }
 
-        // 3. 納米刷量機器人攔截 (收緊條件：只要多過 10 單，均價低過 $20 就殺)
+        // 3. 納米刷量機器人攔截 (防微型洗盤)
         const avgTradeSize = totalTxs5m > 0 ? (marketData.volume5m / totalTxs5m) : 0;
         if (totalTxs5m >= 10 && avgTradeSize < 20) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 刷量攔截: 發現狗莊微型造市，單筆均價極低 ($${avgTradeSize.toFixed(2)})`, marketData };
@@ -262,9 +243,8 @@ class SecurityGuard {
 
         // 4. 女巫攻擊 / 完美對稱刷量攔截 (Sybil Shield)
         const buyRatio = buys / totalTxs5m;
-        const pseudoOfi = (buys - sells) / totalTxs5m; // 簡易 OFI
+        const pseudoOfi = (buys - sells) / totalTxs5m; 
         
-        // 如果交易大於 30 筆，且買賣單比例落在 45% - 55% 之間，極高機率是腳本左右手互刷
         if (totalTxs5m > 30 && buyRatio > 0.45 && buyRatio < 0.55) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 女巫刷量攔截: 買賣極度對稱 (Buys:${buys}, Sells:${sells}, Ratio:${(buyRatio*100).toFixed(1)}%)，判定為腳本對沖`, marketData };
         }
@@ -276,4 +256,83 @@ class SecurityGuard {
 
         // 6. 換手率異常防禦 (資金空轉刷量)
         if (marketData.liquidity > 0 && (marketData.volume5m / marketData.liquidity) > 3 && Math.abs(pseudoOfi) < 0.05) {
-            return { numeric_score: 0, isSafe: false, reason: `🛑 換手異常攔截: 資金空轉
+            return { numeric_score: 0, isSafe: false, reason: `🛑 換手異常攔截: 資金空轉刷量 (Vol/Liq > 3倍) 且 OFI 趨近零失衡`, marketData };
+        }
+
+        // 🌟 [0 成本] 終極實體防偽
+        const VERIFIED_TOKENS = cacheManager.getVerifiedTokens();
+        if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) {
+            console.log(`🛡️ [Fake Shield] 觸發終極防偽！秒殺假冒 ${upperSymbol} (${mint})`);
+            return { numeric_score: 0, isSafe: false, reason: `🛑 終極防偽攔截: 假冒 ${upperSymbol} 幣`, marketData };
+        }
+
+        let score = 0;
+        let reasons = [];
+
+        const textAnalysis = this.analyzeTextFeatures(marketData.symbol, marketData.name, marketData.description);
+        if (textAnalysis.isFatal) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 一票否決: ${textAnalysis.reasons.join(', ')}`, marketData };
+        }
+        if (textAnalysis.reasons.length > 0) reasons.push(...textAnalysis.reasons);
+
+        let coreScore = 20; 
+        coreScore = Math.max(0, coreScore - textAnalysis.safetyPenalty);
+
+        const minLiqToScore = type === 'TRENDING' ? 50000 : 5000; 
+        if (marketData.liquidity >= minLiqToScore) coreScore += 20;
+        else reasons.push(`流動性未達優質線 ($${marketData.liquidity.toFixed(0)})`);
+
+        const safetyCheck = await this._checkContractSafety(mint, textAnalysis.requireAuthCheck);
+        if (safetyCheck.isSafe) {
+            coreScore += 20;
+            if (safetyCheck.isMutable) {
+                coreScore -= 20;
+                reasons.push('Metadata 未鎖定 (可隨時改名/換圖，極高危)');
+            }
+        } else {
+            reasons.push('合約權限未放棄或有隱藏稅 (高危)');
+        }
+
+        const isHoldersSafe = await this._checkTop10Holders(mint);
+        if (!isHoldersSafe) {
+            coreScore -= 20;
+            reasons.push('籌碼過度集中 (Top10 > 50%)');
+        }
+
+        coreScore = Math.max(0, coreScore);
+
+        let momentumScore = 0;
+        if (marketData.h1 > 10) momentumScore += 15;
+        else if (marketData.h1 > 0) momentumScore += 5;
+
+        if (marketData.hasSocials) momentumScore += config.quant.socialPresenceScore; 
+
+        if (totalTxs5m > 0) {
+            const volOFI = (buys - sells) / totalTxs5m;
+            const countRatio = sells > 0 ? (buys / sells) : 2;
+
+            if (volOFI > 0.3 && countRatio > 1.5) {
+                momentumScore += 15;
+                reasons.push(`OFI 動能強勁`);
+            }
+        }
+
+        momentumScore = Math.max(0, momentumScore - textAnalysis.fomoPenalty);
+        score = coreScore + momentumScore;
+
+        if (type !== 'TRENDING' && score >= 90) {
+            score = 89; 
+            reasons.push('🛡️ 預防盲狙: Meme幣強制降至 89 分等待 AI 審批');
+        }
+
+        const isSafe = score >= config.quant.rejectThreshold; 
+        const finalReason = isSafe 
+            ? `量化得分: ${score}/100 [防:${coreScore}, 動:${momentumScore}] 備註: ${reasons.join(' | ')}` 
+            : `攔截得分: ${score}/100, 缺陷: ${reasons.join(' | ')}`;
+
+        return { numeric_score: score, isSafe, reason: finalReason, marketData };
+    }
+}
+
+const securityGuard = new SecurityGuard();
+module.exports = { securityGuard };
