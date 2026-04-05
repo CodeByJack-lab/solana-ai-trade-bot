@@ -1,5 +1,5 @@
 // src/jobs/trendingJob.js
-// 📝 檔案功能用途：V9.4 數學雷達排程器。內建雙重前置物理防禦網 (API前防偽、API後防刷量)，極限節省 API Quota 與 AI 算力。
+// 📝 檔案功能用途：V9.6 數學雷達排程器 (天網級防禦)。內建雙重前置物理防禦網 (API前防偽、API後防刷量/防對沖/防量價背離)，極限節省 API Quota 與 AI 算力。
 
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
@@ -49,13 +49,12 @@ const trendingJob = {
             await redis.set('dex_priority_lock', 'TRENDING', 'EX', 120);
 
             // =====================================================================
-            // 🛡️ 物理防禦 Phase A：【API 呼叫前】絕對防偽裝甲 (慳 DexScreener Quota)
+            // 🛡️ 物理防禦 Phase A：【API 呼叫前】絕對防偽裝甲 (雙重比對，慳 Quota)
             // =====================================================================
             const verifiedTokens = cacheManager.getVerifiedTokens() || {};
             const safeWhitelist = {};
             Object.keys(verifiedTokens).forEach(k => safeWhitelist[k.toUpperCase()] = verifiedTokens[k]);
 
-            // 一次過攞晒 Top 100 避免 N+1 查詢塞爆 Database
             const { data: top100Data } = await supabase.from('trending_top100').select('token_symbol, mint_address');
             const top100Map = {};
             if (top100Data) top100Data.forEach(t => top100Map[t.token_symbol.toUpperCase()] = t.mint_address);
@@ -78,7 +77,7 @@ const trendingJob = {
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
                 } else {
-                    validPoolTokens.push(token); // 只有真幣先可以入閘
+                    validPoolTokens.push(token); 
                 }
             }
 
@@ -150,21 +149,37 @@ const trendingJob = {
                 const sells = mData.sells5m;
 
                 // =====================================================================
-                // 🗡️ 物理防禦 Phase B：【API 呼叫後】狗莊刷量與極惡 OFI 攔截 (慳 AI 算力)
+                // 🗡️ 物理防禦 Phase B：【API 呼叫後】狗莊刷量與極惡 OFI 攔截 (天網 V9.6)
                 // =====================================================================
                 const totalTxns = buys + sells;
                 const avgTrade = totalTxns > 0 ? (vol5m / totalTxns) : 0;
                 const pseudoOfi = totalTxns > 0 ? (buys - sells) / totalTxns : 0;
+                const turnover5m = liq > 0 ? (vol5m / liq) : 0;
+                const buyRatio = totalTxns > 0 ? (buys / totalTxns) : 0;
 
-                // 攔截 1: 狗莊 $0.15 微型刷量盤 (你截圖入面嗰種)
-                if (totalTxns >= 10 && avgTrade < 20) {
-                    console.log(`🗑️ [Wash Trade Guard] 攔截狗莊刷量！${token.token_symbol} 平均單筆僅 $${avgTrade.toFixed(2)}，踢出保溫箱！`);
+                // 攔截 1: 納米乞衣刷量盤 (專殺 PFU 類：均單 < $25)
+                if (totalTxns >= 15 && avgTrade < 25) {
+                    console.log(`🗑️ [Nano Spam Guard] 攔截乞衣刷量！${token.token_symbol} 均單 $${avgTrade.toFixed(2)}，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     continue;
                 }
 
-                // 攔截 2: 極端賣壓盤
-                if (totalTxns >= 10 && pseudoOfi < -0.2) {
+                // 攔截 2: 量價背離 / 死亡交叉 (專殺 FWS/YELPE 類：大單腳本對沖)
+                if (turnover5m > 1.5 && h1 < 100) {
+                    console.log(`🗑️ [Divergence Guard] 攔截高階造市！${token.token_symbol} 換手率高達 ${(turnover5m*100).toFixed(0)}% 但價格不漲，踢出保溫箱！`);
+                    await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+                    continue;
+                }
+
+                // 攔截 3: 高階女巫刷量 (買賣對稱 45-55%)
+                if (totalTxns > 50 && buyRatio > 0.45 && buyRatio < 0.55) {
+                    console.log(`🗑️ [Sybil Guard] 攔截腳本對沖！${token.token_symbol} 買賣對稱率 ${(buyRatio*100).toFixed(1)}%，踢出保溫箱！`);
+                    await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+                    continue;
+                }
+
+                // 攔截 4: 極端賣壓盤
+                if (totalTxns >= 15 && pseudoOfi < -0.2) {
                     console.log(`🗑️ [OFI Guard] 空軍壓境！${token.token_symbol} OFI 極差 (${pseudoOfi.toFixed(2)})，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     continue;
