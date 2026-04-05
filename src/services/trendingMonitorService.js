@@ -1,5 +1,5 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：隱形獵人爬蟲。每 15 分鐘從 GeckoTerminal 獲取 Solana 真實 Volume Top 100，具備動態防偽過濾 (Verified Tokens) 與 2-10s 擬人化防 429 盾。
+// 📝 檔案功能用途：隱形獵人爬蟲。每 30 分鐘從 GeckoTerminal 獲取 Solana 真實 Volume Top 100，具備動態防偽過濾 (Verified Tokens) 與 5-15s 擬人化防 429 盾。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -38,8 +38,8 @@ const trendingMonitorService = {
                     console.log(`📑 [Gecko] 第 ${page} 頁抓取成功！`);
 
                     if (page < targetPages) {
-                        // 🤖 擬人化防護：隨機產生 2000ms 至 10000ms (即 2 至 10 秒)
-                        const delay = Math.floor(Math.random() * 8000) + 2000;
+                        // 🤖 擬人化防護：隨機產生 5000ms 至 15000ms (即 5 至 15 秒) 避免 429 封鎖
+                        const delay = Math.floor(Math.random() * 10000) + 5000;
                         console.log(`⏳ [Gecko Crawler] 擬人化防護：等待 ${(delay/1000).toFixed(1)} 秒後再翻下一頁...`);
                         await new Promise(r => setTimeout(r, delay));
                     }
@@ -67,7 +67,7 @@ const trendingMonitorService = {
     },
 
     start() {
-        console.log('🦎 [Gecko Crawler] 真・Top 100 監控啟動 (每 15 分鐘大換血，附帶智能重試與防偽過濾機制)...');
+        console.log('🦎 [Gecko Crawler] 真・Top 100 監控啟動 (每 30 分鐘大換血，附帶智能重試與防偽過濾機制)...');
         
         const runTask = async () => {
             if (isCrawlerRunning) return;
@@ -214,7 +214,8 @@ const trendingMonitorService = {
         };
 
         setTimeout(() => { runTask(); }, 5000); 
-        setInterval(runTask, 15 * 60 * 1000); 
+        // 🎯 核心修改：由 15 分鐘改為 30 分鐘，減輕 API 負擔
+        setInterval(runTask, 30 * 60 * 1000); 
     }
 };
 
