@@ -1,6 +1,6 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：V10.2 雙引擎隱形獵人 (Gecko + Birdeye)。每 30 分鐘獲取全網最熱門榜單。
-// 🛡️ 升級功能：Birdeye API 嚴格遵守 limit=20 限制，分為 5 批次精準抓取，徹底解決 400 Bad Request 死亡迴圈。
+// 📝 檔案功能用途：V10.3 雙引擎隱形獵人 (Gecko + Birdeye)。每 30 分鐘獲取全網最熱門榜單。
+// 🛡️ 升級功能：Birdeye API 嚴格遵守 limit=20 限制，分為 5 批次精準抓取，詳細 Error 報錯防死結。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -121,22 +121,27 @@ const trendingMonitorService = {
                     console.log(`📑 [Birdeye] 第 ${i + 1} 批次 (${tokens.length} 隻) 抓取成功！`);
 
                     if (i < batchCount - 1) {
-                        const delay = Math.floor(Math.random() * 3000) + 3000; // 3s - 6s 擬人化休息
-                        console.log(`⏳ [Birdeye Crawler] 擬人化防護：等待 ${(delay/1000).toFixed(1)} 秒後再拿下一批...`);
+                        const delay = 2000; // API Limit 係 60次/分鐘，所以 2 秒間隔非常安全
                         await new Promise(r => setTimeout(r, delay));
                     }
 
                 } catch (error) {
-                    const is400 = error.response?.status === 400;
-                    if (is400) {
-                        console.error(`❌ [Birdeye Crawler] 參數錯誤 (400 Bad Request)，請檢查 API 限制。`);
-                        // 遇到 400 不應無限重試，直接拋出錯誤中斷
+                    // 💡 終極 Debug：印出真實錯誤訊息
+                    const status = error.response?.status;
+                    const errorDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
+                    
+                    if (status === 400) {
+                        console.error(`❌ [Birdeye Crawler] 參數錯誤 (400 Bad Request): ${errorDetails}`);
                         throw new Error('Birdeye API 拒絕請求 (400 Bad Request)');
+                    } else if (status === 401 || status === 403) {
+                        console.error(`❌ [Birdeye Crawler] 權限錯誤 (${status}): 請檢查 API Key 是否有效，或是否已在 Developer Portal 點擊 Subscribe Free Tier。詳細: ${errorDetails}`);
+                        throw new Error(`Birdeye API 權限被拒 (${status})`);
                     }
                     
-                    const is429 = error.response?.status === 429 || error.message.includes('429');
+                    const is429 = status === 429 || error.message.includes('429');
                     const penaltyDelay = is429 ? 15000 : 5000;
-                    console.warn(`⚠️ [Birdeye Crawler] 抓取失敗 (嘗試 ${attempt})，冷卻 ${penaltyDelay/1000}s...`);
+                    console.warn(`⚠️ [Birdeye Crawler] 抓取失敗 (嘗試 ${attempt}) [HTTP ${status || 'Network Error'}]: ${errorDetails}。冷卻 ${penaltyDelay/1000}s...`);
+                    
                     await new Promise(r => setTimeout(r, penaltyDelay));
                 }
             }
@@ -224,7 +229,7 @@ const trendingMonitorService = {
             currentRank++;
         }
 
-        if (top100Array.length >= 10) { // 放寬最低寫入要求，以防某些時候熱門幣少過 20 隻
+        if (top100Array.length >= 10) { 
             await supabase.from('trending_top100').delete().eq('source', sourceName); 
             const { error: insertErr } = await supabase.from('trending_top100').insert(top100Array);
             if (insertErr) console.error(`❌ [${sourceName}] 寫入 Top100 失敗:`, insertErr.message);
