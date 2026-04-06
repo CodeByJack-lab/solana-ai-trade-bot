@@ -1,6 +1,6 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：V10.3 雙引擎隱形獵人 (Gecko + Birdeye)。每 30 分鐘獲取全網最熱門榜單。
-// 🛡️ 升級功能：Birdeye API 嚴格遵守 limit=20 限制，分為 5 批次精準抓取，詳細 Error 報錯防死結。
+// 📝 檔案功能用途：V10.5 雙引擎隱形獵人 (Gecko + Birdeye)。每 30 分鐘獲取全網最熱門榜單。
+// 🛡️ 升級功能：修復 Database Primary Key 衝突，實裝 .upsert 智能覆蓋，完美兼容雙引擎尋找同一隻金狗的情況。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -88,12 +88,12 @@ const trendingMonitorService = {
             return [];
         }
 
-        console.log('🦅 [Birdeye Crawler] 啟動天眼：準備分 5 批次獲取 Solana 熱門榜單 (嚴格遵守 limit=20 限制)...');
+        console.log('🦅 [Birdeye Crawler] 啟 ক্যামের眼：準備分 5 批次獲取 Solana 熱門榜單 (嚴格遵守 limit=20 限制)...');
         const startTime = Date.now();
         const maxDuration = 5 * 60 * 1000; 
         let allTokens = [];
 
-        // 🎯 核心修正：極限值 20，分 5 次提取 (合共 100 隻)
+        // 🎯 限制每次 20 隻，分 5 次提取 (總數 100)
         const batchCount = 5;
         const limitPerBatch = 20;
 
@@ -121,12 +121,11 @@ const trendingMonitorService = {
                     console.log(`📑 [Birdeye] 第 ${i + 1} 批次 (${tokens.length} 隻) 抓取成功！`);
 
                     if (i < batchCount - 1) {
-                        const delay = 2000; // API Limit 係 60次/分鐘，所以 2 秒間隔非常安全
+                        const delay = 2000; 
                         await new Promise(r => setTimeout(r, delay));
                     }
 
                 } catch (error) {
-                    // 💡 終極 Debug：印出真實錯誤訊息
                     const status = error.response?.status;
                     const errorDetails = error.response?.data ? JSON.stringify(error.response.data) : error.message;
                     
@@ -134,7 +133,7 @@ const trendingMonitorService = {
                         console.error(`❌ [Birdeye Crawler] 參數錯誤 (400 Bad Request): ${errorDetails}`);
                         throw new Error('Birdeye API 拒絕請求 (400 Bad Request)');
                     } else if (status === 401 || status === 403) {
-                        console.error(`❌ [Birdeye Crawler] 權限錯誤 (${status}): 請檢查 API Key 是否有效，或是否已在 Developer Portal 點擊 Subscribe Free Tier。詳細: ${errorDetails}`);
+                        console.error(`❌ [Birdeye Crawler] 權限錯誤 (${status}): 請檢查 API Key 是否有效。詳細: ${errorDetails}`);
                         throw new Error(`Birdeye API 權限被拒 (${status})`);
                     }
                     
@@ -230,8 +229,10 @@ const trendingMonitorService = {
         }
 
         if (top100Array.length >= 10) { 
+            // 清理舊的同源資料
             await supabase.from('trending_top100').delete().eq('source', sourceName); 
-            const { error: insertErr } = await supabase.from('trending_top100').insert(top100Array);
+            // 🎯 終極修復：使用 upsert 避免與另一個 Crawler 產生的 Primary Key 衝突！
+            const { error: insertErr } = await supabase.from('trending_top100').upsert(top100Array, { onConflict: 'mint_address' });
             if (insertErr) console.error(`❌ [${sourceName}] 寫入 Top100 失敗:`, insertErr.message);
             else console.log(`📋 [${sourceName}] 成功更新防偽對照表 (${top100Array.length} 隻代幣)！`);
         }
@@ -296,6 +297,7 @@ const trendingMonitorService = {
                     console.log('⏸️ [Birdeye 引擎] 處於連續失敗之熔斷期 (1H)，暫時跳過本次掃描。');
                 }
 
+                // 當其中一個引擎成功入貨，就觸發雷達掃描
                 if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {
                     trendingJob.triggerImmediateAndResetClock();
                 }
@@ -307,6 +309,7 @@ const trendingMonitorService = {
             }
         };
 
+        // 伺服器啟動 5 秒後行一次，之後每 30 分鐘行一次
         setTimeout(() => { runTask(); }, 5000); 
         setInterval(runTask, 30 * 60 * 1000); 
     }
