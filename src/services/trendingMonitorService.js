@@ -1,7 +1,6 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：V10.1 雙引擎隱形獵人 (Gecko + Birdeye)。每 30 分鐘獲取全網最熱門榜單。
-// 🛡️ 升級功能：內建雙水喉獨立運作。Gecko 8頁分批、Birdeye 2頁(每頁50)分批，每次請求之間強制 5-15 秒擬人化 Cooldown。
-// 🚨 災難隔離：各自具備「連續 5 分鐘失敗熔斷機制」，互不干擾，絕不連環 Call API。
+// 📝 檔案功能用途：V10.2 雙引擎隱形獵人 (Gecko + Birdeye)。每 30 分鐘獲取全網最熱門榜單。
+// 🛡️ 升級功能：Birdeye API 嚴格遵守 limit=20 限制，分為 5 批次精準抓取，徹底解決 400 Bad Request 死亡迴圈。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -16,7 +15,7 @@ const redis = new Redis(configEnv.cache.redisUrl);
 
 let isCrawlerRunning = false;
 
-// 獨立熔斷計時器 (如果中 429 塞死 5 分鐘，暫停該引擎 1 小時)
+// 獨立熔斷計時器
 let geckoSuspendedUntil = 0;
 let birdeyeSuspendedUntil = 0;
 
@@ -29,14 +28,13 @@ const trendingMonitorService = {
         console.log('🌐 [Gecko Crawler] 開始分批抓取 8 頁 (約 160 個池)，準備過濾 Solana 真・Top 100...');
         let allPools = [];
         const startTime = Date.now();
-        const maxDuration = 5 * 60 * 1000; // 5 分鐘死亡倒數
+        const maxDuration = 5 * 60 * 1000; 
 
         for (let page = 1; page <= 8; page++) {
             let pageSuccess = false;
             let attempt = 0;
 
             while (!pageSuccess) {
-                // 🛑 5 分鐘極限熔斷
                 if (Date.now() - startTime > maxDuration) {
                     throw new Error('Gecko API 連續 5 分鐘請求失敗或被阻擋 (觸發 5m 熔斷)');
                 }
@@ -53,7 +51,7 @@ const trendingMonitorService = {
                     console.log(`📑 [Gecko] 第 ${page} 頁抓取成功！`);
 
                     if (page < 8) {
-                        const delay = Math.floor(Math.random() * 10000) + 5000; // 5s - 15s 擬人化
+                        const delay = Math.floor(Math.random() * 10000) + 5000; 
                         console.log(`⏳ [Gecko Crawler] 擬人化防護：等待 ${(delay/1000).toFixed(1)} 秒後再翻下一頁...`);
                         await new Promise(r => setTimeout(r, delay));
                     }
@@ -90,16 +88,19 @@ const trendingMonitorService = {
             return [];
         }
 
-        console.log('🦅 [Birdeye Crawler] 啟動天眼：準備分 2 批次獲取 Solana 熱門榜單 (防 API 塞車)...');
+        console.log('🦅 [Birdeye Crawler] 啟動天眼：準備分 5 批次獲取 Solana 熱門榜單 (嚴格遵守 limit=20 限制)...');
         const startTime = Date.now();
         const maxDuration = 5 * 60 * 1000; 
         let allTokens = [];
 
-        // 斬件：每次攞 50 個，攞 2 次
-        for (let i = 0; i < 2; i++) {
+        // 🎯 核心修正：極限值 20，分 5 次提取 (合共 100 隻)
+        const batchCount = 5;
+        const limitPerBatch = 20;
+
+        for (let i = 0; i < batchCount; i++) {
             let pageSuccess = false;
             let attempt = 0;
-            const offset = i * 50;
+            const offset = i * limitPerBatch;
 
             while (!pageSuccess) {
                 if (Date.now() - startTime > maxDuration) {
@@ -110,7 +111,7 @@ const trendingMonitorService = {
                     attempt++;
                     const response = await axios.get('https://public-api.birdeye.so/defi/token_trending', {
                         headers: { 'X-API-KEY': apiKey, 'x-chain': 'solana', 'accept': 'application/json' },
-                        params: { sort_by: 'rank', sort_type: 'asc', offset: offset, limit: 50 },
+                        params: { sort_by: 'rank', sort_type: 'asc', offset: offset, limit: limitPerBatch },
                         timeout: 10000
                     });
 
@@ -119,13 +120,20 @@ const trendingMonitorService = {
                     pageSuccess = true;
                     console.log(`📑 [Birdeye] 第 ${i + 1} 批次 (${tokens.length} 隻) 抓取成功！`);
 
-                    if (i < 1) {
-                        const delay = Math.floor(Math.random() * 5000) + 5000; // 5s - 10s 擬人化
+                    if (i < batchCount - 1) {
+                        const delay = Math.floor(Math.random() * 3000) + 3000; // 3s - 6s 擬人化休息
                         console.log(`⏳ [Birdeye Crawler] 擬人化防護：等待 ${(delay/1000).toFixed(1)} 秒後再拿下一批...`);
                         await new Promise(r => setTimeout(r, delay));
                     }
 
                 } catch (error) {
+                    const is400 = error.response?.status === 400;
+                    if (is400) {
+                        console.error(`❌ [Birdeye Crawler] 參數錯誤 (400 Bad Request)，請檢查 API 限制。`);
+                        // 遇到 400 不應無限重試，直接拋出錯誤中斷
+                        throw new Error('Birdeye API 拒絕請求 (400 Bad Request)');
+                    }
+                    
                     const is429 = error.response?.status === 429 || error.message.includes('429');
                     const penaltyDelay = is429 ? 15000 : 5000;
                     console.warn(`⚠️ [Birdeye Crawler] 抓取失敗 (嘗試 ${attempt})，冷卻 ${penaltyDelay/1000}s...`);
@@ -175,9 +183,8 @@ const trendingMonitorService = {
             const { mint_address, token_symbol, liquidity } = token;
 
             if (!mint_address || mint_address.length < 32 || blacklist.includes(mint_address)) continue;
-            if (liquidity < 1000) continue; // 垃圾池攔截
+            if (liquidity < 1000) continue; 
 
-            // 防偽大閘
             if (VERIFIED_TOKENS[token_symbol] && mint_address !== VERIFIED_TOKENS[token_symbol]) {
                 console.log(`🗑️ [Fake Shield] 發現假冒 ${token_symbol} (${mint_address})，直接踢出！`);
                 continue; 
@@ -186,12 +193,11 @@ const trendingMonitorService = {
             if (uniqueMints.has(mint_address)) continue;
             uniqueMints.add(mint_address);
 
-            if (top100Array.length >= 100) break; // 每個來源最多保留 Top 100
+            if (top100Array.length >= 100) break; 
 
             const dbData = { ...token, source: sourceName, updated_at: new Date().toISOString() };
             top100Array.push({ ...dbData, rank: currentRank });
 
-            // 挑選符合資格的進入保溫箱
             if (currentRank <= 100 && liquidity >= dynamicMinLiquidity) {
                 const isBlacklisted = await redis.get(`scam_blacklist:${mint_address}`);
                 const isHolding = activePositions.some(p => p.mint_address === mint_address);
@@ -218,15 +224,13 @@ const trendingMonitorService = {
             currentRank++;
         }
 
-        // 更新防偽庫 (只清空自己 Source 的舊資料)
-        if (top100Array.length >= 20) {
+        if (top100Array.length >= 10) { // 放寬最低寫入要求，以防某些時候熱門幣少過 20 隻
             await supabase.from('trending_top100').delete().eq('source', sourceName); 
             const { error: insertErr } = await supabase.from('trending_top100').insert(top100Array);
             if (insertErr) console.error(`❌ [${sourceName}] 寫入 Top100 失敗:`, insertErr.message);
             else console.log(`📋 [${sourceName}] 成功更新防偽對照表 (${top100Array.length} 隻代幣)！`);
         }
 
-        // 更新保溫箱
         if (incubatorArray.length > 0) {
             const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
             if (!error) {
@@ -268,7 +272,6 @@ const trendingMonitorService = {
                     console.log('⏸️ [Gecko 引擎] 處於 5 分鐘連續失敗之熔斷期 (1H)，暫時跳過本次掃描。');
                 }
 
-                // 🛑 引擎間強制中場休息 (15 秒)，確保 IP 完全回血，避免兩間公司嘅 API 請求撞埋一齊
                 console.log('⏳ [雙軌情報網] Gecko 掃描完畢，等待 15 秒後啟動 Birdeye 天眼...');
                 await new Promise(r => setTimeout(r, 15000));
 
@@ -281,14 +284,13 @@ const trendingMonitorService = {
                         await this.processAndSaveTokens(birdTokens, 'BIRDEYE');
                     } catch (err) {
                         console.error(`🚨 [Birdeye 引擎崩潰] ${err.message}`);
-                        if (typeof sendAdminAlert === 'function') sendAdminAlert(`🚨 [Birdeye 爬蟲] 連續 5 分鐘失敗。系統暫停 Birdeye 抓取 1 小時，不影響正常運作。`);
+                        if (typeof sendAdminAlert === 'function') sendAdminAlert(`🚨 [Birdeye 爬蟲] 連續失敗。系統暫停 Birdeye 抓取 1 小時，不影響正常運作。原因: ${err.message}`);
                         birdeyeSuspendedUntil = Date.now() + 60 * 60 * 1000; 
                     }
                 } else {
-                    console.log('⏸️ [Birdeye 引擎] 處於 5 分鐘連續失敗之熔斷期 (1H)，暫時跳過本次掃描。');
+                    console.log('⏸️ [Birdeye 引擎] 處於連續失敗之熔斷期 (1H)，暫時跳過本次掃描。');
                 }
 
-                // 通知數學雷達開工 (無論邊個引擎死咗，只要有一個成功入咗貨去保溫箱，雷達就會開機)
                 if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {
                     trendingJob.triggerImmediateAndResetClock();
                 }
@@ -301,7 +303,7 @@ const trendingMonitorService = {
         };
 
         setTimeout(() => { runTask(); }, 5000); 
-        setInterval(runTask, 30 * 60 * 1000); // 每 30 分鐘執行一次完整雙軌巡邏
+        setInterval(runTask, 30 * 60 * 1000); 
     }
 };
 
