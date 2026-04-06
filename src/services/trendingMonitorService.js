@@ -1,12 +1,14 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：隱形獵人爬蟲。每 30 分鐘從 GeckoTerminal 獲取 Solana 真實 Volume Top 100，具備動態防偽過濾 (Verified Tokens) 與 5-15s 擬人化防 429 盾。
+// 📝 檔案功能用途：V10.1 雙引擎隱形獵人 (Gecko + Birdeye)。每 30 分鐘獲取全網最熱門榜單。
+// 🛡️ 升級功能：內建雙水喉獨立運作。Gecko 8頁分批、Birdeye 2頁(每頁50)分批，每次請求之間強制 5-15 秒擬人化 Cooldown。
+// 🚨 災難隔離：各自具備「連續 5 分鐘失敗熔斷機制」，互不干擾，絕不連環 Call API。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const { getPortfolio, canBuyTrending } = require('./portfolioService');
 const { healthMonitor } = require('./healthMonitor');
 const { trendingJob } = require('../jobs/trendingJob');
-const { cacheManager } = require('./cacheManager'); // 🛡️ 引入大腦快取
+const { cacheManager } = require('./cacheManager'); 
 const configEnv = require('../config/config');
 const Redis = require('ioredis');
 const { sendAdminAlert } = require('./telegramService');
@@ -14,60 +16,227 @@ const redis = new Redis(configEnv.cache.redisUrl);
 
 let isCrawlerRunning = false;
 
+// 獨立熔斷計時器 (如果中 429 塞死 5 分鐘，暫停該引擎 1 小時)
+let geckoSuspendedUntil = 0;
+let birdeyeSuspendedUntil = 0;
+
 const trendingMonitorService = {
+    
+    // ==========================================
+    // 🦎 引擎 1：Gecko 爬蟲 (主打防偽大藍籌)
+    // ==========================================
     async fetchTop100FromGecko() {
-        let allPools = [];
         console.log('🌐 [Gecko Crawler] 開始分批抓取 8 頁 (約 160 個池)，準備過濾 Solana 真・Top 100...');
+        let allPools = [];
+        const startTime = Date.now();
+        const maxDuration = 5 * 60 * 1000; // 5 分鐘死亡倒數
 
-        const targetPages = 8; 
+        for (let page = 1; page <= 8; page++) {
+            let pageSuccess = false;
+            let attempt = 0;
 
-        for (let page = 1; page <= targetPages; page++) {
-            let success = false;
-            let retryCount = 0;
-            const maxRetries = 3;
+            while (!pageSuccess) {
+                // 🛑 5 分鐘極限熔斷
+                if (Date.now() - startTime > maxDuration) {
+                    throw new Error('Gecko API 連續 5 分鐘請求失敗或被阻擋 (觸發 5m 熔斷)');
+                }
 
-            while (!success && retryCount < maxRetries) {
                 try {
+                    attempt++;
                     const url = `https://api.geckoterminal.com/api/v2/networks/solana/pools?page=${page}`;
                     const res = await axios.get(url, { headers: { 'accept': 'application/json' }, timeout: 10000 });
                     
                     if (res.data?.data) {
                         allPools = allPools.concat(res.data.data);
                     }
-                    success = true; 
+                    pageSuccess = true; 
                     console.log(`📑 [Gecko] 第 ${page} 頁抓取成功！`);
 
-                    if (page < targetPages) {
-                        // 🤖 擬人化防護：隨機產生 5000ms 至 15000ms (即 5 至 15 秒) 避免 429 封鎖
-                        const delay = Math.floor(Math.random() * 10000) + 5000;
+                    if (page < 8) {
+                        const delay = Math.floor(Math.random() * 10000) + 5000; // 5s - 15s 擬人化
                         console.log(`⏳ [Gecko Crawler] 擬人化防護：等待 ${(delay/1000).toFixed(1)} 秒後再翻下一頁...`);
                         await new Promise(r => setTimeout(r, delay));
                     }
                 } catch (error) {
-                    retryCount++; 
-                    
                     const is429 = error.response?.status === 429 || error.message.includes('429');
-                    
-                    console.warn(`⚠️ [Gecko Crawler] 獲取第 ${page} 頁失敗 (嘗試 ${retryCount}/3): ${error.message}`);
-                
-                    if (is429) {
-                        const penaltyDelay = Math.floor(Math.random() * 5000) + 10000; 
-                        console.log(`⏳ 觸發 API 429 保護，後台自動冷卻 ${Math.round(penaltyDelay/1000)} 秒後重試... (已靜音 Telegram)`);
-                        await new Promise(r => setTimeout(r, penaltyDelay));
-                    } else {
-                        if (typeof sendAdminAlert === 'function') {
-                            sendAdminAlert(`⚠️ [Gecko Crawler] 第 ${page} 頁嚴重異常: ${error.message}`);
-                        }
-                        await new Promise(r => setTimeout(r, 3000)); 
-                    }
+                    const penaltyDelay = is429 ? Math.floor(Math.random() * 5000) + 10000 : 3000; 
+                    console.warn(`⚠️ [Gecko Crawler] 第 ${page} 頁失敗 (嘗試 ${attempt})，冷卻 ${Math.round(penaltyDelay/1000)}s...`);
+                    await new Promise(r => setTimeout(r, penaltyDelay));
                 }
             }
         }
-        return allPools;
+        
+        return allPools.map(pool => {
+            const baseTokenId = pool.relationships?.base_token?.data?.id || '';
+            const attr = pool.attributes || {};
+            return {
+                mint_address: baseTokenId.replace('solana_', ''),
+                token_symbol: attr.name?.split(' /')[0]?.toUpperCase() || 'UNKNOWN',
+                token_name: attr.name || 'UNKNOWN',
+                liquidity: parseFloat(attr.reserve_in_usd) || 0,
+                volume_24h: parseFloat(attr.volume_usd?.h24) || 0,
+                price_change_24h: parseFloat(attr.price_change_percentage?.h24) || 0
+            };
+        });
+    },
+
+    // ==========================================
+    // 🦅 引擎 2：Birdeye 爬蟲 (主打極速 Smart Money)
+    // ==========================================
+    async fetchFromBirdeye() {
+        const apiKey = process.env.BIRDEYE_API_KEY || configEnv.birdeye?.apiKey;
+        if (!apiKey) {
+            console.log('⚠️ [Birdeye Crawler] 缺少 BIRDEYE_API_KEY，跳過此情報源。');
+            return [];
+        }
+
+        console.log('🦅 [Birdeye Crawler] 啟動天眼：準備分 2 批次獲取 Solana 熱門榜單 (防 API 塞車)...');
+        const startTime = Date.now();
+        const maxDuration = 5 * 60 * 1000; 
+        let allTokens = [];
+
+        // 斬件：每次攞 50 個，攞 2 次
+        for (let i = 0; i < 2; i++) {
+            let pageSuccess = false;
+            let attempt = 0;
+            const offset = i * 50;
+
+            while (!pageSuccess) {
+                if (Date.now() - startTime > maxDuration) {
+                    throw new Error('Birdeye API 連續 5 分鐘請求失敗或被阻擋 (觸發 5m 熔斷)');
+                }
+
+                try {
+                    attempt++;
+                    const response = await axios.get('https://public-api.birdeye.so/defi/token_trending', {
+                        headers: { 'X-API-KEY': apiKey, 'x-chain': 'solana', 'accept': 'application/json' },
+                        params: { sort_by: 'rank', sort_type: 'asc', offset: offset, limit: 50 },
+                        timeout: 10000
+                    });
+
+                    const tokens = response.data?.data?.tokens || [];
+                    allTokens = allTokens.concat(tokens);
+                    pageSuccess = true;
+                    console.log(`📑 [Birdeye] 第 ${i + 1} 批次 (${tokens.length} 隻) 抓取成功！`);
+
+                    if (i < 1) {
+                        const delay = Math.floor(Math.random() * 5000) + 5000; // 5s - 10s 擬人化
+                        console.log(`⏳ [Birdeye Crawler] 擬人化防護：等待 ${(delay/1000).toFixed(1)} 秒後再拿下一批...`);
+                        await new Promise(r => setTimeout(r, delay));
+                    }
+
+                } catch (error) {
+                    const is429 = error.response?.status === 429 || error.message.includes('429');
+                    const penaltyDelay = is429 ? 15000 : 5000;
+                    console.warn(`⚠️ [Birdeye Crawler] 抓取失敗 (嘗試 ${attempt})，冷卻 ${penaltyDelay/1000}s...`);
+                    await new Promise(r => setTimeout(r, penaltyDelay));
+                }
+            }
+        }
+
+        return allTokens.map(t => {
+            return {
+                mint_address: t.address,
+                token_symbol: (t.symbol || 'UNKNOWN').toUpperCase(),
+                token_name: t.name || 'UNKNOWN',
+                liquidity: parseFloat(t.liquidity) || 0,
+                volume_24h: parseFloat(t.volume24hUSD) || 0,
+                price_change_24h: 0 
+            };
+        });
+    },
+
+    // ==========================================
+    // 🧠 共用處理核心：過濾、入庫、交給天網
+    // ==========================================
+    async processAndSaveTokens(standardizedTokens, sourceName) {
+        if (!standardizedTokens || standardizedTokens.length === 0) return;
+
+        const dbParams = cacheManager.getStrategy('TRENDING');
+        const dynamicMinLiquidity = dbParams?.min_liquidity || 50000; 
+
+        let top100Array = [];
+        let incubatorArray = [];
+        let uniqueMints = new Set();
+        let currentRank = 1;
+
+        const portfolio = getPortfolio();
+        const activePositions = portfolio.positions || [];
+        const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
+
+        const blacklist = [
+            'So11111111111111111111111111111111111111112', 
+            'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
+            'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
+        ];
+        const VERIFIED_TOKENS = typeof cacheManager.getVerifiedTokens === 'function' ? cacheManager.getVerifiedTokens() : {};
+
+        for (const token of standardizedTokens) {
+            const { mint_address, token_symbol, liquidity } = token;
+
+            if (!mint_address || mint_address.length < 32 || blacklist.includes(mint_address)) continue;
+            if (liquidity < 1000) continue; // 垃圾池攔截
+
+            // 防偽大閘
+            if (VERIFIED_TOKENS[token_symbol] && mint_address !== VERIFIED_TOKENS[token_symbol]) {
+                console.log(`🗑️ [Fake Shield] 發現假冒 ${token_symbol} (${mint_address})，直接踢出！`);
+                continue; 
+            }
+
+            if (uniqueMints.has(mint_address)) continue;
+            uniqueMints.add(mint_address);
+
+            if (top100Array.length >= 100) break; // 每個來源最多保留 Top 100
+
+            const dbData = { ...token, source: sourceName, updated_at: new Date().toISOString() };
+            top100Array.push({ ...dbData, rank: currentRank });
+
+            // 挑選符合資格的進入保溫箱
+            if (currentRank <= 100 && liquidity >= dynamicMinLiquidity) {
+                const isBlacklisted = await redis.get(`scam_blacklist:${mint_address}`);
+                const isHolding = activePositions.some(p => p.mint_address === mint_address);
+                
+                if (!isBlacklisted && !isHolding) {
+                    const { data: tradeHistory } = await supabase
+                        .from(`trade_history_${tableSuffix}`)
+                        .select('created_at, realized_pnl_pct')
+                        .eq('token_mint', mint_address)
+                        .eq('action', 'SELL')
+                        .order('created_at', { ascending: false })
+                        .limit(2);
+
+                    let isOnCooldown = false;
+                    if (tradeHistory && tradeHistory.length > 0) {
+                        const lastTrade = tradeHistory[0];
+                        const timeSinceLastTrade = Date.now() - new Date(lastTrade.created_at).getTime();
+                        if (lastTrade.realized_pnl_pct < 0 && timeSinceLastTrade < 24 * 60 * 60 * 1000) isOnCooldown = true; 
+                    }
+                    
+                    if (!isOnCooldown) incubatorArray.push(dbData);
+                }
+            }
+            currentRank++;
+        }
+
+        // 更新防偽庫 (只清空自己 Source 的舊資料)
+        if (top100Array.length >= 20) {
+            await supabase.from('trending_top100').delete().eq('source', sourceName); 
+            const { error: insertErr } = await supabase.from('trending_top100').insert(top100Array);
+            if (insertErr) console.error(`❌ [${sourceName}] 寫入 Top100 失敗:`, insertErr.message);
+            else console.log(`📋 [${sourceName}] 成功更新防偽對照表 (${top100Array.length} 隻代幣)！`);
+        }
+
+        // 更新保溫箱
+        if (incubatorArray.length > 0) {
+            const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
+            if (!error) {
+                console.log(`🦎 [${sourceName}] 成功將 ${incubatorArray.length} 隻獵物送入天網保溫箱！`);
+            }
+        }
     },
 
     start() {
-        console.log('🦎 [Gecko Crawler] 真・Top 100 監控啟動 (每 30 分鐘大換血，附帶智能重試與防偽過濾機制)...');
+        console.log('🦎🦅 [雙軌情報網] Gecko + Birdeye 聯合監控啟動 (每 30 分鐘大換血，錯峰運行防 429)...');
         
         const runTask = async () => {
             if (isCrawlerRunning) return;
@@ -75,7 +244,7 @@ const trendingMonitorService = {
 
             try {
                 if (!canBuyTrending()) {
-                    console.log('⏸️ [Gecko Crawler] Trending 倉位已滿，跳過本次榜單更新。');
+                    console.log('⏸️ [情報網] Trending 倉位已滿，跳過本次榜單更新。');
                     isCrawlerRunning = false;
                     return;
                 }
@@ -83,139 +252,56 @@ const trendingMonitorService = {
                 const { data: config } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
                 if (!config || !config.is_running) { isCrawlerRunning = false; return; }
 
-                // 🧠 從大腦動態讀取最低流動性要求 (TRENDING)
-                const dbParams = cacheManager.getStrategy('TRENDING');
-                const dynamicMinLiquidity = dbParams?.min_liquidity || 50000; 
-
-                const pools = await this.fetchTop100FromGecko();
-                if (pools.length === 0) { isCrawlerRunning = false; return; }
-
-                let top100Array = [];
-                let incubatorArray = [];
-                
-                let uniqueMints = new Set();
-                let currentRank = 1;
-
-                const portfolio = getPortfolio();
-                const activePositions = portfolio.positions || [];
-                const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
-
-                const blacklist = [
-                    'So11111111111111111111111111111111111111112', 
-                    'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
-                    'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
-                ];
-
-                // 🚀 核心修復：正確調用 getVerifiedTokens 獲取防偽名單
-                const VERIFIED_TOKENS = typeof cacheManager.getVerifiedTokens === 'function' ? cacheManager.getVerifiedTokens() : {};
-
-                for (let i = 0; i < pools.length; i++) {
-                    const pool = pools[i];
-                    const baseTokenId = pool.relationships?.base_token?.data?.id || '';
-                    const mintAddress = baseTokenId.replace('solana_', ''); 
-                    
-                    if (!mintAddress || mintAddress.length < 32) continue;
-                    if (blacklist.includes(mintAddress)) continue;
-
-                    const attr = pool.attributes || {};
-                    const symbol = attr.name?.split(' /')[0]?.toUpperCase() || 'UNKNOWN';
-                    const liquidityUsd = parseFloat(attr.reserve_in_usd) || 0;
-
-                    // 🚨 垃圾池攔截：流動性低於 $1,000 的假池直接踢走，不准入 DB
-                    if (liquidityUsd < 1000) continue;
-
-                    // 🚨 防偽大閘：如果是名單上的幣種，但地址不符，直接踢走！
-                    if (VERIFIED_TOKENS[symbol] && mintAddress !== VERIFIED_TOKENS[symbol]) {
-                        console.log(`🗑️ [Fake Shield] 發現假冒 ${symbol} (${mintAddress})，直接踢出，拒絕佔用榜單與保溫箱資源！`);
-                        continue; 
-                    }
-
-                    if (uniqueMints.has(mintAddress)) continue;
-                    uniqueMints.add(mintAddress);
-
-                    if (top100Array.length >= 100) break;
-
-                    const baseData = {
-                        mint_address: mintAddress, 
-                        token_symbol: symbol, 
-                        token_name: attr.name || 'UNKNOWN',
-                        liquidity: liquidityUsd, 
-                        volume_24h: parseFloat(attr.volume_usd?.h24) || 0,
-                        price_change_24h: parseFloat(attr.price_change_percentage?.h24) || 0, 
-                        updated_at: new Date().toISOString()
-                    };
-
-                    top100Array.push({ ...baseData, rank: currentRank });
-
-                    if (currentRank >= 1 && currentRank <= 100 && liquidityUsd >= dynamicMinLiquidity) {
-                        const isBlacklisted = await redis.get(`scam_blacklist:${mintAddress}`);
-                        if (isBlacklisted) {
-                            currentRank++;
-                            continue;
-                        }
-
-                        const isHolding = activePositions.some(p => p.mint_address === mintAddress);
-                        if (isHolding) {
-                            currentRank++;
-                            continue;
-                        }
-
-                        const { data: tradeHistory } = await supabase
-                            .from(`trade_history_${tableSuffix}`)
-                            .select('created_at, realized_pnl_pct')
-                            .eq('token_mint', mintAddress)
-                            .eq('action', 'SELL')
-                            .order('created_at', { ascending: false })
-                            .limit(2);
-
-                        let isOnCooldown = false;
-                        if (tradeHistory && tradeHistory.length > 0) {
-                            const lastTrade = tradeHistory[0];
-                            const timeSinceLastTrade = Date.now() - new Date(lastTrade.created_at).getTime();
-                            if (lastTrade.realized_pnl_pct < 0 && timeSinceLastTrade < 24 * 60 * 60 * 1000) isOnCooldown = true; 
-                        }
-                        
-                        if (!isOnCooldown) incubatorArray.push(baseData);
-                    }
-                    
-                    currentRank++;
-                }
-
-                // 🛡️ 安全降級：確保獲取足夠數據才清空並更新 DB，防止 Gecko 429 導致榜單清空誤殺真幣
-                if (top100Array.length >= 50) {
-                    await supabase.from('trending_top100').delete().neq('mint_address', 'dummy'); 
-                    const { error: insertErr } = await supabase.from('trending_top100').insert(top100Array);
-                    
-                    if (insertErr) {
-                        console.error(`❌ [Gecko Crawler] 寫入 Top100 失敗:`, insertErr.message);
-                    } else {
-                        console.log(`📋 [Gecko Crawler] 成功更新 Top 100 真假幣對照表 (${top100Array.length} 隻不重複代幣)！`);
+                // ====================================================
+                // 執行引擎 1：GECKO
+                // ====================================================
+                if (Date.now() > geckoSuspendedUntil) {
+                    try {
+                        const geckoTokens = await this.fetchTop100FromGecko();
+                        await this.processAndSaveTokens(geckoTokens, 'GECKO');
+                    } catch (err) {
+                        console.error(`🚨 [Gecko 引擎崩潰] ${err.message}`);
+                        if (typeof sendAdminAlert === 'function') sendAdminAlert(`🚨 [Gecko 爬蟲] 連續 5 分鐘失敗。系統暫停 Gecko 抓取 1 小時，不影響正常運作。`);
+                        geckoSuspendedUntil = Date.now() + 60 * 60 * 1000; 
                     }
                 } else {
-                    console.log(`⚠️ [Gecko Crawler] 獲取數據不足 (${top100Array.length} 隻)，為防對照表斷層，暫不更新 DB。`);
+                    console.log('⏸️ [Gecko 引擎] 處於 5 分鐘連續失敗之熔斷期 (1H)，暫時跳過本次掃描。');
                 }
 
-                if (incubatorArray.length > 0) {
-                    const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
-                    if (!error) {
-                        console.log(`🦎 [Gecko Crawler] 成功將 ${incubatorArray.length} 隻 Rank 1-100 的Trending幣送入保溫箱！`);
-                        healthMonitor.setStatus('Top200_Crawler', `🟢 已佈局 ${incubatorArray.length} 隻大藍籌`);
-                        
-                        if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {
-                            trendingJob.triggerImmediateAndResetClock();
-                        }
+                // 🛑 引擎間強制中場休息 (15 秒)，確保 IP 完全回血，避免兩間公司嘅 API 請求撞埋一齊
+                console.log('⏳ [雙軌情報網] Gecko 掃描完畢，等待 15 秒後啟動 Birdeye 天眼...');
+                await new Promise(r => setTimeout(r, 15000));
+
+                // ====================================================
+                // 執行引擎 2：BIRDEYE
+                // ====================================================
+                if (Date.now() > birdeyeSuspendedUntil) {
+                    try {
+                        const birdTokens = await this.fetchFromBirdeye();
+                        await this.processAndSaveTokens(birdTokens, 'BIRDEYE');
+                    } catch (err) {
+                        console.error(`🚨 [Birdeye 引擎崩潰] ${err.message}`);
+                        if (typeof sendAdminAlert === 'function') sendAdminAlert(`🚨 [Birdeye 爬蟲] 連續 5 分鐘失敗。系統暫停 Birdeye 抓取 1 小時，不影響正常運作。`);
+                        birdeyeSuspendedUntil = Date.now() + 60 * 60 * 1000; 
                     }
+                } else {
+                    console.log('⏸️ [Birdeye 引擎] 處於 5 分鐘連續失敗之熔斷期 (1H)，暫時跳過本次掃描。');
                 }
+
+                // 通知數學雷達開工 (無論邊個引擎死咗，只要有一個成功入咗貨去保溫箱，雷達就會開機)
+                if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {
+                    trendingJob.triggerImmediateAndResetClock();
+                }
+
             } catch (err) {
-                console.error(`❌ [Gecko Crawler] 運行異常:`, err.message);
+                console.error(`❌ [情報網] 主排程異常:`, err.message);
             } finally {
                 isCrawlerRunning = false;
             }
         };
 
         setTimeout(() => { runTask(); }, 5000); 
-        // 🎯 核心修改：由 15 分鐘改為 30 分鐘，減輕 API 負擔
-        setInterval(runTask, 30 * 60 * 1000); 
+        setInterval(runTask, 30 * 60 * 1000); // 每 30 分鐘執行一次完整雙軌巡邏
     }
 };
 
