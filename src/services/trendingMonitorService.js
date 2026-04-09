@@ -1,6 +1,6 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：V10.12 雙引擎隱形獵人 (Gecko + Birdeye 靜默忍者版)。
-// 🛡️ 升級功能：聚合 Log 輸出！所有被攔截的同名假幣/黑名單/複製人，會先在背後點算數量，最後只輸出一行簡潔的結算 Log，杜絕洗版。
+// 📝 檔案功能用途：V10.13 雙引擎隱形獵人。
+// 🛡️ 升級功能：新增 [Non-ASCII Shield] 攔截中/日/韓文火星文，並大幅擴充 Web2 實體巨頭品牌過濾庫 (TSMC, GOOGLE, ALCHEMY 等)。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -155,12 +155,26 @@ const trendingMonitorService = {
     },
 
     // ==========================================
-    // 🧠 共用處理核心：去重聚合、DB動態黑名單、自動白名單、交給天網
+    // 🧠 共用處理核心：去重聚合、防偽矩陣、自動白名單、交給天網
     // ==========================================
     async processAndSaveTokens(standardizedTokens, sourceName) {
         if (!standardizedTokens || standardizedTokens.length === 0) return;
 
-        const BRAND_BLACKLIST = ['GROK', 'TRUMP', 'ELON', 'BIDEN', 'PEPE', 'DOGE', 'SHIB', 'MAGA', 'OPENAI', 'NVIDIA', 'APPLE', 'META', 'SPACEX', 'ZARA'];
+        // 🛡️ 終極大廠與實體巨頭黑名單 (全面封殺蹭熱度殺豬盤)
+        const BRAND_BLACKLIST = [
+            // AI 與科技巨頭
+            'OPENAI', 'CHATGPT', 'SORA', 'CLAUDE', 'GEMINI', 'NVIDIA', 'APPLE', 'META', 'GOOGLE', 'MICROSOFT', 'AMAZON', 'TSMC', 'AMD', 'INTEL',
+            // 政商名人
+            'GROK', 'ELON', 'MUSK', 'TRUMP', 'BIDEN', 'OBAMA', 'PUTIN', 'ZELENSKY', 'TATE', 'MRBEAST',
+            // 傳統金融與實體資產
+            'BLACKROCK', 'VANGUARD', 'FIDELITY', 'SEC', 'FED', 'JPMORGAN', 'OIL', 'PETROL', 'GAS', 'GOLD', 'SILVER',
+            // 遊戲與知名 IP
+            'GTA', 'ROBLOX', 'RBX', 'NINTENDO', 'DISNEY', 'POKEMON',
+            // 頂流 Meme (防二次假冒，除非已在 verified_tokens)
+            'PEPE', 'DOGE', 'SHIB', 'MAGA', 'WIF', 'BOME', 'BONK', 'SLERF', 'POPCAT',
+            // 幣圈機構與死幣
+            'BINANCE', 'COINBASE', 'KRAKEN', 'FTX', 'ALAMEDA', 'TETHER', 'CIRCLE', 'ZARA'
+        ];
         const blacklist = [
             'So11111111111111111111111111111111111111112', 
             'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
@@ -168,15 +182,15 @@ const trendingMonitorService = {
         ];
         const VERIFIED_TOKENS = typeof cacheManager.getVerifiedTokens === 'function' ? cacheManager.getVerifiedTokens() : {};
 
-        // 🛡️ 聚合計算器：收集攔截數據
         let fakeBlockCount = {}; 
         let dbBlacklistCount = {}; 
         let brandShieldCount = {}; 
+        let nonAsciiCount = 0; // 🌟 記錄火星文攔截數量
         let dedupeCount = {}; 
 
         const symbolMap = new Map();
 
-        // 🔍 第一階段：全域過濾與去重 (計算攔截數量，不立即 Print Log)
+        // 🔍 第一階段：全域過濾與去重
         for (const token of standardizedTokens) {
             const { mint_address, token_symbol, liquidity } = token;
             if (!mint_address || mint_address.length < 32 || blacklist.includes(mint_address)) continue;
@@ -184,7 +198,14 @@ const trendingMonitorService = {
 
             const sym = (token_symbol || 'UNKNOWN').toUpperCase();
 
-            // 1. 動態防偽與 DB 黑名單
+            // 🌟 1. [Non-ASCII Shield] 攔截中/日/韓文及特殊火星文
+            // [^\x00-\x7F] 代表任何不屬於標準英文鍵盤可打出的字元
+            if (/[^\x00-\x7F]/.test(sym)) {
+                nonAsciiCount++;
+                continue; 
+            }
+
+            // 2. 動態防偽與 DB 黑名單
             if (VERIFIED_TOKENS[sym] && mint_address !== VERIFIED_TOKENS[sym]) {
                 if (VERIFIED_TOKENS[sym].startsWith('BlockList')) {
                     dbBlacklistCount[sym] = (dbBlacklistCount[sym] || 0) + 1;
@@ -194,7 +215,7 @@ const trendingMonitorService = {
                 continue; 
             }
 
-            // 2. 檢查大廠/名人陷阱
+            // 3. 檢查大廠/名人陷阱
             let isBrandTrap = false;
             for (const brand of BRAND_BLACKLIST) {
                 if (sym.includes(brand) && !VERIFIED_TOKENS[sym]) {
@@ -205,21 +226,24 @@ const trendingMonitorService = {
             }
             if (isBrandTrap) continue;
 
-            // 3. 「唯一王者」去重算法 (The Highlander Rule)
+            // 4. 「唯一王者」去重算法 (The Highlander Rule)
             if (!symbolMap.has(sym)) {
                 symbolMap.set(sym, token);
             } else {
                 const existing = symbolMap.get(sym);
                 if (liquidity > existing.liquidity) {
                     symbolMap.set(sym, token);
-                    dedupeCount[sym] = (dedupeCount[sym] || 0) + 1; // 淘汰舊的
+                    dedupeCount[sym] = (dedupeCount[sym] || 0) + 1;
                 } else {
-                    dedupeCount[sym] = (dedupeCount[sym] || 0) + 1; // 淘汰新的
+                    dedupeCount[sym] = (dedupeCount[sym] || 0) + 1;
                 }
             }
         }
 
-        // 🖨️ 集中輸出聚合 Log (一目了然，不再洗版！)
+        // 🖨️ 集中輸出聚合 Log
+        if (nonAsciiCount > 0) {
+            console.log(`👽 [Non-ASCII Shield] 已攔截 ${nonAsciiCount} 隻包含中/韓文或火星文符號的垃圾幣！`);
+        }
         for (const [sym, count] of Object.entries(dbBlacklistCount)) {
             console.log(`🚫 [DB Blacklist] 觸發動態黑名單，已批量秒殺 ${count} 隻垃圾幣: ${sym}`);
         }
@@ -235,7 +259,6 @@ const trendingMonitorService = {
             console.log(`⚔️ [Highlander] 觸發唯一王者去重，已淘汰 ${totalDedupes} 隻低仿同名幣。`);
         }
 
-        // 取出存活的精英代幣
         const deduplicatedTokens = Array.from(symbolMap.values());
 
         // 🛡️ 第二階段：準備入庫與 Auto-Whitelist
@@ -244,7 +267,7 @@ const trendingMonitorService = {
 
         let top100Array = [];
         let incubatorArray = [];
-        let autoWhitelistArray = []; // 🌟 準備寫入 verified_tokens 的陣列
+        let autoWhitelistArray = []; 
         let uniqueMints = new Set();
         let currentRank = 1;
 
@@ -296,7 +319,6 @@ const trendingMonitorService = {
             currentRank++;
         }
 
-        // 🌟 寫入 Auto-Whitelist
         if (autoWhitelistArray.length > 0) {
             const { error: whitelistErr } = await supabase.from('verified_tokens').upsert(autoWhitelistArray, { onConflict: 'token_symbol' });
             if (whitelistErr) {
@@ -325,7 +347,7 @@ const trendingMonitorService = {
     },
 
     start() {
-        console.log('🦎🦅 [雙軌情報網] V10.12 啟動 (已實裝聚合 Log，杜絕洗版)...');
+        console.log('🦎🦅 [雙軌情報網] V10.13 啟動 (已實裝 ASCII 火星文護盾與 Web2 品牌過濾)...');
         
         const runTask = async () => {
             if (isCrawlerRunning) return;
