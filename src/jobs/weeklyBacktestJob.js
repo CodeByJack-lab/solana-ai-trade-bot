@@ -1,21 +1,22 @@
 // src/jobs/weeklyBacktestJob.js
-// 📝 檔案功能用途：V9.2 雙軌高精度回測引擎。實裝 1355 組兩階段無縫網格。對接 cacheManager 動態載入英文思維鏈劇本，生成 BACKTEST 提案交由 autoApplyJob 審批。
+// 📝 檔案功能用途：V9.3 雙軌高精度回測引擎 (三權分立版)。
+// 🚀 升級功能：放棄對 Stop Loss 嘅修改權 (交給參謀總長實時決策)，專注優化「追蹤止盈觸發點 (TP Trigger)」與「回撤容忍度 (Pullback)」以捕獲極端肥尾利潤。
 
 const { supabase } = require('../config/supabase');
 const { keyRotator } = require('../services/keyRotator');
-const { cacheManager } = require('../services/cacheManager'); // 🛡️ 引入大腦快取
+const { cacheManager } = require('../services/cacheManager'); 
 const cron = require('node-cron');
 const axios = require('axios');
 const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
-const { sendApprovalRequest } = require('../services/telegramService'); // 🛡️ 使用新版郵差
+const { sendApprovalRequest } = require('../services/telegramService'); 
 
 const weeklyBacktestJob = {
     /**
-     * 📏 第一階段：粗網格生成器 (撒大網 - 750 組組合)
+     * 📏 第一階段：粗網格生成器 (撒大網)
      */
     generateCoarseGrid(trades, isMeme) {
-        const losses = trades.map(t => t.realized_pnl_pct).filter(p => p < 0);
+        // 取得歷史利潤數據
         const peakGains = trades.map(t => {
             if (t.highest_price_sol && t.entry_price_sol) {
                 return ((t.highest_price_sol - t.entry_price_sol) / t.entry_price_sol) * 100;
@@ -23,17 +24,12 @@ const weeklyBacktestJob = {
             return 0;
         }).filter(p => p > 0);
 
-        const defaultWorstLoss = isMeme ? -80 : -30;
-        const defaultBestLoss = isMeme ? -15 : -5;
         const defaultMaxGain = isMeme ? 200 : 50;
         const defaultMinGain = isMeme ? 30 : 15;
 
-        let worstLoss = losses.length > 0 ? Math.min(...losses) : defaultWorstLoss;
-        let bestLoss = losses.length > 0 ? Math.max(...losses) : defaultBestLoss;
         let maxGain = peakGains.length > 0 ? Math.max(...peakGains) : defaultMaxGain;
         let minGain = peakGains.length > 0 ? Math.min(...peakGains) : defaultMinGain;
 
-        if (worstLoss === bestLoss) worstLoss = bestLoss - 10;
         if (maxGain === minGain) maxGain = minGain + 20;
 
         const minPb = isMeme ? 15 : 5;
@@ -47,20 +43,18 @@ const weeklyBacktestJob = {
             };
         };
 
-        const slData = createSteps(worstLoss, bestLoss, 10); 
-        const tpData = createSteps(minGain, maxGain, 15);  
-        const pbData = createSteps(minPb, maxPb, 5);       
+        const tpData = createSteps(minGain, maxGain, 20);  // 擴大搜索範圍
+        const pbData = createSteps(minPb, maxPb, 10);       
 
         return {
-            stopLoss: slData.values, 
             tpTrigger: tpData.values,   
             pullback: pbData.values,
-            meta: { slStep: slData.stepSize, tpStep: tpData.stepSize, pbStep: pbData.stepSize }
+            meta: { tpStep: tpData.stepSize, pbStep: pbData.stepSize }
         };
     },
 
     /**
-     * 🎯 第二階段：精細網格生成器 (狙擊鏡 - 605 組組合)
+     * 🎯 第二階段：精細網格生成器 (狙擊鏡)
      */
     generateFineGrid(bestCoarse, coarseMeta) {
         const createFineSteps = (center, coarseStep, steps) => {
@@ -71,62 +65,60 @@ const weeklyBacktestJob = {
         };
 
         return {
-            stopLoss: createFineSteps(bestCoarse.stop_loss_pct, coarseMeta.slStep, 11).filter(x => x < -1), 
             tpTrigger: createFineSteps(bestCoarse.trailing_tp_trigger, coarseMeta.tpStep, 11).filter(x => x > 5), 
             pullback: createFineSteps(bestCoarse.trailing_pullback, coarseMeta.pbStep, 5).filter(x => x >= 2)
         };
     },
 
     /**
-     * 🧮 歷史重演模擬器
+     * 🧮 歷史重演模擬器 (僅針對 Trailing Stop 最佳化)
      */
     simulateGridSearch(trades, grid) {
         let bestParams = null;
         let maxNetPnl = -Infinity;
         let bestWinRate = 0;
 
-        for (let slIdx = 0; slIdx < grid.stopLoss.length; slIdx++) {
-            const sl = grid.stopLoss[slIdx];
-            for (let tpIdx = 0; tpIdx < grid.tpTrigger.length; tpIdx++) {
-                const tp = grid.tpTrigger[tpIdx];
-                for (let pbIdx = 0; pbIdx < grid.pullback.length; pbIdx++) {
-                    const pb = grid.pullback[pbIdx];
-                    
-                    let simulatedPnl = 0;
-                    let wins = 0;
-                    let totalValid = 0;
+        // 固定 SL 為 -15% 進行模擬 (因為 SL 管轄權已移交給參謀總長)
+        const fixedSl = -15.0; 
 
-                    for (let i = 0; i < trades.length; i++) {
-                        const t = trades[i];
-                        if (!t.entry_price_sol || !t.highest_price_sol || !t.quantity) continue;
-                        totalValid++;
+        for (let tpIdx = 0; tpIdx < grid.tpTrigger.length; tpIdx++) {
+            const tp = grid.tpTrigger[tpIdx];
+            for (let pbIdx = 0; pbIdx < grid.pullback.length; pbIdx++) {
+                const pb = grid.pullback[pbIdx];
+                
+                let simulatedPnl = 0;
+                let wins = 0;
+                let totalValid = 0;
 
-                        const maxGainPct = ((t.highest_price_sol - t.entry_price_sol) / t.entry_price_sol) * 100;
-                        const actualPnlPct = t.realized_pnl_pct || 0;
+                for (let i = 0; i < trades.length; i++) {
+                    const t = trades[i];
+                    if (!t.entry_price_sol || !t.highest_price_sol || !t.quantity) continue;
+                    totalValid++;
 
-                        let simTradePnlPct = actualPnlPct;
+                    const maxGainPct = ((t.highest_price_sol - t.entry_price_sol) / t.entry_price_sol) * 100;
+                    const actualPnlPct = t.realized_pnl_pct || 0;
 
-                        if (maxGainPct >= tp) {
-                            simTradePnlPct = tp - pb; 
-                        } else if (actualPnlPct <= sl) {
-                            simTradePnlPct = sl; 
-                        }
+                    let simTradePnlPct = actualPnlPct;
 
-                        if (simTradePnlPct > 0) wins++;
-                        simulatedPnl += (simTradePnlPct / 100) * t.total_value_sol; 
+                    if (maxGainPct >= tp) {
+                        simTradePnlPct = tp - pb; // 觸發追蹤並食糊
+                    } else if (actualPnlPct <= fixedSl) {
+                        simTradePnlPct = fixedSl; // 模擬觸發固定止損
                     }
 
-                    if (totalValid > 0 && simulatedPnl > maxNetPnl) {
-                        maxNetPnl = simulatedPnl;
-                        bestWinRate = (wins / totalValid) * 100;
-                        bestParams = { 
-                            stop_loss_pct: parseFloat(sl.toFixed(2)), 
-                            trailing_tp_trigger: parseFloat(tp.toFixed(2)), 
-                            trailing_pullback: parseFloat(pb.toFixed(2)), 
-                            net_pnl_sol: simulatedPnl, 
-                            win_rate: bestWinRate 
-                        };
-                    }
+                    if (simTradePnlPct > 0) wins++;
+                    simulatedPnl += (simTradePnlPct / 100) * t.total_value_sol; 
+                }
+
+                if (totalValid > 0 && simulatedPnl > maxNetPnl) {
+                    maxNetPnl = simulatedPnl;
+                    bestWinRate = (wins / totalValid) * 100;
+                    bestParams = { 
+                        trailing_tp_trigger: parseFloat(tp.toFixed(2)), 
+                        trailing_pullback: parseFloat(pb.toFixed(2)), 
+                        net_pnl_sol: simulatedPnl, 
+                        win_rate: bestWinRate 
+                    };
                 }
             }
         }
@@ -137,7 +129,7 @@ const weeklyBacktestJob = {
      * 🚀 執行兩階段高精度雙軌回測主程序
      */
     async runBacktest() {
-        console.log('\n🧬 [Evolution Engine] 啟動雙軌【1355組 兩階段高精度回測】與參數結算...');
+        console.log('\n🧬 [Evolution Engine] 啟動雙軌【兩階段高精度回測】與參數結算 (專注優化 Trailing Stop)...');
         healthMonitor.setStatus('Evolution_Engine', '🟢 正在進行回測計算');
 
         try {
@@ -176,18 +168,18 @@ const weeklyBacktestJob = {
             if (bestMemeCoarse) {
                 const memeFineGrid = this.generateFineGrid(bestMemeCoarse, memeCoarseGrid.meta);
                 finalBestMeme = this.simulateGridSearch(memeTrades, memeFineGrid);
-                console.log(`🎯 Meme 極限微調完畢: SL ${finalBestMeme.stop_loss_pct}%, TP ${finalBestMeme.trailing_tp_trigger}%, PB ${finalBestMeme.trailing_pullback}%`);
+                console.log(`🎯 Meme 追蹤止盈微調完畢: TP Trigger ${finalBestMeme.trailing_tp_trigger}%, PB ${finalBestMeme.trailing_pullback}%`);
             }
 
             let finalBestTrending = bestTrendingCoarse;
             if (bestTrendingCoarse) {
                 const trendingFineGrid = this.generateFineGrid(bestTrendingCoarse, trendingCoarseGrid.meta);
                 finalBestTrending = this.simulateGridSearch(trendingTrades, trendingFineGrid);
-                console.log(`🎯 Trending 極限微調完畢: SL ${finalBestTrending.stop_loss_pct}%, TP ${finalBestTrending.trailing_tp_trigger}%, PB ${finalBestTrending.trailing_pullback}%`);
+                console.log(`🎯 Trending 追蹤止盈微調完畢: TP Trigger ${finalBestTrending.trailing_tp_trigger}%, PB ${finalBestTrending.trailing_pullback}%`);
             }
 
-            // 3. 🧠 動態獲取 AI 劇本與模型輪替 (V9.2 升級)
-            const contextString = `[MEME STRATEGY]\nProposed: SL ${finalBestMeme?.stop_loss_pct || 'N/A'}%, TP Trigger ${finalBestMeme?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestMeme?.trailing_pullback || 'N/A'}%\nWin Rate: ${finalBestMeme?.win_rate?.toFixed(1) || 'N/A'}%\n\n[TRENDING STRATEGY]\nProposed: SL ${finalBestTrending?.stop_loss_pct || 'N/A'}%, TP Trigger ${finalBestTrending?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestTrending?.trailing_pullback || 'N/A'}%\nWin Rate: ${finalBestTrending?.win_rate?.toFixed(1) || 'N/A'}%`;
+            // 3. 🧠 動態獲取 AI 劇本與模型輪替
+            const contextString = `[MEME STRATEGY]\nProposed: TP Trigger ${finalBestMeme?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestMeme?.trailing_pullback || 'N/A'}%\nWin Rate: ${finalBestMeme?.win_rate?.toFixed(1) || 'N/A'}%\n\n[TRENDING STRATEGY]\nProposed: TP Trigger ${finalBestTrending?.trailing_tp_trigger || 'N/A'}%, Pullback ${finalBestTrending?.trailing_pullback || 'N/A'}%\nWin Rate: ${finalBestTrending?.win_rate?.toFixed(1) || 'N/A'}%`;
 
             const aiConfig = cacheManager.getPromptConfig('backtest_analyst', { promptContext: contextString });
             const prompt = aiConfig.parsedPrompt;
@@ -205,7 +197,6 @@ const weeklyBacktestJob = {
                     
                     let lastErr = null;
 
-                    // 🔄 多模型輪替防崩潰機制
                     for (const currentModel of models) {
                         try {
                             console.log(`🤖 嘗試呼叫模型: ${currentModel}`);
@@ -222,7 +213,6 @@ const weeklyBacktestJob = {
                             const jsonMatch = rawText.match(/\{[\s\S]*\}/);
                             if (!jsonMatch) throw new Error("AI 未回傳有效 JSON");
                             
-                            // ✅ 精準提取 report 欄位 (無視 english_thought_process)
                             return JSON.parse(jsonMatch[0]).report; 
                         } catch (e) {
                             lastErr = e;
@@ -235,10 +225,11 @@ const weeklyBacktestJob = {
                 console.warn(`⚠️ [Evolution Engine] AI 評估徹底失敗: ${aiErr.message}`);
             }
 
-            // 4. 寫入 ai_proposals 提案表 (PENDING 狀態)，交由 autoApplyJob 執行 60 分鐘倒數
+            // 4. 寫入 ai_proposals 提案表 (PENDING 狀態)，交由 autoApplyJob 執行審批
+            // 🚨 核心修正：將提案送出的參數，刪除 stop_loss_pct，確保不會與實時參謀總長打架！
             const proposedChanges = { 
-                meme_params: finalBestMeme, 
-                trending_params: finalBestTrending 
+                meme_params: finalBestMeme ? { trailing_tp_trigger: finalBestMeme.trailing_tp_trigger, trailing_pullback: finalBestMeme.trailing_pullback } : null, 
+                trending_params: finalBestTrending ? { trailing_tp_trigger: finalBestTrending.trailing_tp_trigger, trailing_pullback: finalBestTrending.trailing_pullback } : null 
             };
             
             const { data: proposalInsert } = await supabase.from('ai_proposals').insert([{
@@ -264,14 +255,13 @@ const weeklyBacktestJob = {
     },
 
     start() {
-        // 🚀 強制設定時區為香港時間 (Asia/Hong_Kong)，逢週日 09:00 執行 ('0 9 * * 0')
         cron.schedule('0 9 * * 0', () => { 
             this.runBacktest(); 
         }, {
             scheduled: true,
             timezone: "Asia/Hong_Kong"
         });
-        console.log('🕒 [Evolution Engine] 每週雙軌高精度回測排程已啟動 (排定於週日 09:00 HKT，帶 60mins HITL 防丟失審批)');
+        console.log('🕒 [Evolution Engine] 每週雙軌高精度回測排程已啟動 (專注優化止盈，不干擾實時止損防線)');
     }
 };
 

@@ -1,6 +1,6 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：V10.7 雙引擎隱形獵人 (Gecko + Birdeye 靜默忍者版)。每 30 分鐘獲取全網最熱門榜單。
-// 🛡️ 升級功能：放棄 DexScreener 爬蟲防撞機。加入 HTML 報錯過濾，遇 502/Timeout 果斷放棄重試，杜絕 Log 洗版與死亡迴圈。
+// 📝 檔案功能用途：V10.12 雙引擎隱形獵人 (Gecko + Birdeye 靜默忍者版)。
+// 🛡️ 升級功能：聚合 Log 輸出！所有被攔截的同名假幣/黑名單/複製人，會先在背後點算數量，最後只輸出一行簡潔的結算 Log，杜絕洗版。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -10,7 +10,6 @@ const { trendingJob } = require('../jobs/trendingJob');
 const { cacheManager } = require('./cacheManager'); 
 const configEnv = require('../config/config');
 const Redis = require('ioredis');
-const { sendAdminAlert } = require('./telegramService');
 const redis = new Redis(configEnv.cache.redisUrl);
 
 let isCrawlerRunning = false;
@@ -21,7 +20,7 @@ let birdeyeSuspendedUntil = 0;
 const trendingMonitorService = {
     
     // ==========================================
-    // 🦎 引擎 1：Gecko 爬蟲 (主打防偽大藍籌)
+    // 🦎 引擎 1：Gecko 爬蟲
     // ==========================================
     async fetchTop100FromGecko() {
         console.log('🌐 [Gecko Crawler] 開始分批抓取 8 頁 (約 160 個池)，準備過濾 Solana 真・Top 100...');
@@ -51,7 +50,6 @@ const trendingMonitorService = {
 
                     if (page < 8) {
                         const delay = Math.floor(Math.random() * 10000) + 5000; 
-                        console.log(`⏳ [Gecko Crawler] 擬人化防護：等待 ${(delay/1000).toFixed(1)} 秒後再翻下一頁...`);
                         await new Promise(r => setTimeout(r, delay));
                     }
                 } catch (error) {
@@ -82,10 +80,7 @@ const trendingMonitorService = {
     // ==========================================
     async fetchFromBirdeye() {
         const apiKey = process.env.BIRDEYE_API_KEY || configEnv.birdeye?.apiKey;
-        if (!apiKey) {
-            console.log('⚠️ [Birdeye Crawler] 缺少 BIRDEYE_API_KEY，跳過此情報源。');
-            return [];
-        }
+        if (!apiKey) return [];
 
         console.log('🦅 [Birdeye Crawler] 啟動天眼：準備分 5 批次獲取 Solana 熱門榜單 (嚴格遵守 limit=20 限制)...');
         let allTokens = [];
@@ -97,14 +92,13 @@ const trendingMonitorService = {
             let pageSuccess = false;
             const offset = i * limitPerBatch;
 
-            // 忍者模式：每頁最多只試 3 次，唔得就直接放棄，唔好嘥時間死纏爛打
             while (!pageSuccess && attempt < 3) {
                 try {
                     attempt++;
                     const response = await axios.get('https://public-api.birdeye.so/defi/token_trending', {
                         headers: { 'X-API-KEY': apiKey, 'x-chain': 'solana', 'accept': 'application/json' },
                         params: { sort_by: 'rank', sort_type: 'asc', offset: offset, limit: limitPerBatch },
-                        timeout: 8000 // 8秒超時，唔好等太耐
+                        timeout: 8000 
                     });
 
                     const tokens = response.data?.data?.tokens || [];
@@ -112,36 +106,33 @@ const trendingMonitorService = {
                     pageSuccess = true;
                     console.log(`📑 [Birdeye] 第 ${i + 1} 批次 (${tokens.length} 隻) 抓取成功！`);
 
-                    if (i < batchCount - 1) {
-                        await new Promise(r => setTimeout(r, 2000)); // 正常 2 秒間隔
-                    }
+                    if (i < batchCount - 1) await new Promise(r => setTimeout(r, 2000)); 
 
                 } catch (error) {
                     const status = error.response?.status;
                     let isFatal = false;
                     let errorMsg = error.message;
 
-                    // 🛑 終極防 HTML 洗版過濾器
                     if (error.response?.data) {
                         if (typeof error.response.data === 'string' && error.response.data.startsWith('<!DOCTYPE html>')) {
                             errorMsg = `Cloudflare ${status} Bad Gateway (官方伺服器死機)`;
-                            isFatal = true; // 官方死機，無謂重試
+                            isFatal = true; 
                         } else {
-                            errorMsg = JSON.stringify(error.response.data).substring(0, 100); // 只截取前 100 字元防洗版
+                            errorMsg = JSON.stringify(error.response.data).substring(0, 100); 
                         }
                     } else if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
                         errorMsg = '請求超時 (Timeout)';
-                        isFatal = true; // Timeout 代表 Server 擠塞，直接放棄
+                        isFatal = true; 
                     }
 
                     if (status === 400 || status === 401 || status === 403) {
                         console.error(`❌ [Birdeye Crawler] 拒絕連線 (${status}): ${errorMsg}`);
-                        throw new Error(`Birdeye API 致命錯誤 (${status})`); // 呢啲錯誤要報警
+                        throw new Error(`Birdeye API 致命錯誤 (${status})`); 
                     }
 
                     if (isFatal || status === 502 || status === 503 || status === 504) {
                         console.warn(`⚠️ [Birdeye Crawler] 偵測到官方伺服器不穩定 (${errorMsg})。忍者模式啟動：放棄本輪剩餘抓取。`);
-                        return allTokens; // 👈 核心修正：直接帶著目前手頭上攞到嘅代幣提早撤退，唔再浪費時間！
+                        return allTokens; 
                     }
                     
                     const penaltyDelay = status === 429 ? 15000 : 5000;
@@ -164,23 +155,12 @@ const trendingMonitorService = {
     },
 
     // ==========================================
-    // 🧠 共用處理核心：過濾、入庫、交給天網
+    // 🧠 共用處理核心：去重聚合、DB動態黑名單、自動白名單、交給天網
     // ==========================================
     async processAndSaveTokens(standardizedTokens, sourceName) {
         if (!standardizedTokens || standardizedTokens.length === 0) return;
 
-        const dbParams = cacheManager.getStrategy('TRENDING');
-        const dynamicMinLiquidity = dbParams?.min_liquidity || 50000; 
-
-        let top100Array = [];
-        let incubatorArray = [];
-        let uniqueMints = new Set();
-        let currentRank = 1;
-
-        const portfolio = getPortfolio();
-        const activePositions = portfolio.positions || [];
-        const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
-
+        const BRAND_BLACKLIST = ['GROK', 'TRUMP', 'ELON', 'BIDEN', 'PEPE', 'DOGE', 'SHIB', 'MAGA', 'OPENAI', 'NVIDIA', 'APPLE', 'META', 'SPACEX', 'ZARA'];
         const blacklist = [
             'So11111111111111111111111111111111111111112', 
             'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
@@ -188,15 +168,98 @@ const trendingMonitorService = {
         ];
         const VERIFIED_TOKENS = typeof cacheManager.getVerifiedTokens === 'function' ? cacheManager.getVerifiedTokens() : {};
 
+        // 🛡️ 聚合計算器：收集攔截數據
+        let fakeBlockCount = {}; 
+        let dbBlacklistCount = {}; 
+        let brandShieldCount = {}; 
+        let dedupeCount = {}; 
+
+        const symbolMap = new Map();
+
+        // 🔍 第一階段：全域過濾與去重 (計算攔截數量，不立即 Print Log)
         for (const token of standardizedTokens) {
             const { mint_address, token_symbol, liquidity } = token;
-
             if (!mint_address || mint_address.length < 32 || blacklist.includes(mint_address)) continue;
             if (liquidity < 1000) continue; 
 
-            if (VERIFIED_TOKENS[token_symbol] && mint_address !== VERIFIED_TOKENS[token_symbol]) {
-                console.log(`🗑️ [Fake Shield] 發現假冒 ${token_symbol} (${mint_address})，直接踢出！`);
+            const sym = (token_symbol || 'UNKNOWN').toUpperCase();
+
+            // 1. 動態防偽與 DB 黑名單
+            if (VERIFIED_TOKENS[sym] && mint_address !== VERIFIED_TOKENS[sym]) {
+                if (VERIFIED_TOKENS[sym].startsWith('BlockList')) {
+                    dbBlacklistCount[sym] = (dbBlacklistCount[sym] || 0) + 1;
+                } else {
+                    fakeBlockCount[sym] = (fakeBlockCount[sym] || 0) + 1;
+                }
                 continue; 
+            }
+
+            // 2. 檢查大廠/名人陷阱
+            let isBrandTrap = false;
+            for (const brand of BRAND_BLACKLIST) {
+                if (sym.includes(brand) && !VERIFIED_TOKENS[sym]) {
+                    isBrandTrap = true;
+                    brandShieldCount[sym] = (brandShieldCount[sym] || 0) + 1;
+                    break;
+                }
+            }
+            if (isBrandTrap) continue;
+
+            // 3. 「唯一王者」去重算法 (The Highlander Rule)
+            if (!symbolMap.has(sym)) {
+                symbolMap.set(sym, token);
+            } else {
+                const existing = symbolMap.get(sym);
+                if (liquidity > existing.liquidity) {
+                    symbolMap.set(sym, token);
+                    dedupeCount[sym] = (dedupeCount[sym] || 0) + 1; // 淘汰舊的
+                } else {
+                    dedupeCount[sym] = (dedupeCount[sym] || 0) + 1; // 淘汰新的
+                }
+            }
+        }
+
+        // 🖨️ 集中輸出聚合 Log (一目了然，不再洗版！)
+        for (const [sym, count] of Object.entries(dbBlacklistCount)) {
+            console.log(`🚫 [DB Blacklist] 觸發動態黑名單，已批量秒殺 ${count} 隻垃圾幣: ${sym}`);
+        }
+        for (const [sym, count] of Object.entries(fakeBlockCount)) {
+            console.log(`🗑️ [Fake Shield] 發現並踢出 ${count} 隻假冒 ${sym}！`);
+        }
+        for (const [sym, count] of Object.entries(brandShieldCount)) {
+            console.log(`🛡️ [Brand Shield] 攔截 ${count} 隻大廠/名人誘餌幣: ${sym}`);
+        }
+        
+        const totalDedupes = Object.values(dedupeCount).reduce((a, b) => a + b, 0);
+        if (totalDedupes > 0) {
+            console.log(`⚔️ [Highlander] 觸發唯一王者去重，已淘汰 ${totalDedupes} 隻低仿同名幣。`);
+        }
+
+        // 取出存活的精英代幣
+        const deduplicatedTokens = Array.from(symbolMap.values());
+
+        // 🛡️ 第二階段：準備入庫與 Auto-Whitelist
+        const dbParams = cacheManager.getStrategy('TRENDING');
+        const dynamicMinLiquidity = dbParams?.min_liquidity || 50000; 
+
+        let top100Array = [];
+        let incubatorArray = [];
+        let autoWhitelistArray = []; // 🌟 準備寫入 verified_tokens 的陣列
+        let uniqueMints = new Set();
+        let currentRank = 1;
+
+        const portfolio = getPortfolio();
+        const activePositions = portfolio.positions || [];
+        const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
+
+        for (const token of deduplicatedTokens) {
+            const { mint_address, token_symbol, liquidity } = token;
+            const sym = (token_symbol || 'UNKNOWN').toUpperCase();
+
+            // 🌟 [Auto-Whitelist] 如果流動性極高 (> 50萬U)，自動加入官方白名單！
+            if (liquidity > 500000 && !VERIFIED_TOKENS[sym]) {
+                autoWhitelistArray.push({ token_symbol: sym, mint_address: mint_address, is_active: true });
+                VERIFIED_TOKENS[sym] = mint_address; 
             }
 
             if (uniqueMints.has(mint_address)) continue;
@@ -233,23 +296,36 @@ const trendingMonitorService = {
             currentRank++;
         }
 
+        // 🌟 寫入 Auto-Whitelist
+        if (autoWhitelistArray.length > 0) {
+            const { error: whitelistErr } = await supabase.from('verified_tokens').upsert(autoWhitelistArray, { onConflict: 'token_symbol' });
+            if (whitelistErr) {
+                console.error(`❌ [Auto-Whitelist] 自動白名單寫入失敗:`, whitelistErr.message);
+            } else {
+                console.log(`✅ [Auto-Whitelist] 成功自動將 ${autoWhitelistArray.length} 隻巨鯨級代幣加入官方防偽白名單！`);
+                if (typeof cacheManager.loadVerifiedTokens === 'function') {
+                    await cacheManager.loadVerifiedTokens();
+                }
+            }
+        }
+
         if (top100Array.length >= 10) { 
             await supabase.from('trending_top100').delete().eq('source', sourceName); 
             const { error: insertErr } = await supabase.from('trending_top100').upsert(top100Array, { onConflict: 'mint_address' });
             if (insertErr) console.error(`❌ [${sourceName}] 寫入 Top100 失敗:`, insertErr.message);
-            else console.log(`📋 [${sourceName}] 成功更新防偽對照表 (${top100Array.length} 隻代幣)！`);
+            else console.log(`📋 [${sourceName}] 成功更新防偽對照表 (${top100Array.length} 隻代幣，已過濾複製人)！`);
         }
 
         if (incubatorArray.length > 0) {
             const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
             if (!error) {
-                console.log(`🦎 [${sourceName}] 成功將 ${incubatorArray.length} 隻獵物送入天網保溫箱！`);
+                console.log(`🦎 [${sourceName}] 成功將 ${incubatorArray.length} 隻嚴選獵物送入天網保溫箱！`);
             }
         }
     },
 
     start() {
-        console.log('🦎🦅 [雙軌情報網] Gecko + Birdeye 聯合監控啟動 (每 30 分鐘大換血，錯峰運行防 429)...');
+        console.log('🦎🦅 [雙軌情報網] V10.12 啟動 (已實裝聚合 Log，杜絕洗版)...');
         
         const runTask = async () => {
             if (isCrawlerRunning) return;
@@ -265,9 +341,6 @@ const trendingMonitorService = {
                 const { data: config } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
                 if (!config || !config.is_running) { isCrawlerRunning = false; return; }
 
-                // ====================================================
-                // 執行引擎 1：GECKO
-                // ====================================================
                 if (Date.now() > geckoSuspendedUntil) {
                     try {
                         const geckoTokens = await this.fetchTop100FromGecko();
@@ -276,16 +349,10 @@ const trendingMonitorService = {
                         console.error(`🚨 [Gecko 引擎崩潰] ${err.message}`);
                         geckoSuspendedUntil = Date.now() + 60 * 60 * 1000; 
                     }
-                } else {
-                    console.log('⏸️ [Gecko 引擎] 處於熔斷期 (1H)，暫時跳過本次掃描。');
                 }
 
-                console.log('⏳ [雙軌情報網] Gecko 掃描完畢，等待 15 秒後啟動 Birdeye 天眼...');
                 await new Promise(r => setTimeout(r, 15000));
 
-                // ====================================================
-                // 執行引擎 2：BIRDEYE (忍者模式)
-                // ====================================================
                 if (Date.now() > birdeyeSuspendedUntil) {
                     try {
                         const birdTokens = await this.fetchFromBirdeye();
@@ -296,8 +363,6 @@ const trendingMonitorService = {
                         console.error(`🚨 [Birdeye 引擎崩潰] ${err.message}`);
                         birdeyeSuspendedUntil = Date.now() + 60 * 60 * 1000; 
                     }
-                } else {
-                    console.log('⏸️ [Birdeye 引擎] 處於熔斷期 (1H)，暫時跳過本次掃描。');
                 }
 
                 if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {

@@ -1,5 +1,5 @@
 // src/jobs/trendingJob.js
-// 📝 檔案功能用途：V9.6 數學雷達排程器 (天網級防禦)。內建雙重前置物理防禦網 (API前防偽、API後防刷量/防對沖/防量價背離)，極限節省 API Quota 與 AI 算力。
+// 📝 檔案功能用途：V10.9 數學雷達排程器 (天網級防禦)。內建雙重前置物理防禦網，並賦予 AI 「一票否決物理拔線」的絕對權力。
 
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
@@ -8,7 +8,7 @@ const { routerService } = require('../services/router');
 const { getPortfolio } = require('../services/portfolioService'); 
 const configEnv = require('../config/config'); 
 const { healthMonitor } = require('../services/healthMonitor');
-const { cacheManager } = require('../services/cacheManager'); // 👈 引入緩存管理器
+const { cacheManager } = require('../services/cacheManager'); 
 
 const Redis = require('ioredis');
 const redis = new Redis(configEnv.cache.redisUrl);
@@ -49,7 +49,7 @@ const trendingJob = {
             await redis.set('dex_priority_lock', 'TRENDING', 'EX', 120);
 
             // =====================================================================
-            // 🛡️ 物理防禦 Phase A：【API 呼叫前】絕對防偽裝甲 (雙重比對，慳 Quota)
+            // 🛡️ 物理防禦 Phase A：【API 呼叫前】絕對防偽裝甲
             // =====================================================================
             const verifiedTokens = cacheManager.getVerifiedTokens() || {};
             const safeWhitelist = {};
@@ -149,7 +149,7 @@ const trendingJob = {
                 const sells = mData.sells5m;
 
                 // =====================================================================
-                // 🗡️ 物理防禦 Phase B：【API 呼叫後】狗莊刷量與極惡 OFI 攔截 (天網 V9.6)
+                // 🗡️ 物理防禦 Phase B：【API 呼叫後】狗莊刷量與極惡 OFI 攔截 
                 // =====================================================================
                 const totalTxns = buys + sells;
                 const avgTrade = totalTxns > 0 ? (vol5m / totalTxns) : 0;
@@ -157,28 +157,21 @@ const trendingJob = {
                 const turnover5m = liq > 0 ? (vol5m / liq) : 0;
                 const buyRatio = totalTxns > 0 ? (buys / totalTxns) : 0;
 
-                // 攔截 1: 納米乞衣刷量盤 (專殺 PFU 類：均單 < $25)
                 if (totalTxns >= 15 && avgTrade < 25) {
                     console.log(`🗑️ [Nano Spam Guard] 攔截乞衣刷量！${token.token_symbol} 均單 $${avgTrade.toFixed(2)}，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     continue;
                 }
-
-                // 攔截 2: 量價背離 / 死亡交叉 (專殺 FWS/YELPE 類：大單腳本對沖)
                 if (turnover5m > 1.5 && h1 < 100) {
                     console.log(`🗑️ [Divergence Guard] 攔截高階造市！${token.token_symbol} 換手率高達 ${(turnover5m*100).toFixed(0)}% 但價格不漲，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     continue;
                 }
-
-                // 攔截 3: 高階女巫刷量 (買賣對稱 45-55%)
                 if (totalTxns > 50 && buyRatio > 0.45 && buyRatio < 0.55) {
                     console.log(`🗑️ [Sybil Guard] 攔截腳本對沖！${token.token_symbol} 買賣對稱率 ${(buyRatio*100).toFixed(1)}%，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     continue;
                 }
-
-                // 攔截 4: 極端賣壓盤
                 if (totalTxns >= 15 && pseudoOfi < -0.2) {
                     console.log(`🗑️ [OFI Guard] 空軍壓境！${token.token_symbol} OFI 極差 (${pseudoOfi.toFixed(2)})，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
@@ -209,17 +202,21 @@ const trendingJob = {
                         continue; 
                     }
 
-                    // 🚦 呼叫 AI 路由
-                    const isBought = await routerService.routeSignal(mintAddress, 'TRENDING', secResult);
+                    // 🚦 呼叫 AI 路由 (如果 AI JSON 回傳 VETO，routerService 應該將其最終分數壓至 0)
+                    const finalAiScoreObj = { numeric_score: secResult.numeric_score }; // 用 object 傳遞，方便 router 修改
+                    const isBought = await routerService.routeSignal(mintAddress, 'TRENDING', secResult, finalAiScoreObj);
 
                     if (isBought) {
                         await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     } else {
-                        if (secResult.numeric_score >= survivalScore) {
-                            console.log(`⏳ [Trending] 潛力仍在 (分數: ${secResult.numeric_score})，保留於保溫箱...`);
-                            await supabase.from('trending_pool').update({ ai_score: secResult.numeric_score, volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
+                        // 💀 核心修正：如果 AI 判斷為 VETO (分數被 router 扣至低於 survivalScore)，直接火化！
+                        const actualScore = finalAiScoreObj.numeric_score !== undefined ? finalAiScoreObj.numeric_score : secResult.numeric_score;
+
+                        if (actualScore >= survivalScore) {
+                            console.log(`⏳ [Trending] 潛力仍在 (分數: ${actualScore})，保留於保溫箱...`);
+                            await supabase.from('trending_pool').update({ ai_score: actualScore, volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
                         } else {
-                            console.log(`🗑️ [Trending] 分數低於門檻 (${secResult.numeric_score} < ${survivalScore})，踢出並拉黑！`);
+                            console.log(`🗑️ [Trending] 分數低於門檻或遭 AI 否決 (${actualScore} < ${survivalScore})，物理拔線並拉黑！`);
                             await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                             await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
                         }

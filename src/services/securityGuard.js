@@ -1,6 +1,6 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V9.6 100分量化安檢中樞。實裝「懶漢判定法」保護 RPC、防 429 智能重試、原生 RPC Top 10 籌碼分佈檢查，以及動態防偽名單。
-// 🚀 V9.6 終極天網升級：硬截斷 OFI 缺失、納米微型洗盤、女巫對稱刷單與量價背離死亡交叉，拒絕狗莊與 AI 幻覺。
+// 📝 檔案功能用途：V10.9 100分量化安檢中樞。實裝 OFI 絕對零容忍機制，徹底杜絕無交易量之初生幣盲狙。
+// 🚀 V10.9 升級：如果 5 分鐘內交易筆數 < 10 (Meme) / < 20 (Trending)，直接判死刑，連 AI 都唔准見！
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -10,9 +10,6 @@ const { cacheManager } = require('./cacheManager');
 
 class SecurityGuard {
     
-    /**
-     * 🕵️ 4 維度制度化文字快篩
-     */
     analyzeTextFeatures(symbol, name, description) {
         const fullText = `${symbol} ${name} ${description}`.toLowerCase();
         let result = { isFatal: false, safetyPenalty: 0, fomoPenalty: 0, requireAuthCheck: false, requireLpCheck: false, reasons: [] };
@@ -62,9 +59,6 @@ class SecurityGuard {
         return result;
     }
 
-    /**
-     * 📊 獲取 DexScreener 報價 (具備 429 智能重試防護)
-     */
     async _fetchMarketData(mint) {
         let retries = 0;
         const maxRetries = 3;
@@ -102,9 +96,6 @@ class SecurityGuard {
         return null; 
     }
 
-    /**
-     * 🛡️ 原生 RPC 權限與 Metadata 審計
-     */
     async _checkContractSafety(mint, requireAuthCheck) {
         try {
             const mintPubkey = new PublicKey(mint);
@@ -151,7 +142,7 @@ class SecurityGuard {
                     isMutable = metadataAcc.data.readUInt8(offset) === 1;
                 }
             } catch (metaErr) {
-                console.warn(`⚠️ [Security Guard] 讀取 Metadata 失敗 (忽略): ${metaErr.message}`);
+                // 忽略 Metadata 讀取錯誤
             }
 
             return { isSafe: true, isMutable: isMutable };
@@ -160,9 +151,6 @@ class SecurityGuard {
         }
     }
 
-    /**
-     * 🦅 原生 RPC 籌碼分佈探測
-     */
     async _checkTop10Holders(mint) {
         try {
             const mintPubkey = new PublicKey(mint);
@@ -189,14 +177,10 @@ class SecurityGuard {
             }
             return true;
         } catch (err) {
-            console.warn(`⚠️ [Top 10 Guard] 查閱籌碼失敗: ${err.message}`);
             return true; 
         }
     }
 
-    /**
-     * 🎯 V9.6 天網量化核心引擎
-     */
     async calculateQuantScore(mint, type = 'NEWBORN') {
         const dbParams = cacheManager.getStrategy(type);
 
@@ -219,47 +203,49 @@ class SecurityGuard {
         }
 
         // ==========================================
-        // 🛡️ [0 成本] 終極 OFI 裝甲與防刷量天網 (V9.6)
+        // 🛡️ [0 成本] 終極 OFI 裝甲與防刷量天網 (V10.9)
         // ==========================================
         const buys = marketData.buys5m;
         const sells = marketData.sells5m;
         const totalTxs5m = buys + sells;
 
-        // 1. OFI 缺失 / 死水攔截
-        if (totalTxs5m < 5) {
-            return { numeric_score: 0, isSafe: false, reason: `🛑 OFI 缺失: 5分鐘內真實交易極低 (Buys:${buys}, Sells:${sells})，拒絕盲狙`, marketData };
+        // 1. 🚨 絕對 OFI 數據要求 (核心修復)
+        // 如果 5 分鐘內交易極少，根本無法計算真實 OFI，拒絕盲狙！
+        const minTxsRequired = type === 'TRENDING' ? 20 : 10;
+        if (totalTxs5m < minTxsRequired) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 OFI 數據缺失: 5分鐘內僅 ${totalTxs5m} 筆真實交易 (要求:${minTxsRequired})，拒絕盲狙！`, marketData };
         }
 
-        // 2. 貔貅盤攔截
-        if (buys > 10 && sells === 0) {
-            return { numeric_score: 0, isSafe: false, reason: `🛑 貔貅攔截: 完全沒有賣單 (Buy:${buys}, Sell:0)`, marketData };
+        // 2. 貔貅盤攔截 (有活躍交易但 0 賣單)
+        if (totalTxs5m >= 10 && sells === 0) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 貔貅攔截: 活躍交易但完全沒有賣單 (Buy:${buys}, Sell:0)`, marketData };
         }
 
-        // 3. 納米乞衣刷量 (專殺 PFU 類 < $0.01 的造假單)
+        // 3. 納米乞衣刷量 (專殺微型造市單)
         const avgTradeSize = totalTxs5m > 0 ? (marketData.volume5m / totalTxs5m) : 0;
-        if (totalTxs5m >= 15 && avgTradeSize < 25) {
+        if (totalTxs5m >= 15 && avgTradeSize < 30) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 納米刷量: 發現乞衣級腳本造市，單筆均價極低 ($${avgTradeSize.toFixed(2)})`, marketData };
         }
 
-        // 4. 量價背離死亡交叉 (專殺 FWS/YELPE/PIEPA 大額腳本對沖)
+        // 4. 量價背離死亡交叉 (高換手但不漲)
         const turnover5m = marketData.liquidity > 0 ? (marketData.volume5m / marketData.liquidity) : 0;
-        if (turnover5m > 1.5 && marketData.h1 < 100) {
-            return { numeric_score: 0, isSafe: false, reason: `🛑 量價背離: 5m換手率極端異常 (${(turnover5m*100).toFixed(0)}%) 但價格並未爆發 (<100%)，必屬高階造市腳本互刷`, marketData };
+        if (turnover5m > 1.5 && marketData.h1 < 50) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 量價背離: 5m換手率極端異常 (${(turnover5m*100).toFixed(0)}%) 但價格並未爆發，必屬高階造市腳本互刷`, marketData };
         }
 
-        // 5. 女巫攻擊 / 完美對稱刷量 (Sybil Shield)
+        // 5. 女巫攻擊 / 完美對稱刷量
         const buyRatio = buys / totalTxs5m;
-        if (totalTxs5m > 50 && buyRatio > 0.45 && buyRatio < 0.55) {
+        if (totalTxs5m > 30 && buyRatio > 0.45 && buyRatio < 0.55) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 女巫刷量: 買賣極度對稱 (Ratio:${(buyRatio*100).toFixed(1)}%)，判定為腳本對沖`, marketData };
         }
 
         // 6. 惡劣 OFI (強大賣壓) 攔截
         const pseudoOfi = (buys - sells) / totalTxs5m; 
-        if (totalTxs5m > 15 && pseudoOfi < -0.2) {
-             return { numeric_score: 0, isSafe: false, reason: `🛑 惡劣 OFI 攔截: 買賣力道嚴重失衡 (OFI: ${pseudoOfi.toFixed(2)})，空軍壓境`, marketData };
+        if (totalTxs5m >= 10 && pseudoOfi < -0.2) {
+             return { numeric_score: 0, isSafe: false, reason: `🛑 惡劣 OFI: 買賣力道嚴重失衡 (OFI: ${pseudoOfi.toFixed(2)})，空軍壓境`, marketData };
         }
 
-        // 🌟 [0 成本] 終極實體防偽
+        // 🌟 終極實體防偽
         const VERIFIED_TOKENS = cacheManager.getVerifiedTokens();
         if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) {
             console.log(`🛡️ [Fake Shield] 觸發終極防偽！秒殺假冒 ${upperSymbol} (${mint})`);
