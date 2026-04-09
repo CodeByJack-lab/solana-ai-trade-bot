@@ -16,6 +16,21 @@ const Redis = require('ioredis');
 const redis = new Redis(config.cache.redisUrl);
 const redisSub = new Redis(config.cache.redisUrl); 
 
+// ========================================================
+// 🛡️ Redis 錯誤避震器 (攔截 ioredis INFO 錯誤防 Crash)
+// ========================================================
+redis.on('error', (err) => {
+    console.warn(`⚠️ [Redis Base] 緩存連線警告: ${err.message}`);
+});
+
+redisSub.on('error', (err) => {
+    if (err.message.includes("Can't execute 'info'")) {
+        return; // 直接吞噬 INFO 錯誤，防止 Node.js 崩潰
+    }
+    console.warn(`⚠️ [Redis Sub] 監聽頻道警告: ${err.message}`);
+});
+// ========================================================
+
 const { walletMonitorRouter } = require('./walletMonitor');
 const { securityGuard } = require('./securityGuard');
 const { routerService } = require('./router');
