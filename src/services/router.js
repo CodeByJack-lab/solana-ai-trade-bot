@@ -53,13 +53,11 @@ class Router {
         // 🚀 >= 90 分 (Fast-Track)，跳過 AI 審批
         if (score >= config.quant.fastTrackThreshold) {
             console.log(`[Router] 🚀 高質幣湧現！${mint} 獲得 ${score} 分，啟動 Fast-Track 跳過 AI 直購！`);
-            // 傳遞 envState 供回測記錄
             return await this._handleFastTrack(mint, poolType, score, marketData, multiplier, envState);
         } 
         // ⚖️ 60-89 分，進入 AI 議事廳微調
         else {
             console.log(`[Router] ⚖️ 潛力標的: ${mint} (${score} 分)，進入 AI 議事廳微調審批...`);
-            // 傳遞 envState 供回測記錄
             return await this._handleAiReview(mint, poolType, score, marketData, multiplier, newsScore, envState);
         }
     }
@@ -85,7 +83,6 @@ class Router {
         const baseAmount = await this._getTradeAmount(isMeme);
         const finalAmount = baseAmount * multiplier;
         
-        // 🚀 傳遞 marketData 與 envState 給 executeBuy
         return await executeBuy(mint, marketData.symbol, strategyBase, score, `🌟 量化 90+ 高質幣，Fast-Track (倍數: ${multiplier}x)`, finalAmount, marketData, envState);
     }
 
@@ -110,8 +107,12 @@ class Router {
      * ⚖️ 處理 AI 議事廳微調與動態倉位
      */
     async _handleAiReview(mint, poolType, baseScore, marketData, multiplier, newsScore, envState) {
-        // 送入 consensusService
-        const aiDecision = await consensusService.runMemeConsensus(mint, marketData, { baseScore });
+        // 🛠️ 傳遞 poolType 與 climate 給 AI，令其能夠動態切換劇本
+        const aiDecision = await consensusService.runMemeConsensus(mint, marketData, { 
+            baseScore,
+            poolType,
+            climate: envState.climate
+        });
         
         if (!aiDecision.buy) {
             console.log(`[Router] 🧠 AI 否決: ${aiDecision.reason}`);
@@ -144,7 +145,6 @@ class Router {
             console.log(`[Router] ⚖️ 最終分數 ${finalScore} >= 80，優質建倉 (投入: ${finalAmount} SOL)`);
         }
 
-        // 🚀 傳遞 marketData 與 envState 給 executeBuy
         return await executeBuy(mint, marketData.symbol, strategySuffix, finalScore, aiDecision.reason, finalAmount, marketData, envState);
     }
 

@@ -1,5 +1,6 @@
 // src/services/positionWatchdogService.js
 // 📝 檔案功能用途：V2.0 AI 督導員 (Watchdog)。負責階梯式體檢 (20%, 40%...) 並呼叫 Gemma 3 進行智能平倉決策。
+// 🛡️ V2.1 修復：實裝 Redis 併發鎖防衝突、攔截重複 SELL_HALF、強化 JSON 解析容錯。
 
 const axios = require('axios');
 const Redis = require('ioredis');
@@ -16,14 +17,14 @@ const positionWatchdogService = {
         // 階梯設定：每 20% 一個坎
         const milestoneLevel = Math.floor(currentProfitPct / 20) * 20;
 
-        // 如果利潤未夠 20% 或者已經過咗最高位，不干預
+        // 🛡️ 督導員只負責「高位套現」，跌市或未達標 ( < 20%) 交由 monitorService 的純 Code 硬止損處理
         if (milestoneLevel < 20) return;
 
         const lockKey = `watchdog_checked:${position.mint_address}:L${milestoneLevel}`;
         const isChecked = await redis.get(lockKey);
         
         if (!isChecked) {
-            console.log(`🕵️‍♂️ [Watchdog] 觸發 ${milestoneLevel}% 階梯體檢！準備呼叫 Gemma 3 評估 $${position.token_symbol}...`);
+            console.log(`🕵️‍♂️ [Watchdog] 觸發 ${milestoneLevel}% 階梯體檢！準備呼叫 AI 評估 $${position.token_symbol}...`);
             await redis.set(lockKey, 'DONE', 'EX', 86400); // 落鎖防止重複觸發
             await this.callAiWatchdog(position, currentProfitPct, maxPriceSol);
         }
@@ -53,15 +54,37 @@ const positionWatchdogService = {
             }, { headers: { 'Content-Type': 'application/json' }, timeout: 8000 });
 
             const responseText = res.data.candidates[0].content.parts[0].text;
-            const decision = JSON.parse(responseText.match(/\{[\s\S]*\}/)[0]);
+            const match = responseText.match(/\{[\s\S]*\}/);
+            if (!match) throw new Error("AI 吐出的不是有效 JSON");
+            
+            const decision = JSON.parse(match[0]);
+            console.log(`🤖 [AI Watchdog] $${position.token_symbol} | 判定: ${decision.action} | 理由: ${decision.thought_process}`);
 
-            console.log(`🤖 [Gemma Watchdog] $${position.token_symbol} | 判定: ${decision.action} | 理由: ${decision.thought_process}`);
+            // ⚡ 執行智能平倉 (實裝 Redis 併發鎖與防呆機制)
+            if (decision.action === 'SELL_HALF' || decision.action === 'SELL_ALL') {
+                
+                // 1. 檢查是否已經賣過一半，防止重複切香腸
+                const isHalfSold = position.strategy_type?.includes('HALF_SOLD');
+                if (decision.action === 'SELL_HALF' && isHalfSold) {
+                    console.log(`🛡️ [Watchdog] 已經平過半倉，無視重複的 SELL_HALF 指令，繼續讓利潤奔跑！`);
+                    return;
+                }
 
-            // 執行智能平倉
-            if (decision.action === 'SELL_HALF') {
-                await runSellPipeline(position, position.highest_price_sol, `AI 階梯體檢：鎖定一半利潤 (${decision.thought_process})`, 0.5);
-            } else if (decision.action === 'SELL_ALL') {
-                await runSellPipeline(position, position.highest_price_sol, `AI 階梯體檢：全數撤退 (${decision.thought_process})`, 1.0);
+                // 2. 獲取全域交易鎖，防止與 monitorService 撞車
+                const tradeLockKey = `sell_lock:${position.mint_address}`;
+                const acquired = await redis.set(tradeLockKey, 'LOCKED', 'EX', 30, 'NX');
+                
+                if (acquired) {
+                    try {
+                        const fraction = decision.action === 'SELL_HALF' ? 0.5 : 1.0;
+                        const actionText = decision.action === 'SELL_HALF' ? '鎖定一半利潤' : '全數撤退';
+                        await runSellPipeline(position, position.highest_price_sol, `🤖 AI 階梯體檢：${actionText} (${decision.thought_process})`, fraction);
+                    } finally {
+                        await redis.del(tradeLockKey); // 釋放鎖
+                    }
+                } else {
+                    console.log(`🛡️ [Watchdog] 發現 monitorService 正在處理 $${position.token_symbol} 的平倉，AI 督導員主動避讓。`);
+                }
             }
 
         } catch (error) {
