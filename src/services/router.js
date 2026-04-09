@@ -1,5 +1,5 @@
 // src/services/router.js
-// 📝 檔案功能用途：V9.2 漏斗大腦分流器。掛載「2D 動態倉位矩陣」，結合大市氣候標籤 (Climate) 與質素分數 (Score) 精準調配火力與 AI 權限。
+// 📝 檔案功能用途：V9.3 漏斗大腦分流器。掛載「2D 動態倉位矩陣」，並於下單時傳遞微觀環境特徵供歷史回測使用。
 
 const config = require('../config/config');
 const { supabase } = require('../config/supabase');
@@ -27,7 +27,7 @@ class Router {
         const score = secResult.numeric_score;
         const marketData = secResult.marketData;
 
-        // 🌍 0 毫秒極速讀取大市環境狀態 (O(1) Redis Lookup) - V9.2 氣候對接
+        // 🌍 0 毫秒極速讀取大市環境狀態
         const envStateStr = await redis.get('global_env_state');
         const envState = envStateStr ? JSON.parse(envStateStr) : { climate: 'CHOPPY', newsScore: 0 };
         const { climate, newsScore } = envState;
@@ -53,19 +53,21 @@ class Router {
         // 🚀 >= 90 分 (Fast-Track)，跳過 AI 審批
         if (score >= config.quant.fastTrackThreshold) {
             console.log(`[Router] 🚀 高質幣湧現！${mint} 獲得 ${score} 分，啟動 Fast-Track 跳過 AI 直購！`);
-            return await this._handleFastTrack(mint, poolType, score, marketData, multiplier);
+            // 傳遞 envState 供回測記錄
+            return await this._handleFastTrack(mint, poolType, score, marketData, multiplier, envState);
         } 
         // ⚖️ 60-89 分，進入 AI 議事廳微調
         else {
             console.log(`[Router] ⚖️ 潛力標的: ${mint} (${score} 分)，進入 AI 議事廳微調審批...`);
-            return await this._handleAiReview(mint, poolType, score, marketData, multiplier, newsScore);
+            // 傳遞 envState 供回測記錄
+            return await this._handleAiReview(mint, poolType, score, marketData, multiplier, newsScore, envState);
         }
     }
 
     /**
      * 🚀 處理 Fast-Track 極速直購與汰弱留強
      */
-    async _handleFastTrack(mint, poolType, score, marketData, multiplier) {
+    async _handleFastTrack(mint, poolType, score, marketData, multiplier, envState) {
         const isMeme = poolType === 'NEWBORN';
         const strategyBase = isMeme ? 'MEME_FASTTRACK' : 'TRENDING_FASTTRACK';
         const hasCapacity = isMeme ? canBuyMeme() : canBuyTrending();
@@ -83,7 +85,8 @@ class Router {
         const baseAmount = await this._getTradeAmount(isMeme);
         const finalAmount = baseAmount * multiplier;
         
-        return await executeBuy(mint, marketData.symbol, strategyBase, score, `🌟 量化 90+ 高質幣，Fast-Track (倍數: ${multiplier}x)`, finalAmount);
+        // 🚀 傳遞 marketData 與 envState 給 executeBuy
+        return await executeBuy(mint, marketData.symbol, strategyBase, score, `🌟 量化 90+ 高質幣，Fast-Track (倍數: ${multiplier}x)`, finalAmount, marketData, envState);
     }
 
     /**
@@ -94,20 +97,19 @@ class Router {
         const positions = portfolio.positions.filter(p => p.strategy_type.includes(isMeme ? 'MEME' : 'TRENDING'));
         if (positions.length === 0) return false;
 
-        // 鎖定 AI 評分最低或帳面最差的持倉
         const weakest = positions.sort((a, b) => (a.ai_score || 50) - (b.ai_score || 50))[0];
 
         console.log(`[Router] 🔪 鎖定最弱持倉: $${weakest.token_symbol}，準備市價處決...`);
         const success = await executeSell(weakest.mint_address, weakest.highest_price_sol || weakest.entry_price_sol, "🚨 汰弱留強：為 90+ 分極品騰出彈藥空間", 1.0);
         
-        if (success) await new Promise(r => setTimeout(r, 2000)); // 等待 DB 同步
+        if (success) await new Promise(r => setTimeout(r, 2000));
         return success;
     }
 
     /**
      * ⚖️ 處理 AI 議事廳微調與動態倉位
      */
-    async _handleAiReview(mint, poolType, baseScore, marketData, multiplier, newsScore) {
+    async _handleAiReview(mint, poolType, baseScore, marketData, multiplier, newsScore, envState) {
         // 送入 consensusService
         const aiDecision = await consensusService.runMemeConsensus(mint, marketData, { baseScore });
         
@@ -118,7 +120,6 @@ class Router {
 
         let finalScore = aiDecision.score || baseScore;
 
-        // ⚠️ 環境微調因子干預：若新聞極度負面 (<= -3)，剝奪 AI 的加分權限，只准減分
         if (newsScore <= -3 && finalScore > baseScore) {
             console.log(`[Router] 📰 新聞環境惡劣 (Score: ${newsScore})，剝奪 AI 加分權限！(原擬 ${baseScore} -> ${finalScore}，強制退回 ${baseScore})`);
             finalScore = baseScore; 
@@ -136,7 +137,6 @@ class Router {
         const finalAmount = baseAmount * multiplier;
         let strategySuffix = isMeme ? 'MEME_AI' : 'TRENDING_AI';
 
-        // 動態標記：若 AI 微調後分數仍落於 60-79 區間，強制套用 30 分鐘 Time-Stop 標記
         if (finalScore >= config.trade.sizeHalfPts && finalScore < config.trade.sizeFullPts) {
             strategySuffix += '_TIMESTOP';
             console.log(`[Router] ⚖️ 最終分數 ${finalScore} 落在 60-79 區間，套用 TimeStop 規則 (投入: ${finalAmount} SOL)`);
@@ -144,7 +144,8 @@ class Router {
             console.log(`[Router] ⚖️ 最終分數 ${finalScore} >= 80，優質建倉 (投入: ${finalAmount} SOL)`);
         }
 
-        return await executeBuy(mint, marketData.symbol, strategySuffix, finalScore, aiDecision.reason, finalAmount);
+        // 🚀 傳遞 marketData 與 envState 給 executeBuy
+        return await executeBuy(mint, marketData.symbol, strategySuffix, finalScore, aiDecision.reason, finalAmount, marketData, envState);
     }
 
     /**

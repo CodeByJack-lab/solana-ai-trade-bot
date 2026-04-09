@@ -1,6 +1,6 @@
 // src/services/environmentService.js
-// 📝 檔案功能用途：V9.2 大市氣候台與自動開關。綜合多維度數據判定氣候，並呼叫獨立的 aiAdvisorService 進行大腦決策。
-// 🚀 V9.2.2 升級：拔除 CryptoPanic 改用 RSS 矩陣、3分鐘死人開關、新聞 AI Prompt 全面交由 Supabase 熱更新控制。
+// 📝 檔案功能用途：V9.2 大市氣候台與自動開關。
+// 🚀 V9.2.3 升級：實裝 Cloudflare 穿透裝甲 (User-Agent 偽裝)，解決 CryptoSlate 403 阻擋問題。
 
 const axios = require('axios');
 const Parser = require('rss-parser');
@@ -10,7 +10,7 @@ const { sendMacroPanicApproval, sendAdminAlert } = require('./telegramService');
 const { aiAdvisorService } = require('./aiAdvisorService'); 
 const { healthMonitor } = require('./healthMonitor');
 const { supabase } = require('../config/supabase');
-const { cacheManager } = require('./cacheManager'); // 🛡️ 引入大腦快取
+const { cacheManager } = require('./cacheManager'); 
 
 const redis = new Redis(config.cache.redisUrl || process.env.REDIS_URL);
 const parser = new Parser();
@@ -116,7 +116,17 @@ class EnvironmentService {
             const provider = NEWS_PROVIDERS[(activeNewsIdx + i) % NEWS_PROVIDERS.length];
             try {
                 let titles = [];
-                const res = await axios.get(provider.url, { timeout: 8000 });
+                // 🛡️ 實裝 Cloudflare 穿透裝甲 (Browser Disguise)
+                const res = await axios.get(provider.url, { 
+                    timeout: 10000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                        'Accept': 'application/rss+xml, application/xml, text/xml, */*',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Cache-Control': 'no-cache'
+                    }
+                });
+                
                 const feed = await parser.parseString(res.data);
                 if (feed?.items) titles = feed.items.slice(0, 20).map(item => item.title);
 
@@ -131,36 +141,34 @@ class EnvironmentService {
         return 0; 
     }
 
-    // 🧠 V9.2.2 升級：透過 CacheManager 動態讀取 Supabase 劇本與模型輪替
     async _analyzeTitles(titles) {
         try {
-            const groqApiKey = process.env.GROQ_API_KEY_1;
-            if (!groqApiKey) throw new Error("Missing GROQ_API_KEY_1");
-
-            // 將標題陣列格式化為換行字串，注入劇本變數
-            const formattedTitles = titles.map((t, i) => `${i+1}. ${t}`).join('\n');
-            const aiConfig = cacheManager.getPromptConfig('news_sentiment_analyst', { titles: formattedTitles });
+            // 自動判斷使用邊條 Key (GROQ 或 GEMINI)
+            const aiConfig = cacheManager.getPromptConfig('news_sentiment_analyst', { titles: titles.map((t, i) => `${i+1}. ${t}`).join('\n') });
+            const provider = aiConfig.provider || 'GROQ';
             
             let responseText = null;
 
-            // 🤖 智能模型輪替 (防死機)
             for (const model of aiConfig.models) {
                 try {
-                    const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
-                        model: model,
-                        messages: [{ role: 'user', content: aiConfig.parsedPrompt }],
-                        response_format: { type: "json_object" },
-                        temperature: 0.1
-                    }, {
-                        headers: {
-                            'Authorization': `Bearer ${groqApiKey}`,
-                            'Content-Type': 'application/json'
-                        },
-                        timeout: 8000
-                    });
-                    
-                    responseText = res.data.choices[0].message.content;
-                    break; // 成功獲取則跳出迴圈
+                    if (provider === 'GEMINI' || model.includes('gemini')) {
+                        const geminiKey = process.env.GEMINI_API_KEY_1;
+                        if (!geminiKey) throw new Error("Missing GEMINI_API_KEY_1");
+                        const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`, {
+                            contents: [{ parts: [{ text: aiConfig.parsedPrompt }] }],
+                            generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
+                        }, { headers: { 'Content-Type': 'application/json' }, timeout: 10000 });
+                        responseText = res.data.candidates[0].content.parts[0].text;
+                    } else {
+                        const groqKey = process.env.GROQ_API_KEY_1;
+                        if (!groqKey) throw new Error("Missing GROQ_API_KEY_1");
+                        const apiUrl = groqKey.startsWith('gsk_') ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
+                        const res = await axios.post(apiUrl, {
+                            model: model, messages: [{ role: 'user', content: aiConfig.parsedPrompt }], response_format: { type: "json_object" }, temperature: 0.1
+                        }, { headers: { 'Authorization': `Bearer ${groqKey}`, 'Content-Type': 'application/json' }, timeout: 10000 });
+                        responseText = res.data.choices[0].message.content;
+                    }
+                    break; 
                 } catch (apiErr) {
                     console.warn(`⚠️ [Env Service] 模型 ${model} 新聞分析失敗，嘗試後備...`);
                 }
@@ -168,11 +176,9 @@ class EnvironmentService {
 
             if (!responseText) throw new Error("所有新聞分析模型均已陣亡");
 
-            const parsed = JSON.parse(responseText);
+            const parsed = JSON.parse(responseText.match(/\{[\s\S]*\}/)[0]);
             let score = parseInt(parsed.score);
-            if (isNaN(score)) score = 0;
-            
-            return Math.max(-5, Math.min(5, score));
+            return Math.max(-5, Math.min(5, isNaN(score) ? 0 : score));
             
         } catch (error) {
             console.warn(`⚠️ [Env Service] AI 分析徹底失敗 (${error.message})，降級使用關鍵字計分...`);
@@ -180,7 +186,6 @@ class EnvironmentService {
         }
     }
 
-    // 🛡️ 備用降級方案 (舊版關鍵字計分)
     _fallbackAnalyze(titles) {
         const fullText = titles.join(' ').toLowerCase();
         const negativeWords = ['scam', 'hack', 'exploit', 'investigation', 'ban', 'lawsuit', 'regulation', 'crackdown', 'crash', 'drop', 'bear', 'sec', 'sell-off'];
@@ -222,7 +227,7 @@ class EnvironmentService {
                 macro_climate: currentClimate,
                 latest_news_score: newsScore
             }).eq('id', 1);
-        } catch(e) { console.warn(`⚠️ 同步氣候至 DB 失敗`); }
+        } catch(e) {}
 
         const prevClimate = await redis.get('prev_climate_state');
         if (prevClimate !== currentClimate) {
@@ -231,17 +236,14 @@ class EnvironmentService {
             
             try {
                 await aiAdvisorService.evaluateClimateChange(currentClimate, envState);
-            } catch (err) {
-                console.warn(`⚠️ 呼叫 AI 大腦失敗: ${err.message}`);
-            }
+            } catch (err) {}
         }
 
         if (currentClimate === 'BEAR_PANIC') {
             const isPending = await redis.get('macro_panic_pending');
             if (!isPending) {
                 console.log(`🚨 [Env Service] 偵測到 BEAR_PANIC 恐慌狀態！發送大盤熔斷審批！`);
-                const reason = `📉 BTC 跌幅: ${macro.btcDrop.toFixed(2)}%\n📉 SOL 跌幅: ${macro.solDrop.toFixed(2)}%\n📰 新聞情緒: ${newsScore}\n🌊 交易量: ${(macro.solVolSurge*100).toFixed(0)}% (相較平均)`;
-                await sendMacroPanicApproval(reason);
+                await sendMacroPanicApproval(`📉 BTC 跌幅: ${macro.btcDrop.toFixed(2)}%\n📉 SOL 跌幅: ${macro.solDrop.toFixed(2)}%\n📰 新聞情緒: ${newsScore}\n🌊 交易量: ${(macro.solVolSurge*100).toFixed(0)}% (相較平均)`);
             }
         }
     }

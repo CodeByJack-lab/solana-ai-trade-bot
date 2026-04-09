@@ -1,6 +1,7 @@
 // src/services/monitorService.js
 // 📝 檔案功能用途：V9.2 終極風控樞紐。結合 Telegram Webhook 裝甲、Redis 瀑布防線、全域快取參數 O(1) 讀取、精準分批止盈、動態追蹤止損、無差別 Time-Stop、主動清道夫及 AMM 報價崩潰防護。
 // 🛡️ 新增裝甲：Helius Webhook 對接、OFI 缺失攔截防線、3階段指數退避解決 404 API 延遲。
+// 🚀 V2.0 升級：引入保本登月流，廢除死板 TP1，實裝 positionWatchdogService 階梯式 AI 體檢！
 
 const express = require('express');
 const cors = require('cors');
@@ -18,6 +19,7 @@ const redisSub = new Redis(config.cache.redisUrl);
 const { walletMonitorRouter } = require('./walletMonitor');
 const { securityGuard } = require('./securityGuard');
 const { routerService } = require('./router');
+const { positionWatchdogService } = require('./positionWatchdogService'); // 👈 引入 AI 督導員
 
 // 📦 新增依賴：用於 API 退避查詢與 RPC 降級
 const axios = require('axios');
@@ -84,23 +86,16 @@ async function fetchMarketDataWithOFI(mintAddress) {
                     const ofiRatio = (buys - sells) / totalTxns;
                     ofiStatus = (ofiRatio * 100).toFixed(2) + "%";
                     
-                    // 1. 基礎活躍度檢查 (確保唔係死水)
-                    if (buys >= 5 && sells >= 5) {
-                        isOFIOk = true;
-                    }
+                    if (buys >= 5 && sells >= 5) isOFIOk = true;
 
-                    // 2. 🚨 女巫攻擊防禦 (Sybil Wash Trading Shield)
-                    // 真實市場極少出現完美 50:50 的買賣次數。如果交易次數多 (>50)，且比例落在 48% - 52% 之間，極度可疑。
                     if (totalTxns > 50 && buyRatio > 0.48 && buyRatio < 0.52) {
                         isOFIOk = false;
-                        console.error(`🚨 [SYBIL DETECTED] 買賣極度對稱 (Buys: ${buys}, Sells: ${sells}, Ratio: ${(buyRatio*100).toFixed(1)}%)。判定為莊家腳本刷單！`);
+                        console.error(`🚨 [SYBIL DETECTED] 買賣極度對稱 (Ratio: ${(buyRatio*100).toFixed(1)}%)。判定為莊家腳本刷單！`);
                     }
 
-                    // 3. 🚨 換手率異常防禦 (Churn Rate Anomaly)
-                    // 如果 1 小時交易量是流動性池的 5 倍以上，且買賣訂單流失衡率 < 5% (接近 0)，代表資金在空轉。
                     if (liquidity > 0 && (volume / liquidity) > 5 && totalTxns > 50 && Math.abs(ofiRatio) < 0.05) {
                         isOFIOk = false;
-                        console.error(`🚨 [CHURN ANOMALY] 換手率極度異常 (Vol: $${volume}, Liq: $${liquidity}) 且 OFI 趨零，刷量特徵明顯！`);
+                        console.error(`🚨 [CHURN ANOMALY] 換手率極度異常 且 OFI 趨零，刷量特徵明顯！`);
                     }
                 }
 
@@ -109,7 +104,6 @@ async function fetchMarketDataWithOFI(mintAddress) {
         } catch (error) {
             console.warn(`⚠️ [API WARNING] 獲取 ${mintAddress} 失敗. 嘗試 ${attempt + 1}/${delays.length}`);
         }
-        console.log(`⏳ [BACKOFF] 等待 ${delays[attempt]}ms 讓 Indexer 建立流動性池資料庫...`);
         await sleep(delays[attempt]);
     }
     return { success: false, indexed: false };
@@ -119,7 +113,7 @@ async function fetchMarketDataWithOFI(mintAddress) {
 // 🚀 Helius Radar Webhook (解決 100ms 404 問題的雷達入口)
 // ========================================================
 app.post('/webhook/radar', async (req, res) => {
-    res.status(200).send('OK'); // 防止 Helius 超時重試
+    res.status(200).send('OK'); 
 
     const mint = extractBase58(req.body[0] || req.body);
     if (!mint) return;
@@ -127,7 +121,7 @@ app.post('/webhook/radar', async (req, res) => {
     console.log(`\n🚀 [RADAR] Helius Webhook 偵測到新幣: ${mint}`);
 
     const inNursery = await redis.zscore('v9_nursery_queue', mint);
-    if (inNursery) return; // 防大洪水併發：已在處理隊列中
+    if (inNursery) return; 
 
     const marketData = await fetchMarketDataWithOFI(mint);
     
@@ -143,7 +137,7 @@ app.post('/webhook/radar', async (req, res) => {
     }
 
     if (!marketData.isOFIOk) {
-        console.error(`🚨 [OFI SHIELD] 攔截 ${mint} | OFI: ${marketData.ofiStatus} | 判定: 莊家左手交右手刷量或貔貅盤 (Wash Trading/Honeypot)`);
+        console.error(`🚨 [OFI SHIELD] 攔截 ${mint} | OFI: ${marketData.ofiStatus} | 判定: 莊家左手交右手刷量或貔貅盤`);
         return;
     }
 
@@ -164,12 +158,11 @@ app.post('/webhook/radar', async (req, res) => {
 });
 
 // ========================================================
-// 🚨 Telegram 0 延遲恐慌按鈕 Webhook (V9.2 裝甲化)
+// 🚨 Telegram 0 延遲恐慌按鈕 Webhook
 // ========================================================
 app.post('/webhook/telegram', async (req, res) => {
     const secretToken = req.headers['x-telegram-bot-api-secret-token'];
     if (process.env.TELEGRAM_SECRET_TOKEN && secretToken !== process.env.TELEGRAM_SECRET_TOKEN) {
-        console.warn(`🛡️ [Webhook] 攔截到未經授權的 POST 請求！(Secret 錯誤)`);
         return res.status(403).send('Forbidden');
     }
 
@@ -228,7 +221,7 @@ app.post('/webhook/telegram', async (req, res) => {
 });
 
 // ========================================================
-// 🎯 核心風控：0 延遲監控與 LP 拔線邏輯 (V9.2 Redis 防護版)
+// 🎯 核心風控：V2.0 AI 督導員保本登月流 (取代舊死板止盈)
 // ========================================================
 async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd, portfolio) {
     if (!currentPriceSol || currentPriceSol <= 0) return;
@@ -272,7 +265,6 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
     const dropFrom1MinHigh = ((currentPriceSol - maxPriceLast60s) / maxPriceLast60s) * 100;
 
     const pnlPct = ((currentPriceSol - pos.entry_price_sol) / pos.entry_price_sol) * 100;
-    const isHalfSold = pos.strategy_type?.includes('HALF_SOLD') || radarState.halfSellTriggered === 'true';
     const isTrending = pos.strategy_type?.includes('TRENDING');
 
     const cache = cacheManager.getConfig(isTrending ? 'TRENDING' : 'MEME');
@@ -281,22 +273,17 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
     const timeStopTarget = cache.time_stop_target_pct || (isTrending ? 5.0 : 15.0);
     const stopLossLimit = cache.stop_loss_pct || (isTrending ? -20.0 : -25.0);
     
-    const trailingTpTrigger = cache.trailing_tp_trigger || 50.0; 
-    const trailingPullback = cache.trailing_pullback || (isTrending ? 10.0 : 20.0);
-    
-    const tpLevel1 = cache.tp_level_1_pct || (isTrending ? 30.0 : 50.0);
-    const tpLevel2 = cache.tp_level_2_pct || 100.0;
+    const trailingTpTrigger = cache.trailing_tp_trigger || 20.0; 
+    const trailingPullback = cache.trailing_pullback || 15.0;
 
     let action = 'HOLD';
     let reason = '';
     let sellFraction = 1.0;
 
     // 🚨 優先級 0：防騙濾鏡 (AMM 報價崩潰 / Rug Pull 瞬間暴漲偵測)
-    // 正常 100 倍金狗是慢慢升的。如果 2 秒內報價突然跨越式狂飆超過前高 5 倍，且帳面利潤 > 500%，絕對是莊家抽池！
     const previousHigh = pos.highest_price_sol || pos.entry_price_sol;
     if ((currentPriceSol / previousHigh) > 5 && pnlPct > 500) {
         action = 'SELL';
-        sellFraction = 1.0;
         reason = `☠️ 慘遭 Rug Pull (流動性歸零導致報價幻象)，強制撇帳`;
     }
 
@@ -304,32 +291,17 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
     if (action === 'HOLD' && currentLiquidityUsd && maxLiquidity > 5000) { 
         if (currentLiquidityUsd < maxLiquidity * 0.60) {
             action = 'SELL';
-            sellFraction = 1.0;
             reason = `🛑 RUG PULL 拔線：流動性由 $${maxLiquidity.toFixed(0)} 暴跌至 $${currentLiquidityUsd.toFixed(0)} (流失 > 40%)`;
         }
     }
 
-    // 🎯 優先級 2：分批與終極止盈
-    if (action === 'HOLD') {
-        if (!isHalfSold && pnlPct >= tpLevel1) {
-            action = 'SELL';
-            sellFraction = 0.5; 
-            await redis.hset(stateKey, 'halfSellTriggered', 'true');
-            reason = `🎯 分批落袋：PnL 達 +${pnlPct.toFixed(0)}% (目標: ${tpLevel1}%)，回收 50% 倉位`;
-        } else if (isHalfSold && pnlPct >= tpLevel2) {
-            action = 'SELL';
-            sellFraction = 1.0; 
-            reason = `🎯 終極止盈：PnL 達標 +${pnlPct.toFixed(0)}% (目標: ${tpLevel2}%)，全數平倉落袋！`;
-        }
-    }
-
-    // 🚨 優先級 3：1 分鐘極速瀑布防線
+    // 🚨 優先級 2：1 分鐘極速瀑布防線
     if (action === 'HOLD' && dropFrom1MinHigh <= -15) {
         action = 'SELL'; 
         reason = `🚨 觸發瀑布防線：1 分鐘內極速插水 ${dropFrom1MinHigh.toFixed(2)}%`;
     }
 
-    // ⏱️ 優先級 4：動態 Time-Stop 時間止損
+    // ⏱️ 優先級 3：動態 Time-Stop 時間止損
     if (action === 'HOLD' && pos.created_at) {
         const ageMins = (now - new Date(pos.created_at).getTime()) / 60000;
         if (ageMins >= timeStopMins && pnlPct < timeStopTarget) {
@@ -338,21 +310,21 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
         }
     }
 
-    // 📉 優先級 5：動態硬止損與獲利回撤保護
+    // 📉 優先級 4：硬止損 與 追蹤回撤無情斬首
     if (action === 'HOLD') {
         const highestPnlPct = (((pos.highest_price_sol || pos.entry_price_sol) - pos.entry_price_sol) / pos.entry_price_sol) * 100;
         
         if (pnlPct <= stopLossLimit) {
             action = 'SELL';
-            reason = `💥 硬止損觸發: ${pnlPct.toFixed(1)}% 跌穿 ${stopLossLimit}%`;
+            reason = `💥 硬止損觸發: ${pnlPct.toFixed(1)}% 跌穿底線 ${stopLossLimit}%`;
         }
         else if (highestPnlPct >= trailingTpTrigger && (highestPnlPct - pnlPct) >= trailingPullback) {
             action = 'SELL';
-            reason = `💰 獲利回撤保護: 高位 +${highestPnlPct.toFixed(0)}% 回落 ${trailingPullback} 點`;
+            reason = `🛡️ 觸發無情追蹤止盈 (從高位 +${highestPnlPct.toFixed(0)}% 回落 ${trailingPullback} 點，鎖定利潤)`;
         }
     }
 
-    // ⚡ 執行區：鎖衝突優化
+    // ⚡ 執行區：純 Code 執行，或交由 AI 督導員體檢
     if (action === 'SELL') {
         const lockKey = `sell_lock:${mint}`;
         const acquired = await redis.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
@@ -361,14 +333,11 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
         try {
             console.log(`🎬 [ACTION] ${reason}`);
             await runSellPipeline(pos, currentPriceSol, reason, sellFraction);
-            
-            if (sellFraction === 0.5 && typeof sendTelegramAlert === 'function') {
-                sendTelegramAlert(`🎯 <b>分批落袋為安！</b>\n🪙 代幣: $${pos.token_symbol}\n🔥 利潤達標，已配合 Decimals 精準賣出 50% 倉位！`);
-            }
         } finally {
             await redis.del(lockKey); 
         }
     } else {
+        // 如果未觸發任何斬倉警報，則更新最高價並交畀 AI Watchdog 體檢
         if (currentPriceSol > (pos.highest_price_sol || 0)) {
             pos.highest_price_sol = currentPriceSol;
             const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
@@ -378,6 +347,9 @@ async function handleZeroLatencyCheck(mint, currentPriceSol, currentLiquidityUsd
                 .then()
                 .catch(()=>{}); 
         }
+
+        // 🤖 V2.0：交由 AI 督導員執行階梯體檢 (20%, 40%...)
+        positionWatchdogService.checkMilestones(pos, currentPriceSol, pos.highest_price_sol).catch(e => console.error(e));
     }
 }
 
@@ -438,7 +410,7 @@ function startActiveSweeper() {
 // 🌐 啟動大本營監控迴圈
 // ========================================================
 function startPositionMonitor() {
-    console.log('👁️ [Monitor] V9.2 終極風控啟動：主動清道夫、LP 拔線、分批止盈、手動斬倉、OFI 防護與滿倉節流全數就位。');
+    console.log('👁️ [Monitor] V2.0 終極風控啟動：AI 督導員、無情追蹤回撤、主動清道夫、LP 拔線、OFI 防護全數就位。');
     
     setInterval(async () => {
         try { 
@@ -575,7 +547,6 @@ function startPositionMonitor() {
 
                 const evalPromises = ripeTokens.map(async (mint) => {
                     try {
-                        // 🛡️ OFI 二次防線：阻擋潛伏期 Wash Trading
                         const marketData = await fetchMarketDataWithOFI(mint);
                         if (marketData.success && !marketData.isOFIOk) {
                             console.error(`🚨 [NURSERY OFI SHIELD] 攔截 ${mint} | 判定: 潛伏期造假盤`);
@@ -601,7 +572,7 @@ function startPositionMonitor() {
 
 function startMarketMonitor() {
     app.listen(process.env.PORT || 8080, '0.0.0.0', () => {
-        console.log('🔄 [System] 啟動 V9.2 獨立 Webhook 伺服器與風控中心 (OFI Shield Active)...');
+        console.log('🔄 [System] 啟動 V2.0 獨立 Webhook 伺服器與風控中心 (AI Watchdog + OFI Shield Active)...');
         startPositionMonitor();
         startActiveSweeper(); 
     });

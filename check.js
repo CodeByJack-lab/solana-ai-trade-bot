@@ -1,43 +1,42 @@
+// check_gemini_models.js
+// 📝 用途：一鍵查詢你個 API Key 可以調用嘅所有 Gemini / Gemma 模型名稱。
+
 const axios = require('axios');
-const path = require('path');
-require('dotenv').config({ path: path.resolve(__dirname, '.env') });
+require('dotenv').config(); // 讀取你個 .env 檔案入面嘅 API Key
 
-// 👈 喺度改返你想用嚟 Check 嗰條 Key 嘅變數名 (例如 GEMINI_API_KEY_1)
-const KEY_NAME = 'GEMINI_API_KEY_1'; 
+async function listGeminiModels() {
+    // 優先讀取 .env 入面嘅 GEMINI_API_KEY_1，如果無就硬塞落去
+    const apiKey = process.env.GEMINI_API_KEY_1 || '請喺度貼上你嘅_GEMINI_API_KEY'; 
 
-async function listModels() {
-    const apiKey = process.env[KEY_NAME];
-    
-    if (!apiKey) {
-        console.error(`❌ 錯誤：喺 .env 搵唔到 ${KEY_NAME}，請檢查 File 是否存在。`);
+    if (!apiKey || apiKey.includes('請喺度貼上')) {
+        console.error('❌ 錯誤：請先設定 GEMINI_API_KEY_1');
         return;
     }
 
+    console.log('🔍 正在向 Google 總部索取模型清單...\n');
+
     try {
-        // 使用 v1beta 接口獲取最完整的清單
-        const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`;
-        const response = await axios.get(url);
+        const response = await axios.get(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
         
-        console.log(`\n=== 🔍 [${KEY_NAME}] 可用的 Model ID 清單 ===\n`);
+        const models = response.data.models;
         
-        const models = response.data.models || [];
+        console.log('✅ 成功獲取！以下係你可以用嘅模型清單 (請留意 name 欄位)：\n');
         
-        models.forEach(m => {
-            const realId = m.name.replace('models/', '');
-            
-            // 只列出支援 generateContent 嘅模型（即係可以用落你隻 Bot 嘅大腦）
-            if (m.supportedGenerationMethods.includes('generateContent')) {
-                console.log(`👉 代碼: ${realId.padEnd(35)} | 名稱: ${m.displayName}`);
+        models.forEach(model => {
+            // 我哋只篩選出支援 "generateContent" (生成文字) 嘅模型
+            if (model.supportedGenerationMethods.includes('generateContent')) {
+                console.log(`🤖 模型名稱: ${model.name.replace('models/', '')}`);
+                console.log(`   - 簡介: ${model.displayName}`);
+                console.log(`   - 版本: ${model.version}`);
+                console.log('----------------------------------------');
             }
         });
 
-        console.log("\n✅ 掃描完畢！請將上面【代碼】一欄嘅文字（例如 gemini-1.5-flash）");
-        console.log("放入 Supabase 的 ai_roles 表格中對應的 model_1 或 model_2。");
+        console.log('💡 提示：請將上面【模型名稱】(例如 gemini-1.5-pro) 填入 Supabase 嘅 model_main / model_backup 欄位！');
 
     } catch (error) {
-        const errorMsg = error.response?.data?.error?.message || error.message;
-        console.error(`❌ 查詢失敗: ${errorMsg}`);
+        console.error('❌ 獲取失敗！API 報錯：', error.response ? error.response.data : error.message);
     }
 }
 
-listModels();
+listGeminiModels();

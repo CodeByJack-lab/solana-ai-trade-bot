@@ -1,9 +1,10 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：交易執行大腦。實裝 V9.2 防 MEV 動態滑點 (最高鎖死 10%)、小數點精度防護、以及原路折返黑客逃生艙。
+// 📝 檔案功能及用途：交易執行大腦。實裝 V9.2 防 MEV 動態滑點、小數點精度防護、原路折返黑客逃生艙。
+// 🚀 V9.3 升級：修復 RugCheck 漏洞 (肥佬即入黑名單踢出保溫箱)，並擴充歷史回測微觀數據欄位。
 
 const { getPortfolio, updateCache } = require('./portfolioService');
 const { cacheManager } = require('./cacheManager'); 
-const { fallbackEscapeService } = require('./fallbackEscapeService'); // 🛸 V9.2 引入黑客逃生艙
+const { fallbackEscapeService } = require('./fallbackEscapeService'); 
 const { supabase } = require('../config/supabase'); 
 const axios = require('axios');
 const { PublicKey, Keypair, Connection } = require('@solana/web3.js'); 
@@ -154,22 +155,18 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
             const status = err.response.status;
             const errorMsg = err.response.data?.error || err.response.data?.message || '未知錯誤';
             
-            if (status === 400) {
-            } else if (status === 429) {
+            if (status === 429) {
                 console.log(`🚨 [Jupiter] 頻率限制 (429)！API 請求過快或額度爆滿。`);
             } else if (status === 401 || status === 403) {
                 console.log(`🚨 [Jupiter] API Key 無效或未授權 (Status: ${status})！`);
-            } else {
-                console.log(`❌ [Jupiter Error] Status: ${status} | Msg: ${errorMsg}`);
             }
-        } else {
-            console.log(`❌ [Jupiter Network Error] 網絡連線異常: ${err.message}`);
         }
         return null;
     }
 }
 
-async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol) {
+// 🚀 加入 marketData 與 envState 以供回測記錄
+async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol, marketData = {}, envState = {}) {
     console.log(`\n========================================`);
     console.log(`⚡ [Execution] 啟動下單程序: 狙擊目標 ${tokenSymbol}`);
 
@@ -224,9 +221,20 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
+    // 🚀 核心修復：RugCheck 失敗即加入黑名單並踢出保溫箱
     const isRugSafe = await checkRugcheckApi(mintAddress);
     if (!isRugSafe) {
-        console.log(`❌ [Execution] ${tokenSymbol} 未能通過 RugCheck 最終防線，取消買入。`);
+        console.log(`❌ [Execution] ${tokenSymbol} 未能通過 RugCheck 最終防線，取消買入並永久剔除。`);
+        try {
+            const Redis = require('ioredis');
+            const tempRedis = new Redis(configEnv.cache.redisUrl);
+            await tempRedis.set(`scam_blacklist:${mintAddress}`, 'RUGCHECK_FAILED', 'EX', 86400); // 鎖 24 小時
+            tempRedis.quit();
+            
+            await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
+            await supabase.from('nursery_pool').delete().eq('mint_address', mintAddress);
+            console.log(`🗑️ [Blacklist] 已將 $${tokenSymbol} 打入 Redis 黑名單並踢出保溫箱！`);
+        } catch (err) {}
         return false;
     }
 
@@ -255,22 +263,17 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
 
     if (!quoteData) {
         console.log(`❌ [Execution] 嘗試 3 次防 MEV 階梯滑點 (最高鎖死 10%) 後依然無報價，為防被夾擊，放棄狙擊。`);
-        
         try {
             const Redis = require('ioredis');
             const tempRedis = new Redis(configEnv.cache.redisUrl);
             await tempRedis.set(`scam_blacklist:${mintAddress}`, 'UNROUTABLE', 'EX', 86400);
             tempRedis.quit();
-            
             console.log(`🗑️ [Blacklist] 已將 $${tokenSymbol} 加入 24 小時無法路由黑名單，停止盲目追擊。`);
 
             if (strategyType.includes('TRENDING')) {
                 await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
             }
-        } catch (redisErr) {
-            console.log(`⚠️ [Blacklist Error] 無法寫入黑名單: ${redisErr.message}`);
-        }
-        
+        } catch (redisErr) {}
         return false;
     }
     
@@ -332,12 +335,17 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             ai_score: aiScore
         }]);
 
+        // 🚀 核心更新：將微觀特徵一併寫入 DB 供日後 Gemini 3.5 Pro 回測分析
         await supabase.from(`trade_history_${tableSuffix}`).insert([{
             token_mint: mintAddress, token_symbol: tokenSymbol, action: 'BUY',
             strategy_type: strategyType, price_sol: buyPriceSol, quantity: tokenQuantity,
             total_value_sol: totalCostSol, post_trade_balance: newBalance, 
             txid: finalTxid, ai_factcheck_result: aiReason, review_history: aiReason,
-            ai_score: aiScore
+            ai_score: aiScore,
+            entry_liquidity_usd: marketData.liquidity || 0,
+            entry_volume_5m_usd: marketData.volume5m || 0,
+            entry_ofi: marketData.ofi || null,
+            market_climate: envState.climate || 'UNKNOWN'
         }]);
 
         console.log(`✅ 🟢 【買入成功 - ${tokenSymbol}】 🟢 ✅`);
@@ -396,10 +404,8 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         }
     }
 
-    // 🛸 終極逃生艙介入：若 Jupiter 徹底放棄，發射逃生艙！
     if (!quoteData && isLive && isStopLoss && pos.buy_dex_label) {
         console.log(`❌ [Fatal] Jupiter 已達極限滑點仍無法報價，啟動終極黑客逃生艙！`);
-        
         const escapeResult = await fallbackEscapeService.executeEscape(pos, sellQuantity);
         if (escapeResult && escapeResult.success) {
             await commitTradeToDb(posIndex, escapeResult.sellValueSol, escapeResult.finalPriceSol, -pos.entry_price_sol * sellQuantity, -99.9, reason + " [逃生艙發射]", sellQuantity, sellFraction, pos.strategy_type, escapeResult.txid);
@@ -429,7 +435,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
         } else {
             console.log(`🛡️ 啟動「分拆砸盤」機制，本次僅平倉原定比例的 50%。`);
             sellFraction = sellFraction * 0.5;
-            sellQuantity = Math.floor(new BigNumber(pos.quantity).times(sellFraction).toNumber() * multiplier) / multiplier; // 精度防護
+            sellQuantity = Math.floor(new BigNumber(pos.quantity).times(sellFraction).toNumber() * multiplier) / multiplier; 
             quoteData = await getJupiterFinalQuote(mintAddress, false, sellQuantity, currentSlippage);
             if (!quoteData) return false;
         }
@@ -563,6 +569,9 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
 
     await supabase.from('system_config').update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance }).eq('id', 1);
 
+    // 🚀 核心擴充：記錄持倉時間 (Hold Time Mins)
+    const holdTimeMins = pos.created_at ? Math.floor((Date.now() - new Date(pos.created_at).getTime()) / 60000) : 0;
+
     await supabase.from(`trade_history_${tableSuffix}`).insert([{
         token_mint: mintAddress, token_symbol: pos.token_symbol,
         action: sellFraction >= 0.99 ? 'SELL' : 'SELL_HALF',
@@ -570,7 +579,8 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         quantity: sellQuantity, total_value_sol: sellValueSol,
         realized_pnl_sol: pnlSol, realized_pnl_pct: pnlPct,
         post_trade_balance: newBalance, txid: txid,
-        ai_factcheck_result: finalReason, review_history: pos.last_review_comment || pos.ai_reason 
+        ai_factcheck_result: finalReason, review_history: pos.last_review_comment || pos.ai_reason,
+        hold_time_mins: holdTimeMins
     }]);
 
     if(typeof sendTelegramAlert === 'function') {
@@ -590,43 +600,30 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
 async function handleIncomingFund(address, amount, txid) {
     console.log(`🚀 [Process] 處理新入帳: ${amount} SOL from ${address}`);
-    
     let personName = await getPersonNameByAddress(address);
-    
     if (!personName) {
         console.log(`⚠️ [Process] 發現未知入金地址: ${address}，將以「未命名金主」記錄`);
         personName = `未命名_${address.substring(0, 4)}`;
     }
-
     const isInserted = await logNewDeposit(address, personName, amount, txid);
-    if (!isInserted) {
-        console.log(`❌ [Process] 寫入入金紀錄失敗 (TX: ${txid})`);
-        return;
-    }
+    if (!isInserted) return;
 
     if (globalWalletPublicKey) {
         const realLamports = await executeReadWithFailover('getBalance(IncomingFund)', async (readConn) => {
             return await readConn.getBalance(new PublicKey(globalWalletPublicKey));
         });
-        if (realLamports !== null) {
-            await supabase.from('system_config').update({ live_wallet_balance: realLamports / 1e9 }).eq('id', 1);
-        }
+        if (realLamports !== null) await supabase.from('system_config').update({ live_wallet_balance: realLamports / 1e9 }).eq('id', 1);
     }
 
     const stats = await getContributionStats(personName);
-    if (stats) {
-        const percentage = parseFloat(stats.percentage) || 0;
-        const currentBalance = parseFloat(stats.current_balance) || 0;
-        if (typeof sendTelegramAlert === 'function') {
-            sendTelegramAlert(`💰 <b>資金到帳</b>\n👤 來源: ${stats.person_name}\n💵 入帳: <code>${amount}</code> SOL\n📊 佔比: <code>${percentage.toFixed(2)}%</code>\n🏛️ 資產: <code>${currentBalance.toFixed(4)}</code> SOL`);
-        }
+    if (stats && typeof sendTelegramAlert === 'function') {
+        sendTelegramAlert(`💰 <b>資金到帳</b>\n👤 來源: ${stats.person_name}\n💵 入帳: <code>${amount}</code> SOL\n📊 佔比: <code>${(parseFloat(stats.percentage)||0).toFixed(2)}%</code>\n🏛️ 資產: <code>${(parseFloat(stats.current_balance)||0).toFixed(4)}</code> SOL`);
     }
 }
 
 async function handleOutgoingFund(address, amount, txid) {
     console.log(`💸 [Process] 處理新出金: ${amount} SOL to ${address}`);
     let personName = await getPersonNameByAddress(address) || "未知金主"; 
-
     const isInserted = await logNewWithdrawal(address, personName, amount, txid);
     if (!isInserted) return;
 
@@ -639,13 +636,9 @@ async function handleOutgoingFund(address, amount, txid) {
     }
 
     const stats = await getContributionStats(personName);
-    if (stats) {
-        const percentage = parseFloat(stats.percentage) || 0;
-        const currentBalance = parseFloat(stats.current_balance) || 0;
-        if (typeof sendTelegramAlert === 'function') sendTelegramAlert(`💸 <b>資金提款</b>\n👤 對象: ${personName}\n💵 提走: <code>${amount}</code> SOL\n📊 佔比: <code>${percentage.toFixed(2)}%</code>\n🏛️ 資產: <code>${currentBalance.toFixed(4)}</code> SOL`);
+    if (stats && typeof sendTelegramAlert === 'function') {
+        sendTelegramAlert(`💸 <b>資金提款</b>\n👤 對象: ${personName}\n💵 提走: <code>${amount}</code> SOL\n📊 佔比: <code>${(parseFloat(stats.percentage)||0).toFixed(2)}%</code>\n🏛️ 資產: <code>${(parseFloat(stats.current_balance)||0).toFixed(4)}</code> SOL`);
     }
 }
 
-module.exports = { 
-    executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline, handleIncomingFund, handleOutgoingFund
-};
+module.exports = { executeBuy, executeSell, executeSellRaydium, forceWriteOff, runSellPipeline, handleIncomingFund, handleOutgoingFund };

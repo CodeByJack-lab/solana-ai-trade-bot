@@ -98,7 +98,6 @@ async function sendMacroPanicApproval(reason) {
         snapshotText += "\n\n📊 <b>【當前倉位快照】</b>\n✅ 目前空倉，無曝險資金。";
     }
 
-    // 🚀 文本修正：15 分鐘改為 3 分鐘
     const message = `🚨 <b>【大市宏觀熔斷警報】</b>\n\n⚠️ <b>觸發理由:</b>\n${reason}${snapshotText}\n\n🤖 <b>系統建議:</b> 大盤極度不穩，建議啟動全線市價強平防禦機制！請指揮官裁決：\n(⚠️ 註：若 3 分鐘內未作回應且大市未好轉，系統將自動接管並全平倉)`;
 
     const keyboard = {
@@ -183,24 +182,26 @@ async function processTelegramCallback(callbackQuery) {
         const isBear = climate === 'BEAR_PANIC';
         const isBull = climate === 'RAGING_BULL';
         
-        const valTp1 = isBear ? 20.0 : (isBull ? 80.0 : 50.0);
+        // 🚀 V2.0: 改為更新追蹤啟動點 (trailing_tp_trigger)，廢止舊 TP1
+        const valTrigger = isBear ? 15.0 : (isBull ? 30.0 : 20.0);
         const valSl = isBear ? -10.0 : (isBull ? -20.0 : -15.0);
         const valTip = isBear ? 0.5 : (isBull ? 5.0 : 2.0);
 
-        await supabase.from('ai_strategy_params').update({ tp_level_1_pct: valTp1, stop_loss_pct: valSl, max_buy_tip_pct: valTip }).in('id', [2, 3]);
-        cacheManager.updateLocally('MEME', { tp_level_1_pct: valTp1, stop_loss_pct: valSl, max_buy_tip_pct: valTip });
-        cacheManager.updateLocally('TRENDING', { tp_level_1_pct: valTp1, stop_loss_pct: valSl, max_buy_tip_pct: valTip });
+        await supabase.from('ai_strategy_params').update({ trailing_tp_trigger: valTrigger, stop_loss_pct: valSl, max_buy_tip_pct: valTip, tp_level_1_pct: 999.0, tp_level_2_pct: 999.0 }).in('id', [2, 3]);
+        cacheManager.updateLocally('MEME', { trailing_tp_trigger: valTrigger, stop_loss_pct: valSl, max_buy_tip_pct: valTip, tp_level_1_pct: 999.0, tp_level_2_pct: 999.0 });
+        cacheManager.updateLocally('TRENDING', { trailing_tp_trigger: valTrigger, stop_loss_pct: valSl, max_buy_tip_pct: valTip, tp_level_1_pct: 999.0, tp_level_2_pct: 999.0 });
         
         await supabase.from('system_config').update({ status_msg: `切換至 ${climate} 模式` }).eq('id', 1);
         responseText = `✅ 已批准全套 ${climate} 戰略！`;
         isAIProposal = true;
     }
     else if (data.startsWith('APPROVE_TP1_')) {
+        // 🚀 V2.0: UI 按鈕依舊叫 APPROVE_TP1，但實際更新追蹤啟動點
         const val = parseFloat(data.replace('APPROVE_TP1_', ''));
-        await supabase.from('ai_strategy_params').update({ tp_level_1_pct: val }).in('id', [2, 3]);
-        cacheManager.updateLocally('MEME', { tp_level_1_pct: val });
-        cacheManager.updateLocally('TRENDING', { tp_level_1_pct: val });
-        responseText = `✅ 已更新第一階止盈為 ${val}%`;
+        await supabase.from('ai_strategy_params').update({ trailing_tp_trigger: val, tp_level_1_pct: 999.0, tp_level_2_pct: 999.0 }).in('id', [2, 3]);
+        cacheManager.updateLocally('MEME', { trailing_tp_trigger: val, tp_level_1_pct: 999.0, tp_level_2_pct: 999.0 });
+        cacheManager.updateLocally('TRENDING', { trailing_tp_trigger: val, tp_level_1_pct: 999.0, tp_level_2_pct: 999.0 });
+        responseText = `✅ 已更新追蹤防守啟動點為 +${val}% (舊版硬止盈已廢除)`;
         isAIProposal = true;
     }
     else if (data.startsWith('APPROVE_SL_')) {
