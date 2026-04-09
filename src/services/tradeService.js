@@ -1,6 +1,7 @@
 // src/services/tradeService.js
 // 📝 檔案功能及用途：交易執行大腦。實裝 V9.2 防 MEV 動態滑點、小數點精度防護、原路折返黑客逃生艙。
-// 🚀 V9.3 升級：修復 RugCheck 漏洞 (肥佬即入黑名單踢出保溫箱)，並擴充歷史回測微觀數據欄位。
+// 🚀 V9.3 升級：修復 RugCheck 漏洞 (肥佬即入黑名單踢出保溫箱)。
+// 🛡️ V9.4 修復：打通數據斷層，精準計算 OFI 並將微觀數據 (流動性/氣候) 完整繼承至平倉紀錄。
 
 const { getPortfolio, updateCache } = require('./portfolioService');
 const { cacheManager } = require('./cacheManager'); 
@@ -26,6 +27,10 @@ const PUBLIC_RPC_ENDPOINTS = [
     'https://solana-rpc.publicnode.com'    
 ];
 
+// ============================================================================
+// 🛠️ 1. 讀取備援機制 (RPC Failover)
+// 簡介：當免費 RPC 節點限流或死機時，自動無縫切換備用節點，確保查核餘額不中斷。
+// ============================================================================
 async function executeReadWithFailover(operationName, readFunction) {
     for (let i = 0; i < PUBLIC_RPC_ENDPOINTS.length; i++) {
         const currentEndpoint = PUBLIC_RPC_ENDPOINTS[i];
@@ -51,6 +56,10 @@ try {
     }
 } catch (e) { console.log("⚠️ [TradeService] 無法解析 Private Key"); }
 
+// ============================================================================
+// 🛠️ 2. 鏈上餘額精準核實 (Real Token Balance)
+// 簡介：直接向 Solana 鏈查詢 SPL Token 真實餘額，防止模擬盤/測試網報價幻覺。
+// ============================================================================
 async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     return await executeReadWithFailover('getRealTokenBalance', async (readConn) => {
         const walletKey = new PublicKey(walletPubKeyStr);
@@ -77,6 +86,10 @@ async function getRealTokenBalance(walletPubKeyStr, tokenMintStr) {
     });
 }
 
+// ============================================================================
+// 🛠️ 3. 買入前終極防線 (RugCheck API)
+// 簡介：下單前最後一秒查詢 RugCheck，如發現合約被改動或 LP 抽走，即刻撤單。
+// ============================================================================
 async function checkRugcheckApi(mintAddress) {
     try {
         console.log(`🔍 [RugCheck] 正在對 ${mintAddress.substring(0,6)} 進行買入前最終防線掃描...`);
@@ -98,6 +111,10 @@ async function checkRugcheckApi(mintAddress) {
     }
 }
 
+// ============================================================================
+// 🛠️ 4. 動態滑點報價引擎 (Jupiter Aggregator)
+// 簡介：向 Jupiter 請求最佳路由。如遇 MEV 三明治夾擊會自動放大滑點重試。
+// ============================================================================
 async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageBps = null) {
     try {
         let decimals = 6; 
@@ -153,19 +170,17 @@ async function getJupiterFinalQuote(tokenMint, isBuying, amount, customSlippageB
     } catch (err) {
         if (err.response) {
             const status = err.response.status;
-            const errorMsg = err.response.data?.error || err.response.data?.message || '未知錯誤';
-            
-            if (status === 429) {
-                console.log(`🚨 [Jupiter] 頻率限制 (429)！API 請求過快或額度爆滿。`);
-            } else if (status === 401 || status === 403) {
-                console.log(`🚨 [Jupiter] API Key 無效或未授權 (Status: ${status})！`);
-            }
+            if (status === 429) console.log(`🚨 [Jupiter] 頻率限制 (429)！API 請求過快或額度爆滿。`);
+            else if (status === 401 || status === 403) console.log(`🚨 [Jupiter] API Key 無效或未授權 (Status: ${status})！`);
         }
         return null;
     }
 }
 
-// 🚀 加入 marketData 與 envState 以供回測記錄
+// ============================================================================
+// 🛠️ 5. 狙擊買入核心 (Execute Buy)
+// 簡介：處理開倉邏輯，將最新微觀數據 (OFI/Liquidity/Climate) 寫入資料庫及 RAM。
+// ============================================================================
 async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiReason, configTradeAmountSol, marketData = {}, envState = {}) {
     console.log(`\n========================================`);
     console.log(`⚡ [Execution] 啟動下單程序: 狙擊目標 ${tokenSymbol}`);
@@ -221,14 +236,13 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
         return false;
     }
 
-    // 🚀 核心修復：RugCheck 失敗即加入黑名單並踢出保溫箱
     const isRugSafe = await checkRugcheckApi(mintAddress);
     if (!isRugSafe) {
         console.log(`❌ [Execution] ${tokenSymbol} 未能通過 RugCheck 最終防線，取消買入並永久剔除。`);
         try {
             const Redis = require('ioredis');
             const tempRedis = new Redis(configEnv.cache.redisUrl);
-            await tempRedis.set(`scam_blacklist:${mintAddress}`, 'RUGCHECK_FAILED', 'EX', 86400); // 鎖 24 小時
+            await tempRedis.set(`scam_blacklist:${mintAddress}`, 'RUGCHECK_FAILED', 'EX', 86400); 
             tempRedis.quit();
             
             await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
@@ -247,32 +261,22 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         const currentSlippage = slippageSteps[attempt - 1];
-        
         quoteData = await getJupiterFinalQuote(mintAddress, true, configTradeAmountSol, currentSlippage);
-        
-        if (quoteData) {
-            if (attempt > 1) console.log(`✅ [Execution] 於 ${currentSlippage / 100}% 滑點成功捕獲 Jupiter 路由！`);
-            break; 
-        }
-
+        if (quoteData) break; 
         if (attempt < maxRetries) {
-            console.log(`⏳ [Execution] Jupiter 無報價 (嘗試 ${attempt}/${maxRetries}，滑點 ${currentSlippage / 100}%)，放寬滑點並等候 2 秒...`);
+            console.log(`⏳ [Execution] Jupiter 無報價，放寬滑點等候重試...`);
             await new Promise(r => setTimeout(r, 2000));
         }
     }
 
     if (!quoteData) {
-        console.log(`❌ [Execution] 嘗試 3 次防 MEV 階梯滑點 (最高鎖死 10%) 後依然無報價，為防被夾擊，放棄狙擊。`);
+        console.log(`❌ [Execution] 防 MEV 滑點保護：多次請求無報價，放棄狙擊。`);
         try {
             const Redis = require('ioredis');
             const tempRedis = new Redis(configEnv.cache.redisUrl);
             await tempRedis.set(`scam_blacklist:${mintAddress}`, 'UNROUTABLE', 'EX', 86400);
             tempRedis.quit();
-            console.log(`🗑️ [Blacklist] 已將 $${tokenSymbol} 加入 24 小時無法路由黑名單，停止盲目追擊。`);
-
-            if (strategyType.includes('TRENDING')) {
-                await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
-            }
+            if (strategyType.includes('TRENDING')) await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
         } catch (redisErr) {}
         return false;
     }
@@ -308,12 +312,24 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     }
 
     if (tradeSuccess && tokenQuantity > 0) {
+        
+        // 🧮 計算真正的 OFI 供回測使用
+        const buys = marketData.buys5m || 0;
+        const sells = marketData.sells5m || 0;
+        const totalTxs = buys + sells;
+        const entry_ofi = totalTxs > 0 ? parseFloat(((buys - sells) / totalTxs).toFixed(2)) : null;
+
+        // 寫入 RAM Cache (確保平倉時可以提取這些微觀數據)
         updateCache('BUY', totalCostSol, {
             mint_address: mintAddress, token_symbol: tokenSymbol,
             quantity: tokenQuantity, entry_price_sol: buyPriceSol,
             highest_price_sol: buyPriceSol, strategy_type: strategyType,
             buy_dex_label: quoteData.dexLabel, buy_pool_address: quoteData.poolAddress, token_decimals: quoteData.decimals,
-            created_at: new Date().toISOString() 
+            created_at: new Date().toISOString(),
+            entry_liquidity_usd: marketData.liquidity || 0,
+            entry_volume_5m_usd: marketData.volume5m || 0,
+            entry_ofi: entry_ofi,
+            market_climate: envState.climate || 'UNKNOWN'
         });
 
         let currentBalance = isLive ? Number(config.live_wallet_balance || 0) : Number(config.simulated_balance || 10);
@@ -335,7 +351,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             ai_score: aiScore
         }]);
 
-        // 🚀 核心更新：將微觀特徵一併寫入 DB 供日後 Gemini 3.5 Pro 回測分析
+        // 寫入 DB 的 BUY 歷史紀錄
         await supabase.from(`trade_history_${tableSuffix}`).insert([{
             token_mint: mintAddress, token_symbol: tokenSymbol, action: 'BUY',
             strategy_type: strategyType, price_sol: buyPriceSol, quantity: tokenQuantity,
@@ -344,7 +360,7 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
             ai_score: aiScore,
             entry_liquidity_usd: marketData.liquidity || 0,
             entry_volume_5m_usd: marketData.volume5m || 0,
-            entry_ofi: marketData.ofi || null,
+            entry_ofi: entry_ofi,
             market_climate: envState.climate || 'UNKNOWN'
         }]);
 
@@ -359,6 +375,10 @@ async function executeBuy(mintAddress, tokenSymbol, strategyType, aiScore, aiRea
     return false;
 }
 
+// ============================================================================
+// 🛠️ 6. 拋售與逃生艙核心 (Execute Sell & Escape)
+// 簡介：處理止盈止損，如遇惡意砸盤會啟動最高 50% 斷頭台滑點，若 API 死機則呼叫 fallbackEscape。
+// ============================================================================
 async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction = 1.0) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
@@ -415,7 +435,7 @@ async function executeSell(mintAddress, marketRefPriceSol, reason, sellFraction 
 
     if (!quoteData) {
         if (isStopLoss) {
-            console.log(`☠️ [RUG CONFIRMED] 逃生失敗！Jupiter 與底層皆無法找到退路，判定為資金池已被騙徒抽乾！`);
+            console.log(`☠️ [RUG CONFIRMED] 逃生失敗！判定為資金池已被騙徒抽乾！`);
             await forceWriteOff(mintAddress, `☠️ 慘遭 Rug Pull (流動性歸零)，強制撇帳 -100%`);
         }
         return false; 
@@ -516,6 +536,10 @@ async function executeSellRaydium(mintAddress, marketRefPriceSol, reason, sellFr
     return await executeSell(mintAddress, marketRefPriceSol, reason, sellFraction);
 }
 
+// ============================================================================
+// 🛠️ 7. 撇帳與回測記錄上傳 (Write Off & Commit DB)
+// 簡介：處理歸零幣清算，並將包含買入時 OFI/Climate 的微觀數據上傳至 trade_history。
+// ============================================================================
 async function forceWriteOff(mintAddress, reason) {
     const portfolio = getPortfolio();
     const posIndex = portfolio.positions.findIndex(p => p.mint_address === mintAddress);
@@ -569,9 +593,9 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
 
     await supabase.from('system_config').update(isLive ? { live_wallet_balance: newBalance } : { simulated_balance: newBalance }).eq('id', 1);
 
-    // 🚀 核心擴充：記錄持倉時間 (Hold Time Mins)
     const holdTimeMins = pos.created_at ? Math.floor((Date.now() - new Date(pos.created_at).getTime()) / 60000) : 0;
 
+    // 🚀 核心修復：從 pos 物件中提取買入時的環境數據，寫入 SELL 紀錄
     await supabase.from(`trade_history_${tableSuffix}`).insert([{
         token_mint: mintAddress, token_symbol: pos.token_symbol,
         action: sellFraction >= 0.99 ? 'SELL' : 'SELL_HALF',
@@ -580,7 +604,12 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
         realized_pnl_sol: pnlSol, realized_pnl_pct: pnlPct,
         post_trade_balance: newBalance, txid: txid,
         ai_factcheck_result: finalReason, review_history: pos.last_review_comment || pos.ai_reason,
-        hold_time_mins: holdTimeMins
+        hold_time_mins: holdTimeMins,
+        // 下方為新加入的數據繼承欄位
+        entry_liquidity_usd: pos.entry_liquidity_usd || 0,
+        entry_volume_5m_usd: pos.entry_volume_5m_usd || 0,
+        entry_ofi: pos.entry_ofi || null,
+        market_climate: pos.market_climate || 'UNKNOWN'
     }]);
 
     if(typeof sendTelegramAlert === 'function') {
@@ -591,6 +620,9 @@ async function commitTradeToDb(posIndex, sellValueSol, finalPriceSol, pnlSol, pn
     }
 }
 
+// ============================================================================
+// 🛠️ 8. 平倉封裝器與出入金監聽 (Pipeline & Fund Monitoring)
+// ============================================================================
 async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
     try {
         console.log(`🎬 [Pipeline] 準備賣出 ${position.token_symbol || position.mint_address.substring(0,6)}...`);
