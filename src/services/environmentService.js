@@ -1,6 +1,6 @@
 // src/services/environmentService.js
-// 📝 檔案功能用途：V9.2 大市氣候台與自動開關。
-// 🚀 V9.2.3 升級：實裝 Cloudflare 穿透裝甲 (User-Agent 偽裝)，解決 CryptoSlate 403 阻擋問題。
+// 📝 檔案功能用途：V10.12 大市氣候台與自動開關。
+// 🚀 V10.12 升級：全面接入 KeyRotator，修復新聞分析時 API Key 錯配導致的 401/400 報錯。
 
 const axios = require('axios');
 const Parser = require('rss-parser');
@@ -11,6 +11,7 @@ const { aiAdvisorService } = require('./aiAdvisorService');
 const { healthMonitor } = require('./healthMonitor');
 const { supabase } = require('../config/supabase');
 const { cacheManager } = require('./cacheManager'); 
+const { keyRotator } = require('./keyRotator'); // 🚀 引入排隊引擎
 
 const redis = new Redis(config.cache.redisUrl || process.env.REDIS_URL);
 const parser = new Parser();
@@ -116,7 +117,6 @@ class EnvironmentService {
             const provider = NEWS_PROVIDERS[(activeNewsIdx + i) % NEWS_PROVIDERS.length];
             try {
                 let titles = [];
-                // 🛡️ 實裝 Cloudflare 穿透裝甲 (Browser Disguise)
                 const res = await axios.get(provider.url, { 
                     timeout: 10000,
                     headers: {
@@ -143,41 +143,40 @@ class EnvironmentService {
 
     async _analyzeTitles(titles) {
         try {
-            // 自動判斷使用邊條 Key (GROQ 或 GEMINI)
             const aiConfig = cacheManager.getPromptConfig('news_sentiment_analyst', { titles: titles.map((t, i) => `${i+1}. ${t}`).join('\n') });
-            const provider = aiConfig.provider || 'GROQ';
+            const targetProvider = aiConfig.provider || 'MISTRAL';
             
-            let responseText = null;
+            // 🚀 全面接入 KeyRotator 智能輪替引擎，徹底修復 Key 錯配問題
+            const parsedScore = await keyRotator.enqueueRequest(targetProvider, async (apiKey) => {
+                const cleanKey = apiKey.replace(/['"]/g, '').trim();
+                const modelName = aiConfig.models[0] || 'mistral-small-2603';
+                let apiUrl, payload, headers;
 
-            for (const model of aiConfig.models) {
-                try {
-                    if (provider === 'GEMINI' || model.includes('gemini')) {
-                        const geminiKey = process.env.GEMINI_API_KEY_1;
-                        if (!geminiKey) throw new Error("Missing GEMINI_API_KEY_1");
-                        const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${geminiKey}`, {
-                            contents: [{ parts: [{ text: aiConfig.parsedPrompt }] }],
-                            generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
-                        }, { headers: { 'Content-Type': 'application/json' }, timeout: 10000 });
-                        responseText = res.data.candidates[0].content.parts[0].text;
-                    } else {
-                        const groqKey = process.env.GROQ_API_KEY_1;
-                        if (!groqKey) throw new Error("Missing GROQ_API_KEY_1");
-                        const apiUrl = groqKey.startsWith('gsk_') ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
-                        const res = await axios.post(apiUrl, {
-                            model: model, messages: [{ role: 'user', content: aiConfig.parsedPrompt }], response_format: { type: "json_object" }, temperature: 0.1
-                        }, { headers: { 'Authorization': `Bearer ${groqKey}`, 'Content-Type': 'application/json' }, timeout: 10000 });
-                        responseText = res.data.choices[0].message.content;
-                    }
-                    break; 
-                } catch (apiErr) {
-                    console.warn(`⚠️ [Env Service] 模型 ${model} 新聞分析失敗，嘗試後備...`);
+                console.log(`[KeyRotator] 📰 系統抽中 ${targetProvider} (${modelName}) 進行新聞情緒打分...`);
+
+                if (targetProvider === 'GEMINI' || cleanKey.startsWith('AIza')) {
+                    apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent?key=${cleanKey}`;
+                    payload = { contents: [{ parts: [{ text: aiConfig.parsedPrompt }] }], generationConfig: { response_mime_type: "application/json" } };
+                    headers = { 'Content-Type': 'application/json' };
+                } else {
+                    const isGroq = cleanKey.startsWith('gsk_');
+                    apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
+                    payload = { model: modelName, messages: [{ role: "user", content: aiConfig.parsedPrompt }], response_format: { type: "json_object" } };
+                    headers = { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' };
                 }
-            }
 
-            if (!responseText) throw new Error("所有新聞分析模型均已陣亡");
+                const res = await axios.post(apiUrl, payload, { headers, timeout: 15000 });
+                const responseText = (targetProvider === 'GEMINI' || cleanKey.startsWith('AIza')) 
+                    ? res.data.candidates[0].content.parts[0].text 
+                    : res.data.choices[0].message.content;
 
-            const parsed = JSON.parse(responseText.match(/\{[\s\S]*\}/)[0]);
-            let score = parseInt(parsed.score);
+                const match = responseText.match(/\{[\s\S]*\}/);
+                if (!match) throw new Error("新聞分析 AI 未能輸出 JSON");
+
+                return JSON.parse(match[0]);
+            }, 'news_sentiment_analyst'); 
+
+            let score = parseInt(parsedScore.score);
             return Math.max(-5, Math.min(5, isNaN(score) ? 0 : score));
             
         } catch (error) {
