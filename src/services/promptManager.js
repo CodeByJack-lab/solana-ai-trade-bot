@@ -1,6 +1,6 @@
 // src/services/promptManager.js
 // 📝 檔案功能用途：AI 劇本記憶體庫。負責載入 DB 提示詞。
-// 🛡️ V9.9 終極陣型版：完美對齊 8 大核心 AI 劇本與最新模型備援機制。
+// 🛡️ V9.9.1 終極陣型版：修復 Mistral 版本號模型名，對齊 2512 / 2603 最新版本。
 
 const { supabase } = require('../config/supabase');
 
@@ -25,14 +25,14 @@ class PromptManager {
         };
         this.verified_tokens = { 'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au' };
 
-        // 🛡️ 核心後備底稿 (完美對齊最新 JSON 配置與防刪除規則)
+        // 🛡️ 核心後備底稿 (修復 Mistral 模型名)
         this.fallbackConfigs = {
             'backtest_analyst': {
-                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
                 content: `You are the Chief Quant Analyst. Context: {{promptContext}}. [Task] Write a concise, professional 150-word report in simple English explaining why splitting these parameters (Trailing TP Trigger and Pullback) improves our win rate and captures fatter tails for different asset classes. (Do NOT mention Stop Loss). [Rules] 1. Think deeply in English first. 2. The final "report" MUST be in simple English. 3. Output pure JSON: {"english_thought_process": "reasoning", "report": "final report in simple English"}`
             },
             'CLIMATE_ADVISOR': {
-                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
                 content: `You are a top-tier Web3 Quant Strategist. Climate: {{climate}}. News: {{newsScore}}. [Task] Adjust trading parameters. [Rules] Final analysis MUST be in brief English. Output JSON exactly like this: {"english_thought_process": "...", "trailing_trigger": <num 15 to 40>, "stop_loss": <num -25 to -10>, "max_tip_pct": <num 0.5 to 5.0>, "analysis": "<Concise English under 30 words>"}`
             },
             'master_retrospective': {
@@ -44,11 +44,11 @@ class PromptManager {
                 content: `You are a Ruthless Meme Coin Sniper. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Rules] 1. If OFI is 'N/A' or missing -> VETO. 2. If Liquidity < $2500 -> VETO. 3. If AvgTrade < $15 -> VETO. [Task] Think deeply. Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
             },
             'news_sentiment_analyst': {
-                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
                 content: `You are a top-tier Web3 market sentiment analyst. Analyze these recent crypto news titles. Determine the overall macroeconomic sentiment score from -5 (extreme fear/panic) to 5 (extreme greed/euphoria). 0 is neutral. Ignore routine individual token news. Focus on macro events (e.g., SEC actions, ETF inflows, major hacks, macro economy). Output ONLY pure JSON. Titles: {{titles}} Output exact JSON format: {"score": <integer>}`
             },
             'POSITION_WATCHDOG': {
-                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
                 content: `You are an elite, emotionless Cryptocurrency Quantitative Trading Watchdog. Your sole directive is to maximize realized gains while ruthlessly protecting capital. You will evaluate the current open position based on strict deterministic logic and output a single JSON response.\n\n**Inputs Provided:**\n- Token: {{token_symbol}}\n- Current_Profit_Pct: {{current_profit_pct}}\n- Max_Profit_Pct: {{max_profit_pct}}\n- Hold_Time_Mins: {{hold_time_mins}}\n- Market_Climate: {{market_climate}}\n\n**Execution Rules (No Exceptions):**\n1. ACTION: "HOLD" -> Current_Profit_Pct is less than 10% below the Max_Profit_Pct, AND Market_Climate is NOT "BEAR_PANIC".\n2. ACTION: "SELL_HALF" -> Current_Profit_Pct has retraced between 10% to 15% from the Max_Profit_Pct, OR Hold_Time_Mins > 30 with stagnant price action.\n3. ACTION: "SELL_ALL" -> Market_Climate is "BEAR_PANIC", OR extreme volume exhaustion.\n\nOutput JSON ONLY: {"thought_process": "<Max 30 words>", "action": "HOLD" | "SELL_HALF" | "SELL_ALL", "confidence": 0.9}`
             },
             'quant_consensus': {

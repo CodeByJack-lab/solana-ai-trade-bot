@@ -1,6 +1,6 @@
 // src/services/cacheManager.js
 // 📝 檔案功能用途：V9.2.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
-// 🛡️ V9.2.7 升級：完美對齊 8 大核心劇本，修復 Scout 劇本 Context 遺失問題。
+// 🛡️ V9.2.8 升級：完美對齊 Mistral 最新版本號，修復 400 錯誤。
 
 const { supabase } = require('../config/supabase');
 
@@ -28,18 +28,18 @@ class CacheManager {
         };
         this.isLoaded = false;
 
-        // 🛡️ 核心後備底稿 (完美對齊最新 JSON 配置與防刪除規則)
+        // 🛡️ 核心後備底稿 (修復 Mistral 模型名)
         this.fallbackPrompts = {
             'backtest_analyst': {
-                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
                 content: `You are the Chief Quant Analyst. Context: {{promptContext}}. [Task] Write a concise, professional 150-word report in simple English explaining why splitting these parameters (Trailing TP Trigger and Pullback) improves our win rate. [Rules] Output pure JSON: {"english_thought_process": "reasoning", "report": "final report in simple English"}`
             },
             'news_sentiment_analyst': {
-                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
                 content: `You are a top-tier Web3 market sentiment analyst. Determine macro sentiment score from -5 (fear) to 5 (greed). Titles: {{titles}} Output exact JSON format: {"score": <integer>}`
             },
             'CLIMATE_ADVISOR': {
-                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
                 content: `You are a top-tier Web3 Quant Strategist. Climate: {{climate}}. News: {{newsScore}}. [Task] Adjust trading parameters. Output JSON exactly like this: {"english_thought_process": "...", "trailing_trigger": <num 15 to 40>, "stop_loss": <num -25 to -10>, "max_tip_pct": <num 0.5 to 5.0>, "analysis": "<Concise English under 30 words>"}`
             },
             'master_retrospective': {
@@ -47,7 +47,7 @@ class CacheManager {
                 content: `You are the HEAD OF TRADING. Update prompts based on yesterday's performance. Win Rate: {{winRate}}%. Autopsy: {{autopsyReport}}. Trending Scout: "{{currentTrendingScout}}". Meme Scout: "{{currentMemeScout}}". Task: Output JSON with COMPLETELY REWRITTEN prompts. 🚨 CRITICAL RULE: You MUST retain ALL placeholders (e.g., {{baseScore}}, {{ofi}}, {{liquidity}}, {{h1}}, {{avg_trade}}) in the new prompts! Format: {"new_trending_scout_prompt": "<string>", "new_meme_scout_prompt": "<string>", "briefing_notes": "<Cantonese summary>"}`
             },
             'POSITION_WATCHDOG': {
-                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
                 content: `You are an elite Crypto Watchdog. Token: {{token_symbol}}, Pnl: {{current_profit_pct}}%, MaxPnl: {{max_profit_pct}}%, Climate: {{market_climate}}. Output JSON: {"thought_process": "...", "action": "HOLD"|"SELL_HALF"|"SELL_ALL", "confidence": 0.9}`
             },
             'meme_scout': {
