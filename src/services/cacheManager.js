@@ -1,8 +1,6 @@
 // src/services/cacheManager.js
 // 📝 檔案功能用途：V9.2.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
-// 🛡️ 內建防幻覺機制：當 DB 讀取失敗時，自動降級至純英文後備底稿。
-// 🛠️ 包含最新加入的新聞情緒分析師 (news_sentiment_analyst) 後備底稿。
-// 🚀 V9.2.6 升級：全域真·熱更新 (Realtime Hot Update)。毫秒級監聽 Prompts、防偽名單與戰略參數。
+// 🛡️ V9.2.7 升級：完美對齊 8 大核心劇本，修復 Scout 劇本 Context 遺失問題。
 
 const { supabase } = require('../config/supabase');
 
@@ -12,62 +10,61 @@ class CacheManager {
             verified_tokens: { 'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au' },
             strategies: {
                 MEME: { 
-                    min_liquidity: 2500, min_vol_5m: 1000, 
-                    tp_level_1_pct: 999.0, tp_level_2_pct: 999.0, // 🚀 廢除硬止盈
+                    min_liquidity: 2500, min_vol_5m: 1000, buy_score_threshold: 70,
+                    tp_level_1_pct: 999.0, tp_level_2_pct: 999.0, 
                     time_stop_mins: 30, time_stop_target_pct: 15.0, 
                     base_jito_tip: 150000, max_buy_tip_pct: 0.02, base_slippage: 500, 
-                    stop_loss_pct: -15.0, trailing_tp_trigger: 20.0, trailing_pullback: 15.0 // 🚀 追蹤機制
+                    stop_loss_pct: -15.0, trailing_tp_trigger: 20.0, trailing_pullback: 15.0 
                 },
                 TRENDING: { 
-                    min_liquidity: 20000, min_vol_5m: 5000, 
-                    tp_level_1_pct: 999.0, tp_level_2_pct: 999.0, // 🚀 廢除硬止盈
+                    min_liquidity: 20000, min_vol_5m: 5000, buy_score_threshold: 70,
+                    tp_level_1_pct: 999.0, tp_level_2_pct: 999.0, 
                     time_stop_mins: 1440, time_stop_target_pct: 5.0, 
                     base_jito_tip: 150000, max_buy_tip_pct: 0.01, base_slippage: 500, 
-                    stop_loss_pct: -20.0, trailing_tp_trigger: 20.0, trailing_pullback: 15.0 // 🚀 追蹤機制
+                    stop_loss_pct: -20.0, trailing_tp_trigger: 20.0, trailing_pullback: 15.0 
                 }
             },
             prompts: new Map() 
         };
         this.isLoaded = false;
 
-        // 🛡️ 核心後備底稿 (Fallback Prompts) - 確保 100% 英文輸出
+        // 🛡️ 核心後備底稿 (完美對齊最新 JSON 配置與防刪除規則)
         this.fallbackPrompts = {
+            'backtest_analyst': {
+                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                content: `You are the Chief Quant Analyst. Context: {{promptContext}}. [Task] Write a concise, professional 150-word report in simple English explaining why splitting these parameters (Trailing TP Trigger and Pullback) improves our win rate. [Rules] Output pure JSON: {"english_thought_process": "reasoning", "report": "final report in simple English"}`
+            },
             'news_sentiment_analyst': {
-                provider: 'GROQ',
-                models: ['llama-3.3-70b-versatile', 'llama3-8b-8192'],
-                content: `You are a top-tier Web3 market sentiment analyst. Analyze these recent crypto news titles. Determine the overall macroeconomic sentiment score from -5 (extreme fear/panic) to 5 (extreme greed/euphoria). 0 is neutral. Output ONLY pure JSON: {"score": <integer>}`
+                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                content: `You are a top-tier Web3 market sentiment analyst. Determine macro sentiment score from -5 (fear) to 5 (greed). Titles: {{titles}} Output exact JSON format: {"score": <integer>}`
             },
             'CLIMATE_ADVISOR': {
-                provider: 'GEMINI', 
-                models: ['gemini-2.5-flash', 'gemma-4-31b-it'],
-                content: `You are a top-tier Web3 Quant Strategist. Climate: {{climate}}. News: {{newsScore}}. [Task] Adjust trading parameters. [Rules] Final analysis MUST be in brief English. Output JSON exactly like this: {"english_thought_process": "...", "trailing_trigger": <num>, "stop_loss": <num>, "max_tip_pct": <num>, "analysis": "<Concise English under 30 words>"}`
+                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                content: `You are a top-tier Web3 Quant Strategist. Climate: {{climate}}. News: {{newsScore}}. [Task] Adjust trading parameters. Output JSON exactly like this: {"english_thought_process": "...", "trailing_trigger": <num 15 to 40>, "stop_loss": <num -25 to -10>, "max_tip_pct": <num 0.5 to 5.0>, "analysis": "<Concise English under 30 words>"}`
+            },
+            'master_retrospective': {
+                provider: 'GEMINI', models: ['gemini-2.5-flash', 'gemma-3-27b-it', 'gemini-1.5-flash'],
+                content: `You are the HEAD OF TRADING. Update prompts based on yesterday's performance. Win Rate: {{winRate}}%. Autopsy: {{autopsyReport}}. Trending Scout: "{{currentTrendingScout}}". Meme Scout: "{{currentMemeScout}}". Task: Output JSON with COMPLETELY REWRITTEN prompts. 🚨 CRITICAL RULE: You MUST retain ALL placeholders (e.g., {{baseScore}}, {{ofi}}, {{liquidity}}, {{h1}}, {{avg_trade}}) in the new prompts! Format: {"new_trending_scout_prompt": "<string>", "new_meme_scout_prompt": "<string>", "briefing_notes": "<Cantonese summary>"}`
             },
             'POSITION_WATCHDOG': {
-                provider: 'GEMINI',
-                models: ['gemma-3-27b-it', 'gemini-2.5-flash-lite'],
-                content: `You are an elite Crypto Watchdog. Inputs: Token: {{token_symbol}}, Pnl: {{current_profit_pct}}%, MaxPnl: {{max_profit_pct}}%, HoldTime: {{hold_time_mins}}m, Climate: {{market_climate}}. Output JSON: {"thought_process": "...", "action": "HOLD"|"SELL_HALF"|"SELL_ALL", "confidence": 0.9}`
-            },
-            'quant_consensus': {
-                provider: 'GROQ', 
-                models: ['llama-3.3-70b-versatile', 'mixtral-8x7b-32768'],
-                content: `You are a strict AI Auditor. Symbol: {{symbol}}, Score: {{baseScore}}. Output JSON: {"english_thought_process": "...", "confidence": <float>, "adjustment": <int>, "reason": "<Concise English under 20 words>"}`
+                provider: 'MISTRAL', models: ['mistral-large-latest', 'mistral-small-latest', 'open-mistral-nemo'],
+                content: `You are an elite Crypto Watchdog. Token: {{token_symbol}}, Pnl: {{current_profit_pct}}%, MaxPnl: {{max_profit_pct}}%, Climate: {{market_climate}}. Output JSON: {"thought_process": "...", "action": "HOLD"|"SELL_HALF"|"SELL_ALL", "confidence": 0.9}`
             },
             'meme_scout': {
-                provider: 'GROQ',
-                models: ['llama-3.3-70b-versatile'],
-                content: `Analyze Meme: {{token_symbol}}. Liq: {{liquidity}}. Output JSON: {"english_thought_process": "...", "decision": "PASS"|"VETO", "score": <int>, "risk_tag": "...", "reason": "<Concise English under 20 words>"}`
+                provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
+                content: `You are a Ruthless Meme Coin Sniper. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Rules] 1. If OFI is 'N/A' or missing -> VETO. 2. If Liquidity < $2500 -> VETO. 3. If AvgTrade < $15 -> VETO. [Task] Think deeply. Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
             },
             'trending_scout': {
-                provider: 'MISTRAL',
-                models: ['mistral-large-latest'],
-                content: `Analyze Trending: {{token_symbol}}. Output JSON: {"english_thought_process": "...", "decision": "PASS"|"VETO", "score": <int>, "risk_tag": "...", "reason": "<Concise English under 20 words>"}`
+                provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
+                content: `You are a Quant Order Flow Analyst. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Rules] 1. If OFI is 'N/A' or missing -> VETO. 2. If AvgTrade < $50 -> VETO. 3. If OFI < -0.3 -> VETO. [Task] Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
+            },
+            'quant_consensus': {
+                provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
+                content: `You are a strict Quantitative AI Auditor. Evaluate asset {{symbol}}. Base Quant Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, 5m_Vol=\${{volume5m}}, OFI={{ofi}}, 1H_Change={{h1}}%. [Task] Adjust the base score. [Rules] 1. Think in English first. 2. Output reason in Cantonese. 3. CRITICAL RULE: If OFI is 'N/A' or missing, you MUST deduct at least 15 points. Output JSON: {"english_thought_process": "reasoning", "confidence": <float>, "adjustment": <integer -20 to +20>, "reason": "<Cantonese explanation>"}`
             }
         };
     }
 
-    /**
-     * 🚀 初始化 RAM 快取 (保證啟動時強制抓取與驗證)
-     */
     async init() {
         console.log('🧠 [Cache Manager] 系統大腦啟動中，準備與 Supabase 進行神經同步...');
         
@@ -102,17 +99,12 @@ class CacheManager {
         });
 
         systemChannel.subscribe((status) => {
-            if (status === 'SUBSCRIBED') {
-                console.log('🔗 [Cache Manager] Realtime Websocket 已成功連線，全域熱更新啟動！');
-            }
+            if (status === 'SUBSCRIBED') console.log('🔗 [Cache Manager] Realtime Websocket 已成功連線，全域熱更新啟動！');
         });
             
         this.isLoaded = true;
     }
 
-    /**
-     * 🔄 同步資料庫數據至 RAM (包含嚴格 Error Checking 與深度驗證)
-     */
     async refreshFromDB() {
         try {
             console.log('📡 [Cache Manager] 正在向 Supabase 請求最新數據...');
@@ -148,10 +140,8 @@ class CacheManager {
             }
 
             this._verifyCacheState();
-
         } catch (err) {
-            console.error('\n❌ [Cache Manager Fatal Error] 無法與 Supabase 同步數據！');
-            console.error('⚠️ 詳細原因:', err.message);
+            console.error('\n❌ [Cache Manager Fatal Error] 無法與 Supabase 同步數據！', err.message);
         }
     }
 
@@ -174,7 +164,6 @@ class CacheManager {
     }
 
     getStrategy(type = 'MEME') { return this.getConfig(type); }
-
     getVerifiedTokens() { return this.cache.verified_tokens || {}; }
 
     updateLocally(type, dataObj) {
@@ -186,9 +175,7 @@ class CacheManager {
     getPromptConfig(promptId, dataObj = {}) {
         const config = this.cache.prompts.get(promptId) || this.fallbackPrompts[promptId];
         
-        if (!config) {
-            return { provider: 'UNKNOWN', models: [], parsedPrompt: `{"decision": "VETO", "reason": "Prompt Error"}` };
-        }
+        if (!config) return { provider: 'UNKNOWN', models: [], parsedPrompt: `{"decision": "VETO", "reason": "Prompt Error"}` };
         
         let parsedContent = config.content;
         for (const [key, value] of Object.entries(dataObj)) {

@@ -1,5 +1,5 @@
 // src/services/router.js
-// 📝 檔案功能用途：V9.3 漏斗大腦分流器。掛載「2D 動態倉位矩陣」，並於下單時傳遞微觀環境特徵供歷史回測使用。
+// 📝 檔案功能用途：V9.3 漏斗大腦分流器。掛載「2D 動態倉位矩陣」，加入 VIP OFI 攔截防線。
 
 const config = require('../config/config');
 const { supabase } = require('../config/supabase');
@@ -42,7 +42,7 @@ class Router {
             multiplier = score >= 90 ? 0.5 : 0;
         }
 
-        // 🛡️ 風控矩陣：大市極差且質素平庸 (BEAR_PANIC + 60-89) -> 直接 0x 攔截
+        // 🛡️ 風控矩陣：大市極差且質素平庸 (BEAR_PANIC + 70-89) -> 直接 0x 攔截
         if (multiplier === 0) {
             console.log(`[Router] 🛑 風控矩陣攔截: 大市高危 (${climate}) 且質素平庸 (${score}分)。放棄建倉，節省彈藥！`);
             return false;
@@ -50,16 +50,28 @@ class Router {
 
         console.log(`[Router] 🌍 大市環境: ${climate} | 分數: ${score} | 預期倉位乘數: ${multiplier}x`);
 
-        // 🚀 >= 90 分 (Fast-Track)，跳過 AI 審批
+        // 🚀 >= 90 分 (VIP Fast-Track)
         if (score >= config.quant.fastTrackThreshold) {
-            console.log(`[Router] 🚀 高質幣湧現！${mint} 獲得 ${score} 分，啟動 Fast-Track 跳過 AI 直購！`);
+            // 🚀 VIP 專屬 OFI 攔截防線
+            const buys = marketData.buys5m || 0;
+            const sells = marketData.sells5m || 0;
+            const totalTxs = buys + sells;
+            const ofi = totalTxs > 0 ? (buys - sells) / totalTxs : null;
+
+            if (ofi === null || ofi < 0) {
+                console.log(`[Router] 🛑 VIP 攔截: ${mint} 雖然 ${score} 分，但 OFI 異常或缺失 (OFI: ${ofi})，取消 Fast-Track 直購！`);
+                return false;
+            }
+
+            console.log(`[Router] 🚀 高質幣湧現！${mint} 獲得 ${score} 分且 OFI 健康 (${ofi.toFixed(2)})，啟動 VIP Fast-Track (乘數: ${multiplier}x)！`);
             return await this._handleFastTrack(mint, poolType, score, marketData, multiplier, envState);
         } 
-        // ⚖️ 60-89 分，進入 AI 議事廳微調
-        else {
+        // ⚖️ 70-89 分，進入 AI 議事廳微調
+        else if (score >= config.quant.aiReviewMin) {
             console.log(`[Router] ⚖️ 潛力標的: ${mint} (${score} 分)，進入 AI 議事廳微調審批...`);
             return await this._handleAiReview(mint, poolType, score, marketData, multiplier, newsScore, envState);
         }
+        return false;
     }
 
     /**
@@ -83,7 +95,7 @@ class Router {
         const baseAmount = await this._getTradeAmount(isMeme);
         const finalAmount = baseAmount * multiplier;
         
-        return await executeBuy(mint, marketData.symbol, strategyBase, score, `🌟 量化 90+ 高質幣，Fast-Track (倍數: ${multiplier}x)`, finalAmount, marketData, envState);
+        return await executeBuy(mint, marketData.symbol, strategyBase, score, `🌟 VIP 高質幣直購 (OFI 驗證通過)`, finalAmount, marketData, envState);
     }
 
     /**
@@ -107,7 +119,6 @@ class Router {
      * ⚖️ 處理 AI 議事廳微調與動態倉位
      */
     async _handleAiReview(mint, poolType, baseScore, marketData, multiplier, newsScore, envState) {
-        // 🛠️ 傳遞 poolType 與 climate 給 AI，令其能夠動態切換劇本
         const aiDecision = await consensusService.runMemeConsensus(mint, marketData, { 
             baseScore,
             poolType,
@@ -140,7 +151,7 @@ class Router {
 
         if (finalScore >= config.trade.sizeHalfPts && finalScore < config.trade.sizeFullPts) {
             strategySuffix += '_TIMESTOP';
-            console.log(`[Router] ⚖️ 最終分數 ${finalScore} 落在 60-79 區間，套用 TimeStop 規則 (投入: ${finalAmount} SOL)`);
+            console.log(`[Router] ⚖️ 最終分數 ${finalScore} 落在 70-79 區間，套用 TimeStop 規則 (投入: ${finalAmount} SOL)`);
         } else {
             console.log(`[Router] ⚖️ 最終分數 ${finalScore} >= 80，優質建倉 (投入: ${finalAmount} SOL)`);
         }

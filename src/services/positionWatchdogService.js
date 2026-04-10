@@ -1,12 +1,13 @@
 // src/services/positionWatchdogService.js
-// 📝 檔案功能用途：V2.0 AI 督導員 (Watchdog)。負責階梯式體檢 (20%, 40%...) 並呼叫 Gemma 3 進行智能平倉決策。
-// 🛡️ V2.1 修復：實裝 Redis 併發鎖防衝突、攔截重複 SELL_HALF、強化 JSON 解析容錯。
+// 📝 檔案功能用途：V2.2 AI 督導員 (Watchdog)。負責階梯式體檢 (20%, 40%...) 並呼叫 Mistral 進行智能平倉決策。
+// 🛡️ V2.2 升級：全線轉交 MISTRAL 處理，並對接 KeyRotator 獨立使用 Key 3 避免 429 衝突。
 
 const axios = require('axios');
 const Redis = require('ioredis');
 const config = require('../config/config');
 const { cacheManager } = require('./cacheManager');
 const { runSellPipeline } = require('./tradeService'); 
+const { keyRotator } = require('./keyRotator'); // 🚀 引入排隊引擎
 const redis = new Redis(config.cache.redisUrl || process.env.REDIS_URL);
 
 const positionWatchdogService = {
@@ -24,7 +25,7 @@ const positionWatchdogService = {
         const isChecked = await redis.get(lockKey);
         
         if (!isChecked) {
-            console.log(`🕵️‍♂️ [Watchdog] 觸發 ${milestoneLevel}% 階梯體檢！準備呼叫 AI 評估 $${position.token_symbol}...`);
+            console.log(`🕵️‍♂️ [Watchdog] 觸發 ${milestoneLevel}% 階梯體檢！準備呼叫 MISTRAL 評估 $${position.token_symbol}...`);
             await redis.set(lockKey, 'DONE', 'EX', 86400); // 落鎖防止重複觸發
             await this.callAiWatchdog(position, currentProfitPct, maxPriceSol);
         }
@@ -45,19 +46,33 @@ const positionWatchdogService = {
                 market_climate: envState.climate
             });
 
-            const geminiKey = process.env.GEMINI_API_KEY_1;
-            if (!geminiKey) return;
+            // 🚀 透過 KeyRotator 呼叫 MISTRAL (指定 promptId 以獲取專屬 Key 3)
+            const decision = await keyRotator.enqueueRequest('MISTRAL', async (apiKey) => {
+                const cleanKey = apiKey.replace(/['"]/g, '').trim();
+                const apiUrl = 'https://api.mistral.ai/v1/chat/completions';
+                const modelName = aiConfig.models[0] || 'mistral-large-latest';
 
-            const res = await axios.post(`https://generativelanguage.googleapis.com/v1beta/models/${aiConfig.models[0]}:generateContent?key=${geminiKey}`, {
-                contents: [{ parts: [{ text: aiConfig.parsedPrompt }] }],
-                generationConfig: { responseMimeType: "application/json", temperature: 0.1 }
-            }, { headers: { 'Content-Type': 'application/json' }, timeout: 8000 });
+                console.log(`[KeyRotator] 🔫 系統抽中 MISTRAL (${modelName}) 進行持倉體檢 [劇本: POSITION_WATCHDOG]...`);
 
-            const responseText = res.data.candidates[0].content.parts[0].text;
-            const match = responseText.match(/\{[\s\S]*\}/);
-            if (!match) throw new Error("AI 吐出的不是有效 JSON");
-            
-            const decision = JSON.parse(match[0]);
+                const payload = {
+                    model: modelName,
+                    messages: [{ role: "user", content: aiConfig.parsedPrompt }],
+                    response_format: { type: "json_object" },
+                    temperature: 0.1
+                };
+
+                const response = await axios.post(apiUrl, payload, { 
+                    headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' }, 
+                    timeout: 15000 
+                });
+
+                const responseText = response.data.choices[0].message.content;
+                const match = responseText.match(/\{[\s\S]*\}/);
+                if (!match) throw new Error("AI 吐出的不是有效 JSON");
+
+                return JSON.parse(match[0]);
+            }, 'POSITION_WATCHDOG'); // 👈 傳入 promptId 讓 KeyRotator 派發 Key 3
+
             console.log(`🤖 [AI Watchdog] $${position.token_symbol} | 判定: ${decision.action} | 理由: ${decision.thought_process}`);
 
             // ⚡ 執行智能平倉 (實裝 Redis 併發鎖與防呆機制)
@@ -88,7 +103,7 @@ const positionWatchdogService = {
             }
 
         } catch (error) {
-            console.error(`⚠️ [Watchdog] AI 體檢超時或失敗，繼續交由純 Code 追蹤回撤防守。`);
+            console.error(`⚠️ [Watchdog] AI 體檢超時或失敗 (${error.message})，繼續交由純 Code 追蹤回撤防守。`);
         }
     }
 };

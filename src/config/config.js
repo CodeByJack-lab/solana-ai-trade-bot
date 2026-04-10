@@ -1,5 +1,6 @@
-// /config/config.js
-// 📝 檔案功能用途：V9.2 系統中央總控台。集中管理環境變數與靜態安全底線。
+// src/config/config.js
+// 📝 檔案功能用途：V9.3 系統中央總控台。
+// 🚀 升級功能：將 AI 資源池按供應商 (GROQ/MISTRAL/GEMINI) 嚴格分類，確保 KeyRotator 精準派發。
 
 const path = require('path');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env'), override: true });
@@ -15,56 +16,48 @@ const getEnv = (key, required = false, defaultVal = null) => {
 
 const config = {
     // ==========================================
-    // 🧠 V9.2 AI 資源池
+    // 🧠 V9.3 AI 資源池 (嚴格分類版)
     // ==========================================
-    aiKeys: [
-        getEnv('GROQ_API_KEY_1'), getEnv('GROQ_API_KEY_2'), getEnv('GROQ_API_KEY_3'),
-        getEnv('MISTRAL_API_KEY_1'), getEnv('MISTRAL_API_KEY_2'), getEnv('MISTRAL_API_KEY_3')
-    ].filter(Boolean),
-
-    geminiKeys: [
-        getEnv('GEMINI_API_KEY_1'), getEnv('GEMINI_API_KEY_2'), getEnv('GEMINI_API_KEY_3')
-    ].filter(Boolean),
+    aiKeys: {
+        GROQ: [
+            getEnv('GROQ_API_KEY_1'), getEnv('GROQ_API_KEY_2'), getEnv('GROQ_API_KEY_3')
+        ].filter(Boolean),
+        MISTRAL: [
+            getEnv('MISTRAL_API_KEY_1'), getEnv('MISTRAL_API_KEY_2'), getEnv('MISTRAL_API_KEY_3')
+        ].filter(Boolean),
+        GEMINI: [
+            getEnv('GEMINI_API_KEY_1'), getEnv('GEMINI_API_KEY_2'), getEnv('GEMINI_API_KEY_3')
+        ].filter(Boolean)
+    },
 
     // ==========================================
-    // 📊 V9.2 量化漏斗門檻 (靜態底線)
+    // 📊 量化漏斗門檻 (靜態底線)
     // ==========================================
     quant: {
         coreDefenseMaxScore: 60,
         momentumMaxScore: 40,    
-        rejectThreshold: 60,     
-        aiReviewMin: 60,         
+        rejectThreshold: 70,     
+        aiReviewMin: 70,         
         aiReviewMax: 89,
         fastTrackThreshold: 90,  
         socialPresenceScore: 5,  
         decayBarsToExit: 3       
     },
 
-    // ==========================================
-    // 🤖 AI 決策與微調規則
-    // ==========================================
     aiRules: {
         minConfidence: 0.7,      
         adjustLimitLow: 10,      
         adjustLimitHigh: 20,     
     },
 
-    // ==========================================
-    // ⚔️ 交易執行與風控規則 (Execution)
-    // ==========================================
     trade: {
         sizeFullPts: 80,         
-        sizeHalfPts: 60,         
-        
-        // 這些滑點作為極限保底，常規滑點已交由 DB 控制
+        sizeHalfPts: 70,         
         slippageBuyBps: 250,     
         slippageSellBps: 1500,   
         slippagePanicBps: 5000,  
     },
 
-    // ==========================================
-    // 🔗 基礎建設與外部 API 配置
-    // ==========================================
     solana: {
         walletPrivateKey: getEnv('SOLANA_PRIVATE_KEY', true),
         walletPublicKey: getEnv('MY_WALLET_PUBLIC_KEY', true)

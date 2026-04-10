@@ -1,11 +1,12 @@
 // src/services/aiAdvisorService.js
-// 📝 檔案功能用途：V10.9 獨立的 AI 參謀大腦 (全自動駕駛版)。
-// 🚀 升級功能：V2.0 保本登月流，改為動態調整「追蹤啟動點 (trailing_trigger)」與「止損 (stop_loss)」。
+// 📝 檔案功能用途：V10.10 獨立的 AI 參謀大腦 (全自動駕駛版)。
+// 🚀 升級功能：全線轉交 MISTRAL 處理，並完美對接新版 KeyRotator (共用 Key 1)。
 
 const axios = require('axios');
 const { sendAdminAlert } = require('./telegramService'); 
 const { cacheManager } = require('./cacheManager'); 
 const { supabase } = require('../config/supabase'); 
+const { keyRotator } = require('./keyRotator'); // 🚀 引入排隊引擎
 
 class AIAdvisorService {
 
@@ -24,33 +25,33 @@ class AIAdvisorService {
             const finalPrompt = aiConfig.parsedPrompt;
             const models = aiConfig.models; 
 
-            const geminiApiKey = process.env.GEMINI_API_KEY_1;
-            if (!geminiApiKey || models.length === 0) {
-                return await this._fallbackLogic(climate, envState);
-            }
+            // 🚀 透過 KeyRotator 呼叫 MISTRAL
+            const aiResult = await keyRotator.enqueueRequest('MISTRAL', async (apiKey) => {
+                const cleanKey = apiKey.replace(/['"]/g, '').trim();
+                const apiUrl = 'https://api.mistral.ai/v1/chat/completions';
+                const modelName = models[0] || 'mistral-large-latest';
 
-            let responseText = null;
+                console.log(`[KeyRotator] 🔫 系統抽中 MISTRAL (${modelName}) 進行大市分析 [劇本: CLIMATE_ADVISOR]...`);
 
-            for (let i = 0; i < models.length; i++) {
-                const currentModel = models[i];
-                try {
-                    const url = `https://generativelanguage.googleapis.com/v1beta/models/${currentModel}:generateContent?key=${geminiApiKey}`;
-                    const payload = {
-                        contents: [{ parts: [{ text: finalPrompt }] }],
-                        generationConfig: { temperature: 0.2, responseMimeType: "application/json" }
-                    };
+                const payload = {
+                    model: modelName,
+                    messages: [{ role: "user", content: finalPrompt }],
+                    response_format: { type: "json_object" },
+                    temperature: 0.2
+                };
 
-                    const response = await axios.post(url, payload, { headers: { 'Content-Type': 'application/json' }, timeout: 15000 });
-                    responseText = response.data.candidates[0].content.parts[0].text;
-                    break; 
-                } catch (apiErr) {
-                    if (i === models.length - 1) throw new Error("所有 Gemini 後備模型均已陣亡");
-                }
-            }
+                const response = await axios.post(apiUrl, payload, { 
+                    headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' }, 
+                    timeout: 20000 
+                });
 
-            // 🚀 V2.0 參數解析 (改為解析 trailing_trigger)
-            const aiResult = JSON.parse(responseText.match(/\{[\s\S]*\}/)[0]);
-            
+                const responseText = response.data.choices[0].message.content;
+                const match = responseText.match(/\{[\s\S]*\}/);
+                if (!match) throw new Error("AI 吐出的不是有效 JSON");
+
+                return JSON.parse(match[0]);
+            }, 'CLIMATE_ADVISOR'); // 👈 傳入 promptId 讓 KeyRotator 識得派 Key
+
             const rawTrigger = parseFloat(aiResult.trailing_trigger);
             const rawSl = parseFloat(aiResult.stop_loss);
             const rawTip = parseFloat(aiResult.max_tip_pct);
