@@ -60,7 +60,7 @@ module.exports = {
         name: "v10-ml-brain",
         script: "main.py", 
         cwd: "./ml_engine", 
-        interpreter: "python3",
+        interpreter: "python",
         instances: 1, 
         exec_mode: "fork",
         max_memory_restart: "3000M", // ✅ 3G 改為 3000M
