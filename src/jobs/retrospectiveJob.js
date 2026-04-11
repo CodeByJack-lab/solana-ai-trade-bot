@@ -1,5 +1,5 @@
 // src/jobs/retrospectiveJob.js
-// 📝 檔案功能用途：V9.8 終極進化版總指揮日會。專注每日覆盤並自動升級【前線買入 Scout】的劇本。
+// 📝 檔案功能用途：V10 總指揮日會。專注每日覆盤並自動升級【前線買入 Scout】的劇本。
 // 🚀 升級功能：適配 Provider 專屬排隊引擎，強制呼叫 GEMINI 進行複雜邏輯運算。
 
 const { supabase } = require('../config/supabase');
@@ -8,7 +8,7 @@ const axios = require('axios');
 const cron = require('node-cron');
 const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
-const { supabase } = require('../config/supabase');
+const { cacheManager } = require('../services/cacheManager'); // 🚨 FIX: 轉用 V10 cacheManager
 const { sendStrategyAlert } = require('../services/telegramService');
 
 const retrospectiveJob = {
@@ -63,7 +63,8 @@ const retrospectiveJob = {
                 if (ts) currentTrendingScout = ts.content.replace(/[\r\n]/g, ' ');
             }
 
-            const promptConfig = promptManager.getPromptConfig('master_retrospective', {
+            // 🚨 FIX: 使用 cacheManager
+            const promptConfig = cacheManager.getPromptConfig('master_retrospective', {
                 totalTrades, winRate, totalPnlSol: totalPnlSol.toFixed(4), newsScore: config?.latest_news_score || 50, 
                 autopsyReport, lastAiMemory: safeMemory, 
                 currentMemeScout, currentTrendingScout 
@@ -74,7 +75,6 @@ const retrospectiveJob = {
             
             if (!parsedPrompt) throw new Error("無法生成 parsedPrompt");
 
-            // 🚀 核心升級：直接向 keyRotator 請求 'GEMINI' Key
             const aiDecision = await keyRotator.enqueueRequest(targetProvider, async (apiKey) => {
                 const modelToUse = promptConfig.models[0] || 'gemini-2.5-flash'; 
                 let apiUrl, payload, headers;
