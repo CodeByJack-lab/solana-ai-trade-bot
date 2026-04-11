@@ -1,0 +1,6 @@
+# mise.toml
+# 最高權限環境指令：強制 Railway (Railpack) 同時安裝 Node 與 Python
+
+[tools]
+node = "20"
+python = "3.11"
