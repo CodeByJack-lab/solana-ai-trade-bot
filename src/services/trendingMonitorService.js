@@ -1,7 +1,6 @@
 // src/services/trendingMonitorService.js
 // 📝 檔案功能用途：V10.13 雙引擎隱形獵人。
-// 🛡️ 升級功能：[Non-ASCII Shield] 攔截火星文，並大幅擴充 Web2 實體巨頭品牌過濾庫。
-// 🚀 數據源升級：接入 Defined.fi (Codex) GraphQL，單次極速獲取 150 隻熱門幣，免去分頁煩惱。
+// 🚀 數據源升級：由 Birdeye 轉向 Defined.fi (Codex) SDK，單次極速獲取 150 隻熱門幣。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -9,8 +8,12 @@ const { getPortfolio, canBuyTrending } = require('./portfolioService');
 const { cacheManager } = require('./cacheManager'); 
 const configEnv = require('../config/config');
 const Redis = require('ioredis');
+const { Codex } = require('@codex-data/sdk'); // 🎯 引入 SDK
 
 const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
+
+// 🎯 初始化 Codex SDK
+const sdk = new Codex(process.env.DEFINED_API_KEY);
 
 let isCrawlerRunning = false;
 let geckoSuspendedUntil = 0;
@@ -18,7 +21,7 @@ let definedSuspendedUntil = 0;
 
 const trendingMonitorService = {
     // ==========================================
-    // 🦎 引擎 1：Gecko 爬蟲 (保留原有分頁邏輯)
+    // 🦎 引擎 1：Gecko 爬蟲 (保持原有分頁邏輯)
     // ==========================================
     async fetchTop100FromGecko() {
         console.log('🌐 [Gecko Crawler] 開始分批抓取 8 頁 (約 160 個池)，準備過濾 Solana 真・Top 100...');
@@ -74,102 +77,52 @@ const trendingMonitorService = {
     },
 
     // ==========================================
-    // 🦅 引擎 2：Defined.fi (Codex) 爬蟲 (一擊必殺版)
+    // 🦅 引擎 2：Defined.fi (Codex) SDK 爬蟲
     // ==========================================
     async fetchFromDefined() {
-        const apiKey = process.env.DEFINED_API_KEY;
-        if (!apiKey) {
-            console.warn("⚠️ [Defined Crawler] 尚未設定 DEFINED_API_KEY，跳過掃描。");
+        if (!process.env.DEFINED_API_KEY) {
+            console.warn("⚠️ [Defined SDK] 尚未設定 DEFINED_API_KEY，跳過掃描。");
             return [];
         }
 
-        console.log('🦅 [Defined Crawler] 啟動天眼：單次獲取 150 隻 Solana 極限過濾熱門幣...');
+        console.log('🦅 [Defined SDK] 啟動天眼：獲取 150 隻高質素 Solana 熱門幣...');
         
-        const endpoint = 'https://graph.codex.io/graphql';
-        
-        // 🎯 修復 400 Error：移除不支援嘅 offset，直接 limit: 150 一次過攞齊
-        const graphqlQuery = {
-            query: `
-                query GetTrendingTokens {
-                  filterTokens(
-                    tokens: { network: [1399811149] }
-                    filters: {
-                      volume24: { gt: 50000 }
-                      liquidity: { gt: 10000 }
-                    }
-                    rankings: [{ attribute: trendingScore24, direction: DESC }]
-                    limit: 150
-                  ) {
-                    results {
-                      token {
-                        address
-                        symbol
-                        name
-                      }
-                    }
-                  }
-                }
-            `
-        };
+        try {
+            // 🎯 使用 SDK 內建方法，格式更安全，防語法錯誤
+            const response = await sdk.queries.filterTokens({
+                filters: {
+                    networkIds: [1399811149], // Solana
+                    volume24: { gt: 50000 },
+                    liquidity: { gt: 10000 }
+                },
+                rankings: [
+                    { attribute: 'trendingScore24', direction: 'DESC' }
+                ],
+                limit: 150
+            });
 
-        let attempt = 0;
-        let success = false;
-        let allTokens = [];
+            const tokens = response?.filterTokens?.results || [];
+            console.log(`📑 [Defined SDK] 成功獲取 ${tokens.length} 隻高質素熱門幣！`);
 
-        while (!success && attempt < 3) {
-            try {
-                attempt++;
-                const response = await axios.post(endpoint, graphqlQuery, {
-                    headers: { 
-                        'Authorization': apiKey,
-                        'Content-Type': 'application/json'
-                    },
-                    timeout: 10000 
-                });
+            return tokens.map(t => ({
+                mint_address: t.token.address,
+                token_symbol: (t.token.symbol || 'UNKNOWN').toUpperCase(),
+                token_name: t.token.name || 'UNKNOWN',
+                // 因為後續有 DexScreener 接力精準數據，這裡給予基礎值通過過濾器
+                liquidity: 50000,
+                volume_24h: 150000,
+                price_change_24h: 0
+            }));
 
-                if (response.data.errors) {
-                    throw new Error(`GraphQL內部錯誤: ${JSON.stringify(response.data.errors[0].message)}`);
-                }
-
-                const tokens = response.data?.data?.filterTokens?.results || [];
-                allTokens = tokens;
-                success = true;
-                console.log(`📑 [Defined] 成功一擊獲取 ${tokens.length} 隻高質素熱門幣！`);
-
-            } catch (error) {
-                const status = error.response?.status;
-                let errorMsg = error.message;
-
-                if (error.response?.data) {
-                    errorMsg = JSON.stringify(error.response.data).substring(0, 150);
-                }
-
-                if (status === 400 || status === 401 || status === 403) {
-                    console.error(`❌ [Defined Crawler] 致命錯誤 (${status}): ${errorMsg}`);
-                    throw new Error(`Defined API 致命錯誤 (${status})`); 
-                }
-                
-                const penaltyDelay = status === 429 ? 15000 : 5000;
-                console.warn(`⚠️ [Defined Crawler] 獲取失敗 (嘗試 ${attempt}/3): ${errorMsg}。冷卻 ${penaltyDelay/1000}s...`);
-                await new Promise(r => setTimeout(r, penaltyDelay));
-            }
+        } catch (error) {
+            console.error(`❌ [Defined SDK] 獲取失敗: ${error.message}`);
+            // 丟出錯誤以觸發 start() 內的停機機制
+            throw error; 
         }
-
-        return allTokens.map(t => {
-            const tokenData = t.token || {};
-            return {
-                mint_address: tokenData.address,
-                token_symbol: (tokenData.symbol || 'UNKNOWN').toUpperCase(),
-                token_name: tokenData.name || 'UNKNOWN',
-                liquidity: 50000,   // 預設填充值，因後續會向 DexScreener 索取精準數據
-                volume_24h: 150000, 
-                price_change_24h: 0 
-            };
-        });
     },
 
     // ==========================================
-    // 🧠 共用處理核心：去重聚合、防偽矩陣、自動白名單、交給天網
+    // 🧠 共用處理核心 (保持不變)
     // ==========================================
     async processAndSaveTokens(standardizedTokens, sourceName) {
         if (!standardizedTokens || standardizedTokens.length === 0) return;
@@ -205,13 +158,11 @@ const trendingMonitorService = {
 
             const sym = (token_symbol || 'UNKNOWN').toUpperCase();
 
-            // 1. [Non-ASCII Shield]
             if (/[^\x00-\x7F]/.test(sym)) {
                 nonAsciiCount++;
                 continue; 
             }
 
-            // 2. 動態防偽與 DB 黑名單
             if (VERIFIED_TOKENS[sym] && mint_address !== VERIFIED_TOKENS[sym]) {
                 if (VERIFIED_TOKENS[sym].startsWith('BlockList')) {
                     dbBlacklistCount[sym] = (dbBlacklistCount[sym] || 0) + 1;
@@ -221,7 +172,6 @@ const trendingMonitorService = {
                 continue; 
             }
 
-            // 3. 檢查大廠/名人陷阱
             let isBrandTrap = false;
             for (const brand of BRAND_BLACKLIST) {
                 if (sym.includes(brand) && !VERIFIED_TOKENS[sym]) {
@@ -232,7 +182,6 @@ const trendingMonitorService = {
             }
             if (isBrandTrap) continue;
 
-            // 4. 「唯一王者」去重算法
             if (!symbolMap.has(sym)) {
                 symbolMap.set(sym, token);
             } else {
@@ -253,7 +202,6 @@ const trendingMonitorService = {
 
         const deduplicatedTokens = Array.from(symbolMap.values());
 
-        // 🛡️ 第二階段：準備入庫與 Auto-Whitelist
         const dbParams = cacheManager.getStrategy('TRENDING');
         const dynamicMinLiquidity = dbParams?.min_liquidity || 50000; 
 
@@ -353,11 +301,11 @@ const trendingMonitorService = {
                     }
                 }
 
-                // 兩大情報源之間預留 15 秒喘息空間
                 await new Promise(r => setTimeout(r, 15000));
 
                 if (Date.now() > definedSuspendedUntil) {
                     try {
+                        // 🎯 呼叫修復後的 SDK 引擎
                         const definedTokens = await this.fetchFromDefined();
                         if (definedTokens.length > 0) await this.processAndSaveTokens(definedTokens, 'DEFINED');
                     } catch (err) {
