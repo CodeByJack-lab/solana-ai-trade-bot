@@ -1,6 +1,6 @@
 pandas==2.2.1
 numpy==1.26.4
-supabase==2.3.6
+supabase==2.5.1
 redis==5.0.3
 fastapi==0.110.0
 uvicorn==0.29.0
