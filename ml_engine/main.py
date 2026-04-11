@@ -271,4 +271,4 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     # 🎯 終極修復：載入 log_config.json 強制將 uvicorn 訊息導向 stdout，防止雲端系統誤判為 error
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=1, log_config="log_config.json")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=2, log_config="log_config.json")
