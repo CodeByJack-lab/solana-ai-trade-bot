@@ -9,6 +9,7 @@ import math
 import threading
 from datetime import datetime, timezone, timedelta
 from fastapi import FastAPI, BackgroundTasks
+from contextlib import asynccontextmanager  # 🎯 新增 lifespan 依賴
 from pydantic import BaseModel, Field
 import pandas as pd
 import numpy as np
@@ -42,7 +43,18 @@ except Exception as e:
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.4")
+# ------------------------------------------------------------------
+# 🎯 FastAPI Lifespan 管理 (取代舊版 on_event)
+# ------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # 啟動背景排程 (等同於舊版 startup)
+    threading.Thread(target=background_scheduler, daemon=True).start()
+    yield # 代表 Server 開始接收請求
+    # 這裡可以放 shutdown 的清理邏輯 (目前不需)
+
+# 將 lifespan 綁定到 FastAPI
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.4", lifespan=lifespan)
 
 # ------------------------------------------------------------------
 # 2. 即時推論端點 (純數與 ML 融合)
@@ -243,10 +255,6 @@ def background_scheduler():
     while True:
         execute_evolution_pipeline()
         time.sleep(86400)  # 暫停 24 小時
-
-@app.on_event("startup")
-def startup_event():
-    threading.Thread(target=background_scheduler, daemon=True).start()
 
 # ------------------------------------------------------------------
 # 5. 管理端點

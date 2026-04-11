@@ -66,6 +66,10 @@ module.exports = {
         max_memory_restart: "3000M", // ✅ 3G 改為 3000M
         autorestart: true,
         watch: false,
+        // 🎯 終極解法：強制將 Uvicorn 預設嘅 stderr (錯誤流) 全部倒落 stdout (標準流)
+        error_file: "/dev/stdout",
+        out_file: "/dev/stdout",
+        merge_logs: true,
         env: {
           NODE_ENV: "production"
         }
