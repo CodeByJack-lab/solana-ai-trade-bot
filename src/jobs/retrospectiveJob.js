@@ -8,7 +8,7 @@ const axios = require('axios');
 const cron = require('node-cron');
 const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
-const { promptManager } = require('../services/promptManager'); 
+const { supabase } = require('../config/supabase');
 const { sendStrategyAlert } = require('../services/telegramService');
 
 const retrospectiveJob = {
