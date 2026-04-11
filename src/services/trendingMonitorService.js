@@ -80,18 +80,13 @@ const trendingMonitorService = {
     // 🦅 引擎 2：Defined.fi (Codex) SDK 爬蟲
     // ==========================================
     async fetchFromDefined() {
-        if (!process.env.DEFINED_API_KEY) {
-            console.warn("⚠️ [Defined SDK] 尚未設定 DEFINED_API_KEY，跳過掃描。");
-            return [];
-        }
-
         console.log('🦅 [Defined SDK] 啟動天眼：獲取 150 隻高質素 Solana 熱門幣...');
         
         try {
             const response = await sdk.queries.filterTokens({
                 filters: {
-                    // 🎯 核心修正：改用單數 networkId，並且唔好用 Array [ ]
-                    networkId: 1399811149, 
+                    // 🎯 核心修正：欄位名係 'network'，而且要用 [ ] 包住 ID
+                    network: [1399811149], 
                     volume24: { gt: 50000 },
                     liquidity: { gt: 10000 }
                 },
@@ -101,7 +96,6 @@ const trendingMonitorService = {
                 limit: 150
             });
 
-            // 🎯 SDK 回傳嘅結果可以直接咁攞，唔使再 entry.data.data 咁深層
             const tokens = response?.filterTokens?.results || [];
             console.log(`📑 [Defined SDK] 成功獲取 ${tokens.length} 隻高質素熱門幣！`);
 
@@ -109,15 +103,16 @@ const trendingMonitorService = {
                 mint_address: t.token.address,
                 token_symbol: (t.token.symbol || 'UNKNOWN').toUpperCase(),
                 token_name: t.token.name || 'UNKNOWN',
+                // SDK 回傳嘅數值欄位名同 GraphQL 一致
                 liquidity: t.liquidity || 50000,
                 volume_24h: t.volume24 || 150000,
                 price_change_24h: t.change24 || 0
             }));
 
         } catch (error) {
-            // 💡 打印更詳細嘅錯誤，方便之後追查
-            console.error(`❌ [Defined SDK] 獲取失敗:`, error.response?.data || error.message);
-            return []; 
+            // 如果 SDK 報錯，印出完整 response 方便最後確認
+            console.error(`❌ [Defined SDK] 獲取失敗:`, JSON.stringify(error.response?.data || error.message));
+            return [];
         }
     },
 
