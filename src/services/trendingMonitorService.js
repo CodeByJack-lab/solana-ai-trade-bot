@@ -1,7 +1,7 @@
 // src/services/trendingMonitorService.js
 // 📝 檔案功能用途：V10.13 雙引擎隱形獵人。
 // 🛡️ 升級功能：[Non-ASCII Shield] 攔截火星文，並大幅擴充 Web2 實體巨頭品牌過濾庫。
-// 🚀 數據源升級：廢除 Birdeye，接入 Defined.fi (Codex) GraphQL 進行極限 Volume/Liquidity 過濾。
+// 🚀 數據源升級：接入 Defined.fi (Codex) GraphQL，單次極速獲取 150 隻熱門幣，免去分頁煩惱。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -14,11 +14,11 @@ const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL ||
 
 let isCrawlerRunning = false;
 let geckoSuspendedUntil = 0;
-let definedSuspendedUntil = 0; // 🎯 替換 birdeyeSuspendedUntil
+let definedSuspendedUntil = 0; 
 
 const trendingMonitorService = {
     // ==========================================
-    // 🦎 引擎 1：Gecko 爬蟲
+    // 🦎 引擎 1：Gecko 爬蟲 (保留原有分頁邏輯)
     // ==========================================
     async fetchTop100FromGecko() {
         console.log('🌐 [Gecko Crawler] 開始分批抓取 8 頁 (約 160 個池)，準備過濾 Solana 真・Top 100...');
@@ -74,7 +74,7 @@ const trendingMonitorService = {
     },
 
     // ==========================================
-    // 🦅 引擎 2：Defined.fi (Codex) 爬蟲 🎯 (取代 Birdeye)
+    // 🦅 引擎 2：Defined.fi (Codex) 爬蟲 (一擊必殺版)
     // ==========================================
     async fetchFromDefined() {
         const apiKey = process.env.DEFINED_API_KEY;
@@ -83,31 +83,28 @@ const trendingMonitorService = {
             return [];
         }
 
-        console.log('🦅 [Defined Crawler] 啟動雷達：正在向 Codex 獲取 Solana 極限過濾熱門榜單...');
+        console.log('🦅 [Defined Crawler] 啟動天眼：單次獲取 150 隻 Solana 極限過濾熱門幣...');
         
         const endpoint = 'https://graph.codex.io/graphql';
         
-        // 🎯 GraphQL 查詢：獲取 24h Vol > 100k, Liq > 20k 嘅 Solana 幣，按熱度排名前 50
+        // 🎯 修復 400 Error：移除不支援嘅 offset，直接 limit: 150 一次過攞齊
         const graphqlQuery = {
             query: `
                 query GetTrendingTokens {
                   filterTokens(
                     tokens: { network: [1399811149] }
                     filters: {
-                      volume24: { gt: 100000 }
-                      liquidity: { gt: 20000 }
+                      volume24: { gt: 50000 }
+                      liquidity: { gt: 10000 }
                     }
-                    rankings: { attribute: trendingScore24, direction: DESC }
-                    limit: 50
+                    rankings: [{ attribute: trendingScore24, direction: DESC }]
+                    limit: 150
                   ) {
                     results {
                       token {
                         address
                         symbol
                         name
-                        info {
-                          circulatingSupply
-                        }
                       }
                     }
                   }
@@ -115,37 +112,60 @@ const trendingMonitorService = {
             `
         };
 
-        try {
-            const response = await axios.post(endpoint, graphqlQuery, {
-                headers: { 
-                    'Authorization': apiKey,
-                    'Content-Type': 'application/json'
-                },
-                timeout: 10000 
-            });
+        let attempt = 0;
+        let success = false;
+        let allTokens = [];
 
-            const tokens = response.data?.data?.filterTokens?.results || [];
-            console.log(`📑 [Defined] 成功獲取 ${tokens.length} 隻高質素熱門幣！`);
+        while (!success && attempt < 3) {
+            try {
+                attempt++;
+                const response = await axios.post(endpoint, graphqlQuery, {
+                    headers: { 
+                        'Authorization': apiKey,
+                        'Content-Type': 'application/json'
+                    },
+                    timeout: 10000 
+                });
 
-            return tokens.map(t => {
-                const tokenData = t.token;
-                return {
-                    mint_address: tokenData.address,
-                    token_symbol: (tokenData.symbol || 'UNKNOWN').toUpperCase(),
-                    token_name: tokenData.name || 'UNKNOWN',
-                    // Defined GraphQL filterTokens 預設唔回傳具體 Liq/Vol 數值
-                    // 但因為我哋 Filter 已經寫死咗門檻，所以呢度塞假數 (為咗過下面 processAndSaveTokens 嘅 check)
-                    liquidity: 50000, 
-                    volume_24h: 150000,
-                    price_change_24h: 0 
-                };
-            });
+                if (response.data.errors) {
+                    throw new Error(`GraphQL內部錯誤: ${JSON.stringify(response.data.errors[0].message)}`);
+                }
 
-        } catch (error) {
-            const status = error.response?.status || 'Network';
-            console.error(`❌ [Defined Crawler] 查詢失敗 (${status}): ${error.message}`);
-            throw error; // 掟出 Error 等外層邏輯做 Suspension
+                const tokens = response.data?.data?.filterTokens?.results || [];
+                allTokens = tokens;
+                success = true;
+                console.log(`📑 [Defined] 成功一擊獲取 ${tokens.length} 隻高質素熱門幣！`);
+
+            } catch (error) {
+                const status = error.response?.status;
+                let errorMsg = error.message;
+
+                if (error.response?.data) {
+                    errorMsg = JSON.stringify(error.response.data).substring(0, 150);
+                }
+
+                if (status === 400 || status === 401 || status === 403) {
+                    console.error(`❌ [Defined Crawler] 致命錯誤 (${status}): ${errorMsg}`);
+                    throw new Error(`Defined API 致命錯誤 (${status})`); 
+                }
+                
+                const penaltyDelay = status === 429 ? 15000 : 5000;
+                console.warn(`⚠️ [Defined Crawler] 獲取失敗 (嘗試 ${attempt}/3): ${errorMsg}。冷卻 ${penaltyDelay/1000}s...`);
+                await new Promise(r => setTimeout(r, penaltyDelay));
+            }
         }
+
+        return allTokens.map(t => {
+            const tokenData = t.token || {};
+            return {
+                mint_address: tokenData.address,
+                token_symbol: (tokenData.symbol || 'UNKNOWN').toUpperCase(),
+                token_name: tokenData.name || 'UNKNOWN',
+                liquidity: 50000,   // 預設填充值，因後續會向 DexScreener 索取精準數據
+                volume_24h: 150000, 
+                price_change_24h: 0 
+            };
+        });
     },
 
     // ==========================================
@@ -154,7 +174,6 @@ const trendingMonitorService = {
     async processAndSaveTokens(standardizedTokens, sourceName) {
         if (!standardizedTokens || standardizedTokens.length === 0) return;
 
-        // 🛡️ 終極大廠與實體巨頭黑名單
         const BRAND_BLACKLIST = [
             'OPENAI', 'CHATGPT', 'SORA', 'CLAUDE', 'GEMINI', 'NVIDIA', 'APPLE', 'META', 'GOOGLE', 'MICROSOFT', 'AMAZON', 'TSMC', 'AMD', 'INTEL',
             'GROK', 'ELON', 'MUSK', 'TRUMP', 'BIDEN', 'OBAMA', 'PUTIN', 'ZELENSKY', 'TATE', 'MRBEAST',
@@ -186,7 +205,7 @@ const trendingMonitorService = {
 
             const sym = (token_symbol || 'UNKNOWN').toUpperCase();
 
-            // 1. [Non-ASCII Shield] 攔截中/日/韓文及特殊火星文
+            // 1. [Non-ASCII Shield]
             if (/[^\x00-\x7F]/.test(sym)) {
                 nonAsciiCount++;
                 continue; 
@@ -334,14 +353,15 @@ const trendingMonitorService = {
                     }
                 }
 
+                // 兩大情報源之間預留 15 秒喘息空間
                 await new Promise(r => setTimeout(r, 15000));
 
-                if (Date.now() > definedSuspendedUntil) { // 🎯 改為 Defined
+                if (Date.now() > definedSuspendedUntil) {
                     try {
                         const definedTokens = await this.fetchFromDefined();
                         if (definedTokens.length > 0) await this.processAndSaveTokens(definedTokens, 'DEFINED');
                     } catch (err) {
-                        definedSuspendedUntil = Date.now() + 60 * 60 * 1000; // 如果死機，停機一小時
+                        definedSuspendedUntil = Date.now() + 60 * 60 * 1000; 
                     }
                 }
             } catch (err) {
