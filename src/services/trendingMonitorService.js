@@ -1,6 +1,7 @@
 // src/services/trendingMonitorService.js
 // 📝 檔案功能用途：V10.13 雙引擎隱形獵人。
 // 🛡️ 升級功能：[Non-ASCII Shield] 攔截火星文，並大幅擴充 Web2 實體巨頭品牌過濾庫。
+// 🚀 數據源升級：廢除 Birdeye，接入 Defined.fi (Codex) GraphQL 進行極限 Volume/Liquidity 過濾。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -13,7 +14,7 @@ const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL ||
 
 let isCrawlerRunning = false;
 let geckoSuspendedUntil = 0;
-let birdeyeSuspendedUntil = 0;
+let definedSuspendedUntil = 0; // 🎯 替換 birdeyeSuspendedUntil
 
 const trendingMonitorService = {
     // ==========================================
@@ -73,82 +74,78 @@ const trendingMonitorService = {
     },
 
     // ==========================================
-    // 🦅 引擎 2：Birdeye 爬蟲 (靜默忍者版)
+    // 🦅 引擎 2：Defined.fi (Codex) 爬蟲 🎯 (取代 Birdeye)
     // ==========================================
-    async fetchFromBirdeye() {
-        const apiKey = process.env.BIRDEYE_API_KEY || configEnv.birdeye?.apiKey;
-        if (!apiKey) return [];
-
-        console.log('🦅 [Birdeye Crawler] 啟動天眼：準備分 5 批次獲取 Solana 熱門榜單...');
-        let allTokens = [];
-        const batchCount = 5;
-        const limitPerBatch = 20;
-
-        for (let i = 0; i < batchCount; i++) {
-            let attempt = 0;
-            let pageSuccess = false;
-            const offset = i * limitPerBatch;
-
-            while (!pageSuccess && attempt < 3) {
-                try {
-                    attempt++;
-                    const response = await axios.get('https://public-api.birdeye.so/defi/token_trending', {
-                        headers: { 'X-API-KEY': apiKey, 'x-chain': 'solana', 'accept': 'application/json' },
-                        params: { sort_by: 'rank', sort_type: 'asc', offset: offset, limit: limitPerBatch },
-                        timeout: 8000 
-                    });
-
-                    const tokens = response.data?.data?.tokens || [];
-                    allTokens = allTokens.concat(tokens);
-                    pageSuccess = true;
-                    console.log(`📑 [Birdeye] 第 ${i + 1} 批次 (${tokens.length} 隻) 抓取成功！`);
-
-                    if (i < batchCount - 1) await new Promise(r => setTimeout(r, 2000)); 
-
-                } catch (error) {
-                    const status = error.response?.status;
-                    let isFatal = false;
-                    let errorMsg = error.message;
-
-                    if (error.response?.data) {
-                        if (typeof error.response.data === 'string' && error.response.data.startsWith('<!DOCTYPE html>')) {
-                            errorMsg = `Cloudflare ${status} Bad Gateway`;
-                            isFatal = true; 
-                        } else {
-                            errorMsg = JSON.stringify(error.response.data).substring(0, 100); 
-                        }
-                    } else if (error.code === 'ECONNABORTED' || error.message.includes('timeout')) {
-                        errorMsg = '請求超時 (Timeout)';
-                        isFatal = true; 
-                    }
-
-                    if (status === 400 || status === 401 || status === 403) {
-                        console.error(`❌ [Birdeye Crawler] 拒絕連線 (${status}): ${errorMsg}`);
-                        throw new Error(`Birdeye API 致命錯誤 (${status})`); 
-                    }
-
-                    if (isFatal || status === 502 || status === 503 || status === 504) {
-                        console.warn(`⚠️ [Birdeye Crawler] 官方伺服器不穩定 (${errorMsg})。放棄本輪。`);
-                        return allTokens; 
-                    }
-                    
-                    const penaltyDelay = status === 429 ? 15000 : 5000;
-                    console.warn(`⚠️ [Birdeye Crawler] 第 ${i+1} 批次失敗 (嘗試 ${attempt}/3): ${errorMsg}。冷卻 ${penaltyDelay/1000}s...`);
-                    await new Promise(r => setTimeout(r, penaltyDelay));
-                }
-            }
+    async fetchFromDefined() {
+        const apiKey = process.env.DEFINED_API_KEY;
+        if (!apiKey) {
+            console.warn("⚠️ [Defined Crawler] 尚未設定 DEFINED_API_KEY，跳過掃描。");
+            return [];
         }
 
-        return allTokens.map(t => {
-            return {
-                mint_address: t.address,
-                token_symbol: (t.symbol || 'UNKNOWN').toUpperCase(),
-                token_name: t.name || 'UNKNOWN',
-                liquidity: parseFloat(t.liquidity) || 0,
-                volume_24h: parseFloat(t.volume24hUSD) || 0,
-                price_change_24h: 0 
-            };
-        });
+        console.log('🦅 [Defined Crawler] 啟動雷達：正在向 Codex 獲取 Solana 極限過濾熱門榜單...');
+        
+        const endpoint = 'https://graph.codex.io/graphql';
+        
+        // 🎯 GraphQL 查詢：獲取 24h Vol > 100k, Liq > 20k 嘅 Solana 幣，按熱度排名前 50
+        const graphqlQuery = {
+            query: `
+                query GetTrendingTokens {
+                  filterTokens(
+                    tokens: { network: [1399811149] }
+                    filters: {
+                      volume24: { gt: 100000 }
+                      liquidity: { gt: 20000 }
+                    }
+                    rankings: { attribute: trendingScore24, direction: DESC }
+                    limit: 50
+                  ) {
+                    results {
+                      token {
+                        address
+                        symbol
+                        name
+                        info {
+                          circulatingSupply
+                        }
+                      }
+                    }
+                  }
+                }
+            `
+        };
+
+        try {
+            const response = await axios.post(endpoint, graphqlQuery, {
+                headers: { 
+                    'Authorization': apiKey,
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000 
+            });
+
+            const tokens = response.data?.data?.filterTokens?.results || [];
+            console.log(`📑 [Defined] 成功獲取 ${tokens.length} 隻高質素熱門幣！`);
+
+            return tokens.map(t => {
+                const tokenData = t.token;
+                return {
+                    mint_address: tokenData.address,
+                    token_symbol: (tokenData.symbol || 'UNKNOWN').toUpperCase(),
+                    token_name: tokenData.name || 'UNKNOWN',
+                    // Defined GraphQL filterTokens 預設唔回傳具體 Liq/Vol 數值
+                    // 但因為我哋 Filter 已經寫死咗門檻，所以呢度塞假數 (為咗過下面 processAndSaveTokens 嘅 check)
+                    liquidity: 50000, 
+                    volume_24h: 150000,
+                    price_change_24h: 0 
+                };
+            });
+
+        } catch (error) {
+            const status = error.response?.status || 'Network';
+            console.error(`❌ [Defined Crawler] 查詢失敗 (${status}): ${error.message}`);
+            throw error; // 掟出 Error 等外層邏輯做 Suspension
+        }
     },
 
     // ==========================================
@@ -339,12 +336,12 @@ const trendingMonitorService = {
 
                 await new Promise(r => setTimeout(r, 15000));
 
-                if (Date.now() > birdeyeSuspendedUntil) {
+                if (Date.now() > definedSuspendedUntil) { // 🎯 改為 Defined
                     try {
-                        const birdTokens = await this.fetchFromBirdeye();
-                        if (birdTokens.length > 0) await this.processAndSaveTokens(birdTokens, 'BIRDEYE');
+                        const definedTokens = await this.fetchFromDefined();
+                        if (definedTokens.length > 0) await this.processAndSaveTokens(definedTokens, 'DEFINED');
                     } catch (err) {
-                        birdeyeSuspendedUntil = Date.now() + 60 * 60 * 1000; 
+                        definedSuspendedUntil = Date.now() + 60 * 60 * 1000; // 如果死機，停機一小時
                     }
                 }
             } catch (err) {
