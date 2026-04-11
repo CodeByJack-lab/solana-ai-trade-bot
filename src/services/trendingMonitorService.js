@@ -88,10 +88,10 @@ const trendingMonitorService = {
         console.log('🦅 [Defined SDK] 啟動天眼：獲取 150 隻高質素 Solana 熱門幣...');
         
         try {
-            // 🎯 使用 SDK 內建方法，格式更安全，防語法錯誤
             const response = await sdk.queries.filterTokens({
                 filters: {
-                    networkIds: [1399811149], // Solana
+                    // 🎯 核心修正：改用單數 networkId，並且唔好用 Array [ ]
+                    networkId: 1399811149, 
                     volume24: { gt: 50000 },
                     liquidity: { gt: 10000 }
                 },
@@ -101,6 +101,7 @@ const trendingMonitorService = {
                 limit: 150
             });
 
+            // 🎯 SDK 回傳嘅結果可以直接咁攞，唔使再 entry.data.data 咁深層
             const tokens = response?.filterTokens?.results || [];
             console.log(`📑 [Defined SDK] 成功獲取 ${tokens.length} 隻高質素熱門幣！`);
 
@@ -108,16 +109,15 @@ const trendingMonitorService = {
                 mint_address: t.token.address,
                 token_symbol: (t.token.symbol || 'UNKNOWN').toUpperCase(),
                 token_name: t.token.name || 'UNKNOWN',
-                // 因為後續有 DexScreener 接力精準數據，這裡給予基礎值通過過濾器
-                liquidity: 50000,
-                volume_24h: 150000,
-                price_change_24h: 0
+                liquidity: t.liquidity || 50000,
+                volume_24h: t.volume24 || 150000,
+                price_change_24h: t.change24 || 0
             }));
 
         } catch (error) {
-            console.error(`❌ [Defined SDK] 獲取失敗: ${error.message}`);
-            // 丟出錯誤以觸發 start() 內的停機機制
-            throw error; 
+            // 💡 打印更詳細嘅錯誤，方便之後追查
+            console.error(`❌ [Defined SDK] 獲取失敗:`, error.response?.data || error.message);
+            return []; 
         }
     },
 
