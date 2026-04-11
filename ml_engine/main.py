@@ -12,7 +12,8 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel, Field
 import pandas as pd
 import numpy as np
-from supabase import create_client, Client
+# 🎯 引入 ClientOptions 解決 httpx proxy 錯誤
+from supabase import create_client, Client, ClientOptions
 import redis
 import joblib
 
@@ -31,7 +32,14 @@ MODEL_PATH = "/tmp/v10_rf_model.pkl"
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("❌ [FATAL] 缺少 Supabase 環境變數，Data Engine 無法啟動。")
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+# 🎯 終極修復：加入 ClientOptions 關閉 proxy 檢查，防止 httpx 崩潰
+try:
+    opts = ClientOptions(postgrest_client_timeout=10, storage_client_timeout=10)
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, options=opts)
+except Exception as e:
+    print(f"⚠️ [System] 帶 Options 建立 Supabase Client 失敗，嘗試回退原始連線。錯誤: {e}")
+    supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 
 app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.4")
