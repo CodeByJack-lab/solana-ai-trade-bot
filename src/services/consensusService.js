@@ -1,9 +1,9 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V9.8 終極防彈版 AI 議事廳。唯一負責買入把關的 AI。
-// 🚀 升級功能：全線轉用 GROQ，並修復 Context 缺失問題，確保 {{baseScore}} 及 {{h1}} 成功傳遞。
+// 📝 檔案功能用途：V10 終極防彈版 AI 議事廳。唯一負責買入把關的 AI。
+// 🚀 升級功能：全線轉用 GROQ，並完美對接 cacheManager 讀取 Redis 熱更新劇本。
 
 const { keyRotator } = require('./keyRotator');
-const { promptManager } = require('./promptManager'); 
+const { cacheManager } = require('./cacheManager');
 const config = require('../config/config');
 const axios = require('axios');
 
@@ -29,22 +29,22 @@ class ConsensusService {
         const avgTrade = totalTxs > 0 ? (marketData.volume5m / totalTxs).toFixed(2) : 0;
         const pseudoOfi = totalTxs > 0 ? ((buys - sells) / totalTxs).toFixed(2) : 'N/A';
 
-        // 🚀 核心修復：確保所有 {{變數}} 都有對應的數值傳入
-        const aiConfig = promptManager.getPromptConfig(promptId, {
+        // 🚀 核心：對接 cacheManager，確保所有 {{變數}} 都有對應的數值傳入
+        const aiConfig = cacheManager.getPromptConfig(promptId, {
             token_symbol: marketData.symbol,
             climate: climate,
-            baseScore: baseScore, // 👈 修復：補回 baseScore
+            baseScore: baseScore,
             ofi: pseudoOfi,
             avg_trade: avgTrade,
             volume: marketData.volume5m ? marketData.volume5m.toFixed(0) : 0,
             liquidity: marketData.liquidity ? marketData.liquidity.toFixed(0) : 0,
-            h1: marketData.h1 ? marketData.h1.toFixed(2) : 0 // 👈 修復：補回 1H 漲幅
+            h1: marketData.h1 ? marketData.h1.toFixed(2) : 0 
         });
 
         const prompt = aiConfig.parsedPrompt;
 
         try {
-            // 🚀 核心升級：指定 GROQ 並傳入 promptId 供 KeyRotator 識別
+            // 🚀 指定 GROQ 並傳入 promptId 供 KeyRotator 識別
             const aiResult = await keyRotator.enqueueRequest('GROQ', async (apiKey) => {
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
                 const apiUrl = 'https://api.groq.com/openai/v1/chat/completions';

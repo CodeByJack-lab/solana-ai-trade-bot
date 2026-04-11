@@ -1,4 +1,7 @@
 // src/services/keyRotator.js
+// 📝 檔案功能用途：AI 金鑰輪替與佇列排程器。
+// 🚀 核心升級：實裝「1秒絕對冷卻 (Free Tier Survival)」，同一條 Key 用完 1 秒內絕對不再派發，防止 429。
+
 const config = require('../config/config');
 
 class KeyRotator {
@@ -16,77 +19,72 @@ class KeyRotator {
         return Date.now() < (this.cooldowns.get(key) || 0);
     }
 
-    _markKeyOnCooldown(key) {
+    // 🎯 新增：強制常規冷卻 (預設 1 秒)
+    _markKeyOnCooldown(key, durationMs = 1000) {
+        this.cooldowns.set(key, Date.now() + durationMs);
+    }
+
+    // 🛑 懲罰性冷卻 (中咗 429 罰停 5 分鐘)
+    _markKeyPenalty(key) {
         const cooldownMinutes = 5;
         this.cooldowns.set(key, Date.now() + (cooldownMinutes * 60 * 1000));
-        console.warn(`🔥 [KeyRotator] 金鑰觸發 429！關入小黑屋冷卻 ${cooldownMinutes} 分鐘。`);
+        console.warn(`🔥 [KeyRotator] 金鑰觸發 429 限流！關入小黑屋冷卻 ${cooldownMinutes} 分鐘。`);
     }
 
-    // 🚀 Mistral 專屬智能派 Key 邏輯
-    _getMistralKey(promptId) {
-        const mKeys = this.keys.MISTRAL || [];
-        if (mKeys.length === 0) return null;
+    _getKey(provider) {
+        const keys = this.keys[provider] || [];
+        if (keys.length === 0) return null;
 
-        let preferredIndex = 0; // 預設共用 Key 1 (Index 0)
-        if (promptId === 'POSITION_WATCHDOG' && mKeys.length >= 3) preferredIndex = 2; // 獨立用 Key 3
-        else if (promptId === 'backtest_analyst' && mKeys.length >= 2) preferredIndex = 1; // 獨立用 Key 2
-
-        // 優先使用指定 Key
-        if (!this._isOnCooldown(mKeys[preferredIndex])) return mKeys[preferredIndex];
-
-        // 如果專屬 Key 冷卻中，借用其他可用 Key 保命
-        for (let key of mKeys) {
-            if (!this._isOnCooldown(key)) return key;
-        }
-        return null;
-    }
-
-    _getNextAvailableKey(provider, promptId) {
-        if (provider === 'MISTRAL') return this._getMistralKey(promptId);
-
-        // GROQ 同 GEMINI 保持 Round-Robin
-        const providerKeys = this.keys[provider] || [];
-        if (providerKeys.length === 0) return null;
-
-        let attempts = 0;
-        while (attempts < providerKeys.length) {
-            const key = providerKeys[this.currentIndex[provider]];
-            if (!this._isOnCooldown(key)) {
-                this.currentIndex[provider] = (this.currentIndex[provider] + 1) % providerKeys.length;
-                return key;
+        // 輪詢尋找一條「不在冷卻期」的 Key
+        for (let i = 0; i < keys.length; i++) {
+            this.currentIndex[provider] = (this.currentIndex[provider] + 1) % keys.length;
+            const candidate = keys[this.currentIndex[provider]];
+            if (!this._isOnCooldown(candidate)) {
+                return candidate;
             }
-            this.currentIndex[provider] = (this.currentIndex[provider] + 1) % providerKeys.length;
-            attempts++;
         }
-        return null;
+        return null; // 如果全部 Key 都喺 1 秒冷卻期內，回傳 null 叫 Queue 等候
     }
 
     async _processQueue() {
-        if (this.isProcessing || this.queue.length === 0) return;
+        if (this.isProcessing) return;
         this.isProcessing = true;
 
         while (this.queue.length > 0) {
-            const task = this.queue.shift();
+            const task = this.queue[0];
+            const key = this._getKey(task.provider);
+
+            if (!key) {
+                // 🛡️ 所有 Key 都在冷卻中，排隊器休息 200ms 後再試
+                await new Promise(r => setTimeout(r, 200));
+                continue;
+            }
+
+            // 成功攞到 Key，將 Task 移出隊列
+            this.queue.shift();
+            task.apiKeyUsed = key;
+
             try {
-                const apiKey = this._getNextAvailableKey(task.provider, task.promptId);
+                const result = await task.executeFn(key);
                 
-                if (!apiKey) {
-                    task.reject(new Error(`ALL_KEYS_ON_COOLDOWN_FOR_${task.provider}`));
-                } else {
-                    task.apiKeyUsed = apiKey;
-                    const result = await task.executeFn(apiKey);
-                    task.resolve(result);
-                }
+                // 🎯 執行成功後，強制這條 Key 進入 1 秒冷卻！
+                this._markKeyOnCooldown(key, 1000);
+                
+                task.resolve(result);
             } catch (error) {
                 const is429 = error.message?.includes('429') || error.response?.status === 429;
                 const isTimeout = error.message?.includes('timeout') || error.code === 'ECONNABORTED';
                 
-                if (is429 && task.apiKeyUsed) this._markKeyOnCooldown(task.apiKeyUsed);
+                if (is429) {
+                    this._markKeyPenalty(key); // 中 429 罰 5 分鐘
+                } else {
+                    this._markKeyOnCooldown(key, 1000); // 一般錯誤也強制冷卻 1 秒
+                }
 
-                if ((is429 || isTimeout || error.response?.status >= 500) && task.apiKeyUsed) {
+                if (is429 || isTimeout || error.response?.status >= 500) {
                     task.retryCount = (task.retryCount || 0) + 1;
                     if (task.retryCount <= 3) {
-                        this.queue.unshift(task);
+                        this.queue.unshift(task); // 塞回隊列最前面重試
                     } else {
                         task.reject(new Error(`MAX_RETRIES_EXCEEDED: ${error.message}`));
                     }
@@ -94,12 +92,10 @@ class KeyRotator {
                     task.reject(error);
                 }
             }
-            await new Promise(resolve => setTimeout(resolve, 1000));
         }
         this.isProcessing = false;
     }
 
-    // 🚀 傳入 promptId 讓引擎知道點派 Key
     async enqueueRequest(provider, executeFn, promptId = 'default') {
         return new Promise((resolve, reject) => {
             this.queue.push({
@@ -112,5 +108,4 @@ class KeyRotator {
     }
 }
 
-const keyRotator = new KeyRotator();
-module.exports = { keyRotator };
+module.exports = { keyRotator: new KeyRotator() };

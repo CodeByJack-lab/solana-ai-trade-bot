@@ -1,24 +1,21 @@
 // src/services/trendingMonitorService.js
 // 📝 檔案功能用途：V10.13 雙引擎隱形獵人。
-// 🛡️ 升級功能：新增 [Non-ASCII Shield] 攔截中/日/韓文火星文，並大幅擴充 Web2 實體巨頭品牌過濾庫 (TSMC, GOOGLE, ALCHEMY 等)。
+// 🛡️ 升級功能：[Non-ASCII Shield] 攔截火星文，並大幅擴充 Web2 實體巨頭品牌過濾庫。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
 const { getPortfolio, canBuyTrending } = require('./portfolioService');
-const { healthMonitor } = require('./healthMonitor');
-const { trendingJob } = require('../jobs/trendingJob');
 const { cacheManager } = require('./cacheManager'); 
 const configEnv = require('../config/config');
 const Redis = require('ioredis');
-const redis = new Redis(configEnv.cache.redisUrl);
+
+const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 
 let isCrawlerRunning = false;
-
 let geckoSuspendedUntil = 0;
 let birdeyeSuspendedUntil = 0;
 
 const trendingMonitorService = {
-    
     // ==========================================
     // 🦎 引擎 1：Gecko 爬蟲
     // ==========================================
@@ -82,7 +79,7 @@ const trendingMonitorService = {
         const apiKey = process.env.BIRDEYE_API_KEY || configEnv.birdeye?.apiKey;
         if (!apiKey) return [];
 
-        console.log('🦅 [Birdeye Crawler] 啟動天眼：準備分 5 批次獲取 Solana 熱門榜單 (嚴格遵守 limit=20 限制)...');
+        console.log('🦅 [Birdeye Crawler] 啟動天眼：準備分 5 批次獲取 Solana 熱門榜單...');
         let allTokens = [];
         const batchCount = 5;
         const limitPerBatch = 20;
@@ -115,7 +112,7 @@ const trendingMonitorService = {
 
                     if (error.response?.data) {
                         if (typeof error.response.data === 'string' && error.response.data.startsWith('<!DOCTYPE html>')) {
-                            errorMsg = `Cloudflare ${status} Bad Gateway (官方伺服器死機)`;
+                            errorMsg = `Cloudflare ${status} Bad Gateway`;
                             isFatal = true; 
                         } else {
                             errorMsg = JSON.stringify(error.response.data).substring(0, 100); 
@@ -131,7 +128,7 @@ const trendingMonitorService = {
                     }
 
                     if (isFatal || status === 502 || status === 503 || status === 504) {
-                        console.warn(`⚠️ [Birdeye Crawler] 偵測到官方伺服器不穩定 (${errorMsg})。忍者模式啟動：放棄本輪剩餘抓取。`);
+                        console.warn(`⚠️ [Birdeye Crawler] 官方伺服器不穩定 (${errorMsg})。放棄本輪。`);
                         return allTokens; 
                     }
                     
@@ -160,19 +157,13 @@ const trendingMonitorService = {
     async processAndSaveTokens(standardizedTokens, sourceName) {
         if (!standardizedTokens || standardizedTokens.length === 0) return;
 
-        // 🛡️ 終極大廠與實體巨頭黑名單 (全面封殺蹭熱度殺豬盤)
+        // 🛡️ 終極大廠與實體巨頭黑名單
         const BRAND_BLACKLIST = [
-            // AI 與科技巨頭
             'OPENAI', 'CHATGPT', 'SORA', 'CLAUDE', 'GEMINI', 'NVIDIA', 'APPLE', 'META', 'GOOGLE', 'MICROSOFT', 'AMAZON', 'TSMC', 'AMD', 'INTEL',
-            // 政商名人
             'GROK', 'ELON', 'MUSK', 'TRUMP', 'BIDEN', 'OBAMA', 'PUTIN', 'ZELENSKY', 'TATE', 'MRBEAST',
-            // 傳統金融與實體資產
             'BLACKROCK', 'VANGUARD', 'FIDELITY', 'SEC', 'FED', 'JPMORGAN', 'OIL', 'PETROL', 'GAS', 'GOLD', 'SILVER',
-            // 遊戲與知名 IP
             'GTA', 'ROBLOX', 'RBX', 'NINTENDO', 'DISNEY', 'POKEMON',
-            // 頂流 Meme (防二次假冒，除非已在 verified_tokens)
             'PEPE', 'DOGE', 'SHIB', 'MAGA', 'WIF', 'BOME', 'BONK', 'SLERF', 'POPCAT',
-            // 幣圈機構與死幣
             'BINANCE', 'COINBASE', 'KRAKEN', 'FTX', 'ALAMEDA', 'TETHER', 'CIRCLE', 'ZARA'
         ];
         const blacklist = [
@@ -180,17 +171,17 @@ const trendingMonitorService = {
             'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',
             'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'
         ];
+        
         const VERIFIED_TOKENS = typeof cacheManager.getVerifiedTokens === 'function' ? cacheManager.getVerifiedTokens() : {};
 
         let fakeBlockCount = {}; 
         let dbBlacklistCount = {}; 
         let brandShieldCount = {}; 
-        let nonAsciiCount = 0; // 🌟 記錄火星文攔截數量
+        let nonAsciiCount = 0; 
         let dedupeCount = {}; 
 
         const symbolMap = new Map();
 
-        // 🔍 第一階段：全域過濾與去重
         for (const token of standardizedTokens) {
             const { mint_address, token_symbol, liquidity } = token;
             if (!mint_address || mint_address.length < 32 || blacklist.includes(mint_address)) continue;
@@ -198,8 +189,7 @@ const trendingMonitorService = {
 
             const sym = (token_symbol || 'UNKNOWN').toUpperCase();
 
-            // 🌟 1. [Non-ASCII Shield] 攔截中/日/韓文及特殊火星文
-            // [^\x00-\x7F] 代表任何不屬於標準英文鍵盤可打出的字元
+            // 1. [Non-ASCII Shield] 攔截中/日/韓文及特殊火星文
             if (/[^\x00-\x7F]/.test(sym)) {
                 nonAsciiCount++;
                 continue; 
@@ -226,7 +216,7 @@ const trendingMonitorService = {
             }
             if (isBrandTrap) continue;
 
-            // 4. 「唯一王者」去重算法 (The Highlander Rule)
+            // 4. 「唯一王者」去重算法
             if (!symbolMap.has(sym)) {
                 symbolMap.set(sym, token);
             } else {
@@ -240,24 +230,10 @@ const trendingMonitorService = {
             }
         }
 
-        // 🖨️ 集中輸出聚合 Log
-        if (nonAsciiCount > 0) {
-            console.log(`👽 [Non-ASCII Shield] 已攔截 ${nonAsciiCount} 隻包含中/韓文或火星文符號的垃圾幣！`);
-        }
-        for (const [sym, count] of Object.entries(dbBlacklistCount)) {
-            console.log(`🚫 [DB Blacklist] 觸發動態黑名單，已批量秒殺 ${count} 隻垃圾幣: ${sym}`);
-        }
-        for (const [sym, count] of Object.entries(fakeBlockCount)) {
-            console.log(`🗑️ [Fake Shield] 發現並踢出 ${count} 隻假冒 ${sym}！`);
-        }
-        for (const [sym, count] of Object.entries(brandShieldCount)) {
-            console.log(`🛡️ [Brand Shield] 攔截 ${count} 隻大廠/名人誘餌幣: ${sym}`);
-        }
-        
-        const totalDedupes = Object.values(dedupeCount).reduce((a, b) => a + b, 0);
-        if (totalDedupes > 0) {
-            console.log(`⚔️ [Highlander] 觸發唯一王者去重，已淘汰 ${totalDedupes} 隻低仿同名幣。`);
-        }
+        if (nonAsciiCount > 0) console.log(`👽 [Non-ASCII Shield] 已攔截 ${nonAsciiCount} 隻包含火星文符號的垃圾幣！`);
+        for (const [sym, count] of Object.entries(dbBlacklistCount)) console.log(`🚫 [DB Blacklist] 觸發動態黑名單，秒殺 ${count} 隻: ${sym}`);
+        for (const [sym, count] of Object.entries(fakeBlockCount)) console.log(`🗑️ [Fake Shield] 踢出 ${count} 隻假冒 ${sym}！`);
+        for (const [sym, count] of Object.entries(brandShieldCount)) console.log(`🛡️ [Brand Shield] 攔截 ${count} 隻大廠/名人誘餌幣: ${sym}`);
 
         const deduplicatedTokens = Array.from(symbolMap.values());
 
@@ -279,7 +255,6 @@ const trendingMonitorService = {
             const { mint_address, token_symbol, liquidity } = token;
             const sym = (token_symbol || 'UNKNOWN').toUpperCase();
 
-            // 🌟 [Auto-Whitelist] 如果流動性極高 (> 50萬U)，自動加入官方白名單！
             if (liquidity > 500000 && !VERIFIED_TOKENS[sym]) {
                 autoWhitelistArray.push({ token_symbol: sym, mint_address: mint_address, is_active: true });
                 VERIFIED_TOKENS[sym] = mint_address; 
@@ -321,33 +296,23 @@ const trendingMonitorService = {
 
         if (autoWhitelistArray.length > 0) {
             const { error: whitelistErr } = await supabase.from('verified_tokens').upsert(autoWhitelistArray, { onConflict: 'token_symbol' });
-            if (whitelistErr) {
-                console.error(`❌ [Auto-Whitelist] 自動白名單寫入失敗:`, whitelistErr.message);
-            } else {
-                console.log(`✅ [Auto-Whitelist] 成功自動將 ${autoWhitelistArray.length} 隻巨鯨級代幣加入官方防偽白名單！`);
-                if (typeof cacheManager.loadVerifiedTokens === 'function') {
-                    await cacheManager.loadVerifiedTokens();
-                }
-            }
+            if (!whitelistErr) console.log(`✅ [Auto-Whitelist] 成功將 ${autoWhitelistArray.length} 隻代幣加入防偽白名單！`);
         }
 
         if (top100Array.length >= 10) { 
             await supabase.from('trending_top100').delete().eq('source', sourceName); 
             const { error: insertErr } = await supabase.from('trending_top100').upsert(top100Array, { onConflict: 'mint_address' });
-            if (insertErr) console.error(`❌ [${sourceName}] 寫入 Top100 失敗:`, insertErr.message);
-            else console.log(`📋 [${sourceName}] 成功更新防偽對照表 (${top100Array.length} 隻代幣，已過濾複製人)！`);
+            if (!insertErr) console.log(`📋 [${sourceName}] 成功更新防偽對照表 (${top100Array.length} 隻代幣)！`);
         }
 
         if (incubatorArray.length > 0) {
             const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
-            if (!error) {
-                console.log(`🦎 [${sourceName}] 成功將 ${incubatorArray.length} 隻嚴選獵物送入天網保溫箱！`);
-            }
+            if (!error) console.log(`🦎 [${sourceName}] 成功將 ${incubatorArray.length} 隻嚴選獵物送入天網保溫箱！`);
         }
     },
 
     start() {
-        console.log('🦎🦅 [雙軌情報網] V10.13 啟動 (已實裝 ASCII 火星文護盾與 Web2 品牌過濾)...');
+        console.log('🦎🦅 [雙軌情報網] V10.13 掛載啟動...');
         
         const runTask = async () => {
             if (isCrawlerRunning) return;
@@ -368,7 +333,6 @@ const trendingMonitorService = {
                         const geckoTokens = await this.fetchTop100FromGecko();
                         await this.processAndSaveTokens(geckoTokens, 'GECKO');
                     } catch (err) {
-                        console.error(`🚨 [Gecko 引擎崩潰] ${err.message}`);
                         geckoSuspendedUntil = Date.now() + 60 * 60 * 1000; 
                     }
                 }
@@ -378,19 +342,11 @@ const trendingMonitorService = {
                 if (Date.now() > birdeyeSuspendedUntil) {
                     try {
                         const birdTokens = await this.fetchFromBirdeye();
-                        if (birdTokens.length > 0) {
-                            await this.processAndSaveTokens(birdTokens, 'BIRDEYE');
-                        }
+                        if (birdTokens.length > 0) await this.processAndSaveTokens(birdTokens, 'BIRDEYE');
                     } catch (err) {
-                        console.error(`🚨 [Birdeye 引擎崩潰] ${err.message}`);
                         birdeyeSuspendedUntil = Date.now() + 60 * 60 * 1000; 
                     }
                 }
-
-                if (trendingJob && typeof trendingJob.triggerImmediateAndResetClock === 'function') {
-                    trendingJob.triggerImmediateAndResetClock();
-                }
-
             } catch (err) {
                 console.error(`❌ [情報網] 主排程異常:`, err.message);
             } finally {

@@ -1,6 +1,7 @@
 // src/services/portfolioService.js
 // 📝 檔案功能用途：倉位與資產大管家。維護 RAM 中的持倉狀態，控制 Meme 與 Trending 雙軌額度。
-// 🚀 V9.3 實裝：真・鏈上同步心跳，確保實盤數據與 RPC 節點自動對齊。
+// 🚀 V10 實裝：真・鏈上同步心跳，確保實盤數據與 RPC 節點自動對齊。
+// 🛡️ 終極修復：加入跨進程記憶體同步，並實裝「防無限 Listener 護盾」杜絕 OOM。
 
 const { supabase } = require('../config/supabase'); 
 const { connection } = require('../config/solana');
@@ -36,18 +37,11 @@ let my_portfolio = {
     last_sync: null
 };
 
-// 🌟 全域保存 Database 設定嘅倉位上限
-let limitsCache = {
-    maxMeme: 2,
-    maxTrending: 3
-};
+let limitsCache = { maxMeme: 2, maxTrending: 3 };
 
 async function updateSystemStatus(msg) {
     try {
-        await supabase.from('bot_status').update({ 
-            message: msg,
-            updated_at: new Date()
-        }).eq('id', 1);
+        await supabase.from('bot_status').update({ message: msg, updated_at: new Date() }).eq('id', 1);
         healthMonitor.setStatus('Supabase_DB', '🟢 連線正常');
     } catch (err) {
         healthMonitor.setStatus('Supabase_DB', `🔴 寫入失敗: ${err.message}`);
@@ -56,39 +50,27 @@ async function updateSystemStatus(msg) {
 
 async function initPortfolio() {
     try {
-        console.log("🏰 [Portfolio] 正在初始化記憶體並執行上帝視視角對齊...");
-        await updateSystemStatus("🔄 正在初始化記憶體...");
+        console.log("🏰 [Portfolio] 正在初始化記憶體並執行上帝視角對齊...");
         
         const { data: config, error: configErr } = await supabase.from('system_config').select('*').eq('id', 1).maybeSingle();
         if (configErr) throw configErr;
 
         my_portfolio.mode = config ? (config.trade_mode || 'PAPER') : 'PAPER';
-        
-        // 🌟 直接讀取 Dashboard 設定嘅倉位上限 (上帝視角)
         limitsCache.maxMeme = config?.max_meme_positions || 2;
         limitsCache.maxTrending = config?.max_trending_positions || 3;
 
         const tableName = my_portfolio.mode === 'PAPER' ? 'active_positions_paper' : 'active_positions_live';
 
-        // ⚠️ LIVE 模式優化：初始化後啟動定時心跳同步
         if (my_portfolio.mode === 'LIVE') {
              my_portfolio.cash_sol = config?.live_wallet_balance || 0;
              my_portfolio.reference_capital = my_portfolio.cash_sol;
-             console.log(`💰 [Portfolio] LIVE 模式：初步載入 DB 餘額 (${my_portfolio.cash_sol} SOL)`);
-             
-             // 🚀 啟動「真・鏈上同步」心跳：每 30 秒強制對齊一次 RPC
-             console.log("🧬 [Portfolio] 鏈上餘額自動校準已上線 (30s 頻率)");
-             setInterval(() => syncLiveBalanceToDB(), 30000);
-             syncLiveBalanceToDB(); // 啟動時即刻同步一次
-        }
-
-        if (my_portfolio.mode === 'PAPER') {
+             syncLiveBalanceToDB(); 
+        } else {
             my_portfolio.reference_capital = config?.reference_capital || 10;
             my_portfolio.cash_sol = config?.simulated_balance || 10;
         }
 
         const { data: positions } = await supabase.from(tableName).select('*');
-        
         my_portfolio.positions = (positions || []).map(pos => ({
             ...pos,
             quantity: parseFloat(pos.quantity || pos.amount || 0),
@@ -100,9 +82,24 @@ async function initPortfolio() {
         my_portfolio.nav_sol = my_portfolio.cash_sol; 
         my_portfolio.last_sync = new Date();
 
+        // 🚀 終極修復：先移除舊的 Channel，防止 Listener 無限疊加導致 OOM
+        await supabase.removeChannel(supabase.channel('portfolio_cross_sync'));
+
+        // 建立新的跨進程同步監聽
+        supabase.channel('portfolio_cross_sync')
+            .on('postgres_changes', { event: '*', schema: 'public', table: tableName }, async () => {
+                const { data: newPositions } = await supabase.from(tableName).select('*');
+                my_portfolio.positions = (newPositions || []).map(pos => ({
+                    ...pos,
+                    quantity: parseFloat(pos.quantity || pos.amount || 0),
+                    entry_price_sol: parseFloat(pos.entry_price_sol),
+                    highest_price_sol: parseFloat(pos.highest_price_sol || pos.entry_price_sol || 0),
+                    strategy_type: pos.strategy_type || 'UNKNOWN' 
+                }));
+                console.log(`🔄 [Portfolio] 跨進程 RAM 同步完成，當前微服務持倉: ${my_portfolio.positions.length} 隻`);
+            }).subscribe();
+
         healthMonitor.setStatus('Portfolio_Cache', '🟢 載入完成');
-        console.log(`📊 [Portfolio] 上帝視角鎖設定完畢。額度 -> (Meme 敢死隊: ${limitsCache.maxMeme}, Top 100 提款機: ${limitsCache.maxTrending})`);
-        
         return my_portfolio;
     } catch (err) {
         console.error("❌ [Portfolio] 失敗:", err.message);
@@ -111,53 +108,46 @@ async function initPortfolio() {
     }
 }
 
-// 🏦 強化版同步：不只更新 DB，同時更新記憶體 my_portfolio
+// 首次啟動定時心跳 (保證只執行一次)
+let isHeartbeatStarted = false;
+if (!isHeartbeatStarted) {
+    setInterval(() => {
+        if (my_portfolio.mode === 'LIVE') syncLiveBalanceToDB();
+    }, 30000);
+    isHeartbeatStarted = true;
+}
+
 async function syncLiveBalanceToDB() {
     if (walletPublicKey) {
         try {
             const lamports = await connection.getBalance(walletPublicKey);
             const liveSol = lamports / 1e9;
-            
-            // 1. 同步到 Supabase 供 Dashboard 顯示
             await supabase.from('system_config').update({ live_wallet_balance: liveSol }).eq('id', 1);
             
-            // 2. 核心：即時同步到記憶體快取
             if (my_portfolio.mode === 'LIVE') {
                 my_portfolio.cash_sol = liveSol;
-                my_portfolio.nav_sol = liveSol; // 更新淨值基準
+                my_portfolio.nav_sol = liveSol;
             }
-            
-            console.log(`🏦 [RPC Sync] 已校準最新真倉餘額: ${liveSol} SOL`);
-        } catch (err) {
-            console.error("⚠️ [RPC Error] 同步真倉餘額失敗:", err.message);
-        }
+        } catch (err) {}
     }
 }
 
 function getPortfolio() { return my_portfolio; }
-
 function getPositionLimits() { return limitsCache; }
 
 function getMemeCount() {
-    return my_portfolio.positions.filter(p => 
-        p.strategy_type && (p.strategy_type.includes('MEME_SNIPE') || p.strategy_type.includes('MEME_BLIND') || p.strategy_type === 'MEME')
-    ).length;
+    return my_portfolio.positions.filter(p => p.strategy_type && (p.strategy_type.includes('MEME') || p.strategy_type.includes('NEWBORN') || p.strategy_type.includes('v10'))).length;
 }
 
 function getTrendingCount() {
-    return my_portfolio.positions.filter(p => 
-        p.strategy_type && p.strategy_type.includes('TRENDING')
-    ).length;
+    return my_portfolio.positions.filter(p => p.strategy_type && p.strategy_type.includes('TRENDING')).length;
 }
 
 function updateCache(action, solAmount, positionData = null) {
     if (action === 'BUY') {
         my_portfolio.cash_sol -= solAmount;
         if (positionData) {
-            const safePos = { 
-                ...positionData, 
-                quantity: parseFloat(positionData.quantity || positionData.amount || 0) 
-            };
+            const safePos = { ...positionData, quantity: parseFloat(positionData.quantity || positionData.amount || 0) };
             my_portfolio.positions.push(safePos);
         }
     } else if (action === 'SELL') {
@@ -174,22 +164,12 @@ async function resetPaperMemory() {
     try {
         const { data: dbConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
         if (dbConfig) my_portfolio.cash_sol = dbConfig.simulated_balance;
-        console.log(`🧠 [Portfolio] 記憶體已被強制重置！目前模擬盤餘額: ${my_portfolio.cash_sol} SOL，持倉數: 0`);
-    } catch (e) {
-        console.error("無法重置 Portfolio 餘額:", e.message);
-    }
+    } catch (e) {}
 }
 
 module.exports = { 
-    initPortfolio, 
-    getPortfolio, 
-    updateCache, 
-    resetPaperMemory, 
-    syncLiveBalanceToDB, 
-    updateSystemStatus,
-    getMemeCount,
-    getTrendingCount, 
-    getPositionLimits,
+    initPortfolio, getPortfolio, updateCache, resetPaperMemory, syncLiveBalanceToDB, updateSystemStatus,
+    getMemeCount, getTrendingCount, getPositionLimits,
     canBuyMeme: () => getMemeCount() < limitsCache.maxMeme,
     canBuyTrending: () => getTrendingCount() < limitsCache.maxTrending
 };

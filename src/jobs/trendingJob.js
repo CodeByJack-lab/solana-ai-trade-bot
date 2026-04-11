@@ -1,17 +1,16 @@
 // src/jobs/trendingJob.js
-// 📝 檔案功能用途：V10.9 數學雷達排程器 (天網級防禦)。內建雙重前置物理防禦網，並賦予 AI 「一票否決物理拔線」的絕對權力。
+// 📝 檔案功能用途：V10.9 數學雷達排程器 (天網級防禦)。內建雙重前置物理防禦網。
+// 🚀 V10 核心升級：不再自行越權買幣，動能達標後改為透過 Redis 發射 `trending_signal` 交由前線雙腦處理。
 
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
-const { securityGuard } = require('../services/securityGuard');
-const { routerService } = require('../services/router');
 const { getPortfolio } = require('../services/portfolioService'); 
 const configEnv = require('../config/config'); 
 const { healthMonitor } = require('../services/healthMonitor');
 const { cacheManager } = require('../services/cacheManager'); 
 
 const Redis = require('ioredis');
-const redis = new Redis(configEnv.cache.redisUrl);
+const redis = new Redis(configEnv.cache.redisUrl || process.env.REDIS_URL || 'redis://localhost:6379');
 
 let isTrendingRunning = false;
 let radarTimer = null; 
@@ -39,7 +38,6 @@ const trendingJob = {
             const { data: sysConfig } = await supabase.from('system_config').select('is_running, trending_survival_score').eq('id', 1).single();
             if (!sysConfig || !sysConfig.is_running) return;
 
-            const survivalScore = sysConfig.trending_survival_score || 60;
             const { data: stratParams } = await supabase.from('ai_strategy_params').select('dynamic_vl_tiers').eq('id', 3).single();
             const dynamicVlTiers = stratParams?.dynamic_vl_tiers;
 
@@ -192,36 +190,17 @@ const trendingJob = {
                     console.log(`   - 1H 升幅: ${h1}% | 實際 5m 量/池比: ${liq > 0 ? ((vol5m/liq)*100).toFixed(2) : 0}% | 買/賣: ${buys}/${sells}`);
                     console.log(`======================================================\n`);
 
-                    // 🛡️ 呼叫安檢中樞
-                    const secResult = await securityGuard.calculateQuantScore(mintAddress, 'TRENDING');
+                    // 🚀 V10 核心進化：動能達標！不再自行審批與購買，直接發射訊號給 trade_frontline
+                    console.log(`🚀 [Trending] 數學動能達標！透過 Redis 傳送 $${token.token_symbol} 至前線雙腦路由...`);
                     
-                    if (!secResult.isSafe) {
-                        console.log(`🗑️ [Trending Security] 安檢判定危險: ${secResult.reason}`);
-                        await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
-                        await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
-                        continue; 
-                    }
+                    // 發射訊號畀 trade_frontline 接手 (附上從 DB 查到嘅 symbol 與 mint)
+                    await redis.publish('trending_signal', JSON.stringify({ mint: mintAddress, symbol: token.token_symbol }));
+                    
+                    // 踢出保溫箱，避免重複觸發
+                    await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
 
-                    // 🚦 呼叫 AI 路由 (如果 AI JSON 回傳 VETO，routerService 應該將其最終分數壓至 0)
-                    const finalAiScoreObj = { numeric_score: secResult.numeric_score }; // 用 object 傳遞，方便 router 修改
-                    const isBought = await routerService.routeSignal(mintAddress, 'TRENDING', secResult, finalAiScoreObj);
-
-                    if (isBought) {
-                        await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
-                    } else {
-                        // 💀 核心修正：如果 AI 判斷為 VETO (分數被 router 扣至低於 survivalScore)，直接火化！
-                        const actualScore = finalAiScoreObj.numeric_score !== undefined ? finalAiScoreObj.numeric_score : secResult.numeric_score;
-
-                        if (actualScore >= survivalScore) {
-                            console.log(`⏳ [Trending] 潛力仍在 (分數: ${actualScore})，保留於保溫箱...`);
-                            await supabase.from('trending_pool').update({ ai_score: actualScore, volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
-                        } else {
-                            console.log(`🗑️ [Trending] 分數低於門檻或遭 AI 否決 (${actualScore} < ${survivalScore})，物理拔線並拉黑！`);
-                            await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
-                            await redis.set(`scam_blacklist:${mintAddress}`, 'TRUE', 'EX', 86400);
-                        }
-                    }
                 } else {
+                    // 動能未達標，只更新數值
                     await supabase.from('trending_pool').update({ volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
                 }
             }

@@ -1,34 +1,18 @@
 // src/services/cacheManager.js
-// 📝 檔案功能用途：V9.2.2 終極全域大腦。統一快取 AI 戰略參數、白名單與 bot_prompts 劇本。
-// 🛡️ V9.2.8 升級：完美對齊 Mistral 最新版本號，修復 400 錯誤。
+// 📝 檔案功能用途：V10 橋樑版全域大腦。不再連接 Supabase，只負責從 Redis 拉取 macro_sync_center 準備好的數據，供舊有服務同步讀取。
 
-const { supabase } = require('../config/supabase');
+const Redis = require('ioredis');
+const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 
 class CacheManager {
     constructor() {
         this.cache = {
-            verified_tokens: { 'VDOR': 'VDoRrZix72Er41foJAdKrwFqYNozPbktuPa4Xy1A7Au' },
-            strategies: {
-                MEME: { 
-                    min_liquidity: 2500, min_vol_5m: 1000, buy_score_threshold: 70,
-                    tp_level_1_pct: 999.0, tp_level_2_pct: 999.0, 
-                    time_stop_mins: 30, time_stop_target_pct: 15.0, 
-                    base_jito_tip: 150000, max_buy_tip_pct: 0.02, base_slippage: 500, 
-                    stop_loss_pct: -15.0, trailing_tp_trigger: 20.0, trailing_pullback: 15.0 
-                },
-                TRENDING: { 
-                    min_liquidity: 20000, min_vol_5m: 5000, buy_score_threshold: 70,
-                    tp_level_1_pct: 999.0, tp_level_2_pct: 999.0, 
-                    time_stop_mins: 1440, time_stop_target_pct: 5.0, 
-                    base_jito_tip: 150000, max_buy_tip_pct: 0.01, base_slippage: 500, 
-                    stop_loss_pct: -20.0, trailing_tp_trigger: 20.0, trailing_pullback: 15.0 
-                }
-            },
-            prompts: new Map() 
+            verified_tokens: {},
+            strategies: { MEME: {}, TRENDING: {} },
+            prompts: new Map()
         };
-        this.isLoaded = false;
-
-        // 🛡️ 核心後備底稿 (修復 Mistral 模型名)
+        
+        // 🛡️ 核心後備底稿 (防止 Redis 未準備好時冷啟動報錯)
         this.fallbackPrompts = {
             'backtest_analyst': {
                 provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
@@ -44,7 +28,7 @@ class CacheManager {
             },
             'master_retrospective': {
                 provider: 'GEMINI', models: ['gemini-2.5-flash', 'gemma-3-27b-it', 'gemini-1.5-flash'],
-                content: `You are the HEAD OF TRADING. Update prompts based on yesterday's performance. Win Rate: {{winRate}}%. Autopsy: {{autopsyReport}}. Trending Scout: "{{currentTrendingScout}}". Meme Scout: "{{currentMemeScout}}". Task: Output JSON with COMPLETELY REWRITTEN prompts. 🚨 CRITICAL RULE: You MUST retain ALL placeholders (e.g., {{baseScore}}, {{ofi}}, {{liquidity}}, {{h1}}, {{avg_trade}}) in the new prompts! Format: {"new_trending_scout_prompt": "<string>", "new_meme_scout_prompt": "<string>", "briefing_notes": "<Cantonese summary>"}`
+                content: `You are the HEAD OF TRADING. Update prompts based on yesterday's performance. Win Rate: {{winRate}}%. Autopsy: {{autopsyReport}}. Task: Output JSON with COMPLETELY REWRITTEN prompts. Format: {"new_trending_scout_prompt": "<string>", "new_meme_scout_prompt": "<string>", "briefing_notes": "<Cantonese summary>"}`
             },
             'POSITION_WATCHDOG': {
                 provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
@@ -52,124 +36,76 @@ class CacheManager {
             },
             'meme_scout': {
                 provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
-                content: `You are a Ruthless Meme Coin Sniper. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Rules] 1. If OFI is 'N/A' or missing -> VETO. 2. If Liquidity < $2500 -> VETO. 3. If AvgTrade < $15 -> VETO. [Task] Think deeply. Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
+                content: `You are a Ruthless Meme Coin Sniper. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Task] Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
             },
             'trending_scout': {
                 provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
-                content: `You are a Quant Order Flow Analyst. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Rules] 1. If OFI is 'N/A' or missing -> VETO. 2. If AvgTrade < $50 -> VETO. 3. If OFI < -0.3 -> VETO. [Task] Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
+                content: `You are a Quant Order Flow Analyst. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Task] Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
             },
             'quant_consensus': {
                 provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
-                content: `You are a strict Quantitative AI Auditor. Evaluate asset {{symbol}}. Base Quant Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, 5m_Vol=\${{volume5m}}, OFI={{ofi}}, 1H_Change={{h1}}%. [Task] Adjust the base score. [Rules] 1. Think in English first. 2. Output reason in Cantonese. 3. CRITICAL RULE: If OFI is 'N/A' or missing, you MUST deduct at least 15 points. Output JSON: {"english_thought_process": "reasoning", "confidence": <float>, "adjustment": <integer -20 to +20>, "reason": "<Cantonese explanation>"}`
+                content: `You are a strict Quantitative AI Auditor. Evaluate asset {{symbol}}. Base Quant Score: {{baseScore}}/100. Output JSON: {"english_thought_process": "reasoning", "confidence": <float>, "adjustment": <integer -20 to +20>, "reason": "<Cantonese explanation>"}`
             }
         };
+        this.isLoaded = false;
     }
 
     async init() {
-        console.log('🧠 [Cache Manager] 系統大腦啟動中，準備與 Supabase 進行神經同步...');
+        console.log('🧠 [Cache Manager] V10 橋樑啟動，正在與 Redis 同步神經網絡...');
+        await this.refreshFromRedis();
         
-        await this.refreshFromDB();
-        setInterval(() => this.refreshFromDB(), 5 * 60 * 1000); 
-
-        const systemChannel = supabase.channel('system_realtime_updates');
-
-        systemChannel.on('postgres_changes', { event: '*', schema: 'public', table: 'bot_prompts' }, (payload) => {
-            console.log(`⚡ [Hot Update] 偵測到 bot_prompts 變更！正在熱重載 AI 劇本...`);
-            const pId = payload.new?.prompt_id || payload.old?.prompt_id;
-            if (payload.eventType === 'DELETE') {
-                this.cache.prompts.delete(pId);
-            } else {
-                const p = payload.new;
-                this.cache.prompts.set(pId, {
-                    provider: p.provider || 'GROQ',
-                    models: [p.model_main, p.model_backup_1, p.model_backup_2].filter(m => m),
-                    content: p.content || p.system_prompt
-                });
-            }
-        });
-
-        systemChannel.on('postgres_changes', { event: '*', schema: 'public', table: 'verified_tokens' }, (payload) => {
-            console.log(`⚡ [Hot Update] 偵測到 verified_tokens 變更！正在熱重載防偽裝甲...`);
-            this.refreshFromDB(); 
-        });
-
-        systemChannel.on('postgres_changes', { event: '*', schema: 'public', table: 'ai_strategy_params' }, (payload) => {
-            console.log(`⚡ [Hot Update] 偵測到 ai_strategy_params 變更！正在熱重載戰略參數...`);
-            this.refreshFromDB(); 
-        });
-
-        systemChannel.subscribe((status) => {
-            if (status === 'SUBSCRIBED') console.log('🔗 [Cache Manager] Realtime Websocket 已成功連線，全域熱更新啟動！');
-        });
-            
+        // 每 30 秒從 Redis 拉取最新數據，取代舊版 Supabase Realtime
+        setInterval(() => this.refreshFromRedis(), 30000); 
         this.isLoaded = true;
     }
 
-    async refreshFromDB() {
+    async refreshFromRedis() {
         try {
-            console.log('📡 [Cache Manager] 正在向 Supabase 請求最新數據...');
-
-            const { data: aiParams, error: paramError } = await supabase.from('ai_strategy_params').select('*').in('id', [2, 3]);
-            if (paramError) throw new Error(`戰略參數讀取失敗: ${paramError.message}`);
-            if (aiParams && aiParams.length > 0) {
-                aiParams.forEach(row => {
-                    const key = row.id === 2 ? 'MEME' : 'TRENDING';
-                    this.cache.strategies[key] = { ...this.cache.strategies[key], ...row };
-                });
-            }
-
-            const { data: tokensData, error: tokenError } = await supabase.from('verified_tokens').select('token_symbol, mint_address').eq('is_active', true);
-            if (tokenError) throw new Error(`防偽名單讀取失敗: ${tokenError.message}`);
-            if (tokensData) {
-                const tokenDict = {};
-                tokensData.forEach(row => { tokenDict[row.token_symbol] = row.mint_address; });
-                this.cache.verified_tokens = tokenDict;
-            }
-
-            const { data: promptsData, error: promptError } = await supabase.from('bot_prompts').select('*');
-            if (promptError) throw new Error(`AI 劇本讀取失敗: ${promptError.message}`);
-            if (promptsData) {
-                this.cache.prompts.clear(); 
-                promptsData.forEach(p => {
-                    this.cache.prompts.set(p.prompt_id, {
+            // 1. 同步 AI 劇本
+            const promptsStr = await redis.get('cache:bot_prompts');
+            if (promptsStr) {
+                const promptsData = JSON.parse(promptsStr);
+                this.cache.prompts.clear();
+                for (const [id, p] of Object.entries(promptsData)) {
+                    this.cache.prompts.set(id, {
                         provider: p.provider || 'GROQ',
                         models: [p.model_main, p.model_backup_1, p.model_backup_2].filter(m => m),
                         content: p.content || p.system_prompt
                     });
-                });
+                }
             }
 
-            this._verifyCacheState();
+            // 2. 同步防偽名單
+            const tokensStr = await redis.get('cache:verified_tokens');
+            if (tokensStr) this.cache.verified_tokens = JSON.parse(tokensStr);
+
+            // 3. 同步戰略參數
+            const paramsStr = await redis.get('cache:ai_strategy_params');
+            if (paramsStr) {
+                const paramsData = JSON.parse(paramsStr);
+                paramsData.forEach(row => {
+                    const key = row.id === 2 ? 'MEME' : 'TRENDING';
+                    this.cache.strategies[key] = { ...this.cache.strategies[key], ...row };
+                });
+            }
         } catch (err) {
-            console.error('\n❌ [Cache Manager Fatal Error] 無法與 Supabase 同步數據！', err.message);
+            console.error('❌ [Cache Manager] 從 Redis 同步失敗:', err.message);
         }
     }
 
-    _verifyCacheState() {
-        const memeKeys = Object.keys(this.cache.strategies.MEME).length;
-        const trendingKeys = Object.keys(this.cache.strategies.TRENDING).length;
-        const tokenCount = Object.keys(this.cache.verified_tokens).length;
-        const promptCount = this.cache.prompts.size;
-
-        console.log(`\n✅ [Cache Verification] RAM 快取狀態核實完畢:`);
-        console.log(`   🔸 戰略參數: MEME (${memeKeys} 參數), TRENDING (${trendingKeys} 參數)`);
-        console.log(`   🔸 防偽名單: 成功防護 ${tokenCount} 個熱門/巨頭代幣名`);
-        console.log(`   🔸 AI 劇本 : 成功裝載 ${promptCount} 條自訂 Prompt`);
-        console.log('--------------------------------------------------\n');
-    }
-
+    // 👇 完美保留 V9 的同步讀取接口，舊服務無需修改任何一行 Code！
     getConfig(type = 'MEME') {
         const safeType = (type && type.includes('TRENDING')) ? 'TRENDING' : 'MEME';
-        return this.cache.strategies[safeType];
+        return this.cache.strategies[safeType] || {};
     }
-
+    
     getStrategy(type = 'MEME') { return this.getConfig(type); }
+    
     getVerifiedTokens() { return this.cache.verified_tokens || {}; }
 
     updateLocally(type, dataObj) {
         const safeType = (type && type.includes('TRENDING')) ? 'TRENDING' : 'MEME';
         this.cache.strategies[safeType] = { ...this.cache.strategies[safeType], ...dataObj };
-        console.log(`🔄 [Cache Manager] 已熱更新 ${safeType} 的 RAM 參數。`);
     }
 
     getPromptConfig(promptId, dataObj = {}) {
@@ -187,4 +123,6 @@ class CacheManager {
 }
 
 const cacheManager = new CacheManager();
+// 立即初始化，供全局使用
+cacheManager.init().catch(console.error);
 module.exports = { cacheManager };
