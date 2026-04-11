@@ -12,7 +12,7 @@ module.exports = {
         script: "./src/microservices/macro_sync_center.js",
         instances: 1,
         exec_mode: "fork",
-        max_memory_restart: "512M", // 輕量級進程
+        max_memory_restart: "512M", // ✅ 輕量級進程 (無小數點)
         autorestart: true,
         watch: false,
         env: {
@@ -28,7 +28,7 @@ module.exports = {
         script: "./src/microservices/trade_frontline.js",
         instances: 1,
         exec_mode: "fork",
-        max_memory_restart: "1G", // 負責緩存 Rich Payload，分配 1GB
+        max_memory_restart: "1000M", // ✅ 1G 改為 1000M (絕對安全)
         autorestart: true,
         watch: false,
         env: {
@@ -45,7 +45,7 @@ module.exports = {
         script: "./src/microservices/monitor_guards.js",
         instances: 1,
         exec_mode: "fork",
-        max_memory_restart: "1.5G", // Float64Array 矩陣運算，分配 1.5GB
+        max_memory_restart: "1500M", // 🎯 致命元兇修復：1.5G 改為 1500M
         autorestart: true,
         watch: false,
         env: {
@@ -58,12 +58,12 @@ module.exports = {
       // ------------------------------------------------------------------
       {
         name: "v10-ml-brain",
-        script: "main.py", // 🎯 直接啟動 Python 腳本
-        cwd: "./ml_engine", // 🎯 必須切換目錄 (Change Working Directory)，否則 uvicorn 搵唔到 "main:app"
+        script: "main.py", 
+        cwd: "./ml_engine", 
         interpreter: "python3",
         instances: 1, 
         exec_mode: "fork",
-        max_memory_restart: "3G", // Pandas 滾動訓練最食 RAM，分配 3GB
+        max_memory_restart: "3000M", // ✅ 3G 改為 3000M
         autorestart: true,
         watch: false,
         env: {
