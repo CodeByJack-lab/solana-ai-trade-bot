@@ -233,7 +233,7 @@ def execute_evolution_pipeline():
         
         # 必須確保樣本中有贏有輸才能訓練
         if len(y.unique()) > 1:
-            rf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=-1)
+            rf = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, n_jobs=2)
             rf.fit(X, y, sample_weight=df['w_time'])
             joblib.dump(rf, MODEL_PATH)
             print(f"🌲 [ML Engine] Random Forest 模型訓練完成，已儲存至 RAM ({MODEL_PATH})")
@@ -271,4 +271,4 @@ def health_check():
 if __name__ == "__main__":
     import uvicorn
     # 🎯 終極修復：載入 log_config.json 強制將 uvicorn 訊息導向 stdout，防止雲端系統誤判為 error
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=5, log_config="log_config.json")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=1, log_config="log_config.json")
