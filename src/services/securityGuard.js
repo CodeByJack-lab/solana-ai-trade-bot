@@ -1,6 +1,6 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V10.14 量化安檢中樞 (三段變形 + Metadata 修復版)
-// 🚀 升級功能：連動 Macro Center 4D 氣候，動態切換三套過濾參數，並修復合約解析崩潰 Bug。
+// 📝 檔案功能用途：V10.15 量化安檢中樞 (解決 429 併發限流版)
+// 🚀 升級功能：加入 DexScreener 全局防爆閥，防止瞬間射出大量請求導致 429。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -11,9 +11,14 @@ const Redis = require('ioredis');
 
 const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 
+// 🎯 新增：全局 DexScreener 請求鎖，防止併發轟炸
+let lastDexRequestTime = 0;
+const DEX_COOLDOWN_MS = 500; // 每個請求之間最少隔 0.5 秒
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 class SecurityGuard {
     
-    // 取得當前大市氣候
     async _getMacroClimate() {
         try {
             const envStr = await redisClient.get('global_env_state');
@@ -40,7 +45,6 @@ class SecurityGuard {
 
         const allocationPatterns = [/presale/i, /private sale/i, /team token/i, /marketing wallet/i, /seed/i];
         for (const p of allocationPatterns) {
-            // 🎯 動態懲罰：熊市罰重啲 (-30)，牛市/震盪罰輕啲 (-15)
             const penalty = climate === 'BEAR_PANIC' ? 30 : 15;
             if (p.test(fullText)) { result.safetyPenalty += penalty; result.reasons.push(`高危分配/私募字眼 (${p.source})`); break; }
         }
@@ -55,7 +59,6 @@ class SecurityGuard {
         for (const p of fomoPatterns) { if (p.test(fullText)) hasFomo = true; }
         const emojiMatches = fullText.match(/[\u{1F680}\u{1F525}\u{1F4A5}\u{1F4B0}]/gu);
         if (hasFomo || (emojiMatches && emojiMatches.length >= 5)) {
-            // 🎯 動態懲罰：熊市嚴打 FOMO (-20)，狂牛直頭唔扣分 (0)，震盪 (-10)
             const penalty = climate === 'RAGING_BULL' ? 0 : (climate === 'BEAR_PANIC' ? 20 : 10);
             result.fomoPenalty += penalty; 
             if (penalty > 0) result.reasons.push('重度 FOMO 情緒誘騙');
@@ -69,7 +72,15 @@ class SecurityGuard {
         const maxRetries = 3;
         while (retries < maxRetries) {
             try {
+                // 🎯 核心修復：強制排隊機制，確保請求不會堆疊撞埋一齊
+                const now = Date.now();
+                if (now - lastDexRequestTime < DEX_COOLDOWN_MS) {
+                    await delay(DEX_COOLDOWN_MS - (now - lastDexRequestTime));
+                }
+                lastDexRequestTime = Date.now(); // 更新最後請求時間
+
                 const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 5000 });
+                
                 if (res.data && res.data.pairs && res.data.pairs.length > 0) {
                     const pair = res.data.pairs.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
                     return {
@@ -83,14 +94,18 @@ class SecurityGuard {
                 return null; 
             } catch (err) {
                 if (err.response?.status === 429) {
-                    retries++; await new Promise(r => setTimeout(r, 1100)); 
-                } else return null; 
+                    retries++; 
+                    console.warn(`⚠️ [SecurityGuard] DexScreener 觸發 429 限流，等待 2 秒後重試 (${retries}/${maxRetries})...`);
+                    await delay(2000 + (retries * 1000)); // 動態加長退避時間
+                } else {
+                    console.error(`❌ [SecurityGuard] DexScreener 請求錯誤: ${err.message}`);
+                    return null; 
+                }
             }
         }
         return null; 
     }
 
-    // 🎯 致命 Bug 1 修復：安全解析 Metadata，防止 Buffer 超出邊界
     async _checkContractSafety(mint, requireAuthCheck) {
         try {
             const mintPubkey = new PublicKey(mint);
@@ -108,8 +123,6 @@ class SecurityGuard {
                 const [metadataPDA] = PublicKey.findProgramAddressSync([Buffer.from('metadata'), metaplexProgramId.toBuffer(), mintPubkey.toBuffer()], metaplexProgramId);
                 const metadataAcc = await connection.getAccountInfo(metadataPDA);
                 
-                // 安全檢查：如果有 Metadata，基於安全考量預設視為 Mutable (需扣分)，
-                // 除非能 100% 確認它被鎖定。這裡不使用危險的長度偏移量解析。
                 if (metadataAcc && metadataAcc.data && metadataAcc.data.length > 0) {
                     isMutable = true; 
                 }
@@ -147,7 +160,6 @@ class SecurityGuard {
         const { climate, newsScore } = await this._getMacroClimate();
         const dbParams = cacheManager.getStrategy(type);
         
-        // 🎯 三套核心參數矩陣 (基於大市氣候)
         let activeParams = {
             buyThreshold: dbParams.buy_score_threshold || 70,
             minTxs: type === 'TRENDING' ? 15 : 5,
@@ -156,23 +168,24 @@ class SecurityGuard {
         };
 
         if (climate === 'RAGING_BULL' || newsScore >= 4) {
-            // 🚀 狂牛模式：極度放寬，搶上車
             activeParams.buyThreshold = Math.max(50, activeParams.buyThreshold - 10);
             activeParams.minTxs = type === 'TRENDING' ? 8 : 2;
             activeParams.minTradeSize = 5;
-            activeParams.maxTurnover = 2.00; // 容許極端換手
-            console.log(`🐂 [SecurityGuard] 狂牛模式啟動！門檻降至 ${activeParams.buyThreshold}`);
+            activeParams.maxTurnover = 2.00; 
         } else if (climate === 'BEAR_PANIC' || newsScore <= -3) {
-            // 🐻 恐慌模式：極度嚴格，寧缺勿濫
             activeParams.buyThreshold = Math.min(95, activeParams.buyThreshold + 15);
             activeParams.minTxs = type === 'TRENDING' ? 30 : 15;
             activeParams.minTradeSize = 50;
-            activeParams.maxTurnover = 0.40; // 拒絕高風險換手
-            console.log(`🐻 [SecurityGuard] 恐慌防禦模式啟動！門檻提升至 ${activeParams.buyThreshold}`);
+            activeParams.maxTurnover = 0.40; 
         }
 
         const marketData = await this._fetchMarketData(mint);
-        if (!marketData) return { numeric_score: 0, isSafe: false, reason: '無法獲取 DexScreener 報價數據', marketData: null };
+        
+        // 🎯 強化錯誤記錄，等你知道係因為 429 而被 reject
+        if (!marketData) {
+            console.log(`🛑 [Quant Reject] ${mint} 無法獲取 DexScreener 報價數據 (可能觸發了 429 限制)`);
+            return { numeric_score: 0, isSafe: false, reason: '無法獲取 DexScreener 報價數據 (API 限制)', marketData: null };
+        }
 
         const upperSymbol = marketData.symbol.toUpperCase();
         if (upperSymbol.startsWith('USD')) return { numeric_score: 0, isSafe: false, reason: `🛑 穩定幣攔截`, marketData };
@@ -208,7 +221,6 @@ class SecurityGuard {
         let score = 0;
         let reasons = [];
 
-        // 傳入氣候以調整文字懲罰
         const textAnalysis = this.analyzeTextFeatures(marketData.symbol, marketData.name, marketData.description, climate);
         if (textAnalysis.isFatal) return { numeric_score: 0, isSafe: false, reason: `🛑 一票否決: ${textAnalysis.reasons.join(', ')}`, marketData };
         if (textAnalysis.reasons.length > 0) reasons.push(...textAnalysis.reasons);
@@ -225,13 +237,11 @@ class SecurityGuard {
             coreScore += 20;
             if (safetyCheck.isMutable) { coreScore -= 20; reasons.push('Metadata 未鎖定'); }
         } else {
-            // 🛑 如果合約檢查拋出錯誤 (通常係網絡問題)，直接當唔合格，但唔會令程式崩潰
             return { numeric_score: 0, isSafe: false, reason: `🛑 合約高危或鏈上查詢失敗`, marketData };
         }
 
         const isHoldersSafe = await this._checkTop10Holders(mint);
         if (!isHoldersSafe) { 
-            // 只有喺熊市先扣分，否則只作紀錄
             if (climate === 'BEAR_PANIC') { coreScore -= 20; reasons.push('籌碼過度集中 (熊市嚴懲)'); }
             else { reasons.push('⚠️ 籌碼過度集中 (Top10 > 50%)'); }
         }

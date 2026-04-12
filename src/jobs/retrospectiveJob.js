@@ -8,7 +8,7 @@ const axios = require('axios');
 const cron = require('node-cron');
 const { getPortfolio } = require('../services/portfolioService');
 const { healthMonitor } = require('../services/healthMonitor');
-const { cacheManager } = require('../services/cacheManager'); // 🚨 FIX: 轉用 V10 cacheManager
+const { cacheManager } = require('../services/cacheManager'); 
 const { sendStrategyAlert } = require('../services/telegramService');
 
 const retrospectiveJob = {
@@ -48,9 +48,9 @@ const retrospectiveJob = {
             }).join('; ') || "No losses yesterday.";
 
             const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
-            const { data: lastAudit } = await supabase.from('daily_audit_reports').select('analysis_content').order('created_at', { ascending: false }).limit(1).maybeSingle();
             
-            let safeMemory = lastAudit && lastAudit.analysis_content ? String(lastAudit.analysis_content).replace(/[\r\n"']/g, ' ').substring(0, 200) : "No previous memory.";
+            // V10: 移除對已刪除 table daily_audit_reports 的查詢
+            let safeMemory = "V10 ML Pipeline Active. Memory handled by Python Engine.";
 
             // 讀取當前 Meme 與 Trending Scout
             const { data: promptsData } = await supabase.from('bot_prompts').select('prompt_id, content').in('prompt_id', ['meme_scout', 'trending_scout']);
@@ -63,20 +63,27 @@ const retrospectiveJob = {
                 if (ts) currentTrendingScout = ts.content.replace(/[\r\n]/g, ' ');
             }
 
-            // 🚨 FIX: 使用 cacheManager
-            const promptConfig = cacheManager.getPromptConfig('master_retrospective', {
-                totalTrades, winRate, totalPnlSol: totalPnlSol.toFixed(4), newsScore: config?.latest_news_score || 50, 
-                autopsyReport, lastAiMemory: safeMemory, 
-                currentMemeScout, currentTrendingScout 
-            });
+            // 獲取 Prompt
+            let parsedPrompt = "";
+            let targetProvider = 'GEMINI';
             
-            const parsedPrompt = promptConfig?.parsedPrompt;
-            const targetProvider = promptConfig?.provider || 'GEMINI';
-            
+            try {
+                const promptConfig = cacheManager.getPromptConfig('master_retrospective', {
+                    totalTrades, winRate, totalPnlSol: totalPnlSol.toFixed(4), newsScore: config?.latest_news_score || 50, 
+                    autopsyReport, lastAiMemory: safeMemory, 
+                    currentMemeScout, currentTrendingScout 
+                });
+                parsedPrompt = promptConfig?.parsedPrompt;
+                targetProvider = promptConfig?.provider || 'GEMINI';
+            } catch (e) {
+                console.warn("⚠️ [Retrospective AI] 無法從 Cache 獲取 Prompt，使用 Hardcode 備用劇本。");
+                parsedPrompt = `請根據以下勝率 ${winRate}% 和利潤 ${totalPnlSol.toFixed(4)} SOL，以及敗局：${autopsyReport}。給出簡短的 briefing_notes，並微調 new_meme_scout_prompt 和 new_trending_scout_prompt。請返回 JSON。`;
+            }
+
             if (!parsedPrompt) throw new Error("無法生成 parsedPrompt");
 
             const aiDecision = await keyRotator.enqueueRequest(targetProvider, async (apiKey) => {
-                const modelToUse = promptConfig.models[0] || 'gemini-2.5-flash'; 
+                const modelToUse = targetProvider === 'GEMINI' ? 'gemini-2.5-flash' : 'llama3-8b-8192'; 
                 let apiUrl, payload, headers;
 
                 if (targetProvider === 'GEMINI' || apiKey.startsWith('AIza')) {
@@ -91,7 +98,8 @@ const retrospectiveJob = {
                 }
 
                 const res = await axios.post(apiUrl, payload, { headers, timeout: 60000 });
-                return JSON.parse(targetProvider === 'GEMINI' || apiKey.startsWith('AIza') ? res.data.candidates[0].content.parts[0].text : res.data.choices[0].message.content);
+                const rawText = targetProvider === 'GEMINI' || apiKey.startsWith('AIza') ? res.data.candidates[0].content.parts[0].text : res.data.choices[0].message.content;
+                return JSON.parse(rawText);
             });
 
             if (aiDecision && aiDecision.new_meme_scout_prompt && aiDecision.new_trending_scout_prompt) {
@@ -101,20 +109,20 @@ const retrospectiveJob = {
                     { prompt_id: 'trending_scout', content: aiDecision.new_trending_scout_prompt, updated_at: new Date().toISOString() }
                 ], { onConflict: 'prompt_id' });
 
-                await supabase.from('daily_audit_reports').insert([{ 
-                    analysis_content: `【總指揮日會】勝率: ${winRate}% | 淨利潤: ${totalPnlSol.toFixed(4)} SOL\n戰術: ${aiDecision.briefing_notes}`, 
-                    prompt_changes: { meme_scout: aiDecision.new_meme_scout_prompt, trending_scout: aiDecision.new_trending_scout_prompt } 
-                }]);
+                // V10: 移除寫入 daily_audit_reports (因為 Table 已被刪除)
                 
                 if (typeof sendStrategyAlert === 'function') {
                     const pnlTag = totalPnlSol >= 0 ? `🟢 +${totalPnlSol.toFixed(4)}` : `🔴 ${totalPnlSol.toFixed(4)}`;
                     const modeTag = portfolio.mode === 'LIVE' ? '🔴 [實盤]' : '🟢 [模擬]';
-                    const reportMsg = `${modeTag} 📊 <b>每日戰報與戰術更新</b>\n\n📅 <b>過去 24 小時結算</b>\n🔄 總交易: ${totalTrades} 單\n🏆 勝率: ${winRate}%\n💰 淨利潤: ${pnlTag} SOL\n\n🤖 <b>AI 總指揮戰術調整 (Scouts 升級)</b>\n${aiDecision.briefing_notes}`;
+                    let briefing = aiDecision.briefing_notes || '參數已更新';
+                    const reportMsg = `${modeTag} 📊 <b>每日戰報與戰術更新</b>\n\n📅 <b>過去 24 小時結算</b>\n🔄 總交易: ${totalTrades} 單\n🏆 勝率: ${winRate}%\n💰 淨利潤: ${pnlTag} SOL\n\n🤖 <b>AI 總指揮戰術調整</b>\n${briefing}`;
                     sendStrategyAlert(reportMsg, true).catch(e => {});
                 }
                 healthMonitor.setStatus('Retrospective_AI', '🟢 結算完畢，Scout 劇本已熱更新');
+                console.log('✅ [Retrospective AI] 劇本進化成功！');
             }
         } catch (err) {
+            console.error('❌ [Retrospective AI] 執行異常:', err.message);
             healthMonitor.setStatus('Retrospective_AI', `🔴 執行異常: ${err.message}`);
         }
     },
