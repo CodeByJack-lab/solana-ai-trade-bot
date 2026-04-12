@@ -1,7 +1,7 @@
 // src/microservices/macro_sync_center.js
 // 📝 檔案功能用途：V10 【後勤樞紐】微服務 (Microservice Core)
 // 🚀 核心升級：4D 氣候台 (硬數據 + 新聞 AI 融合)、3分鐘死亡開關、Zod ML 強類型代碼編譯、API 榨汁機升級。
-// 🦎 擴充掛載：整合 trendingMonitorService、trendingJob 以及所有 V9 背景排程。
+// 🦎 擴充掛載：整合 trendingMonitorService、trendingJob 以及所有 V9 背景排程，並加入 Dashboard 心跳機制。
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
@@ -404,6 +404,27 @@ async function bootstrap() {
     janitorJob.start();
     graveyardJob.start();
     retrospectiveJob.start();
+
+    // 💓 🎯 [Dashboard Heartbeat] 每 60 秒更新 bot_status，向前端 Dashboard 報平安
+    setInterval(async () => {
+        try {
+            // 從 DB 獲取真實運行狀態
+            const { data } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
+            const is_running = data ? data.is_running : true;
+            
+            const statusMsg = is_running 
+                ? 'V10 雙軌智腦穩定運行中 🟢' 
+                : '系統處於暫停/待機狀態 🟡';
+                
+            await supabase.from('bot_status').upsert({
+                id: 1,
+                message: statusMsg,
+                updated_at: new Date().toISOString()
+            });
+        } catch (err) {
+            // 靜默處理，避免網絡抖動時洗版
+        }
+    }, 60 * 1000);
 
     // 🎯 實時戰報打印 
     setInterval(async () => {

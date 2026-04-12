@@ -1,12 +1,13 @@
 // src/microservices/trade_frontline.js
 // 📝 檔案功能用途：V10 【獵人中樞】微服務 (Microservice Core)
-// 🚀 核心升級：100% 全自動狙擊、大市氣候完美接軌 AI、15% 溢價護盾、Event Loop 防阻塞。
+// 🚀 核心升級：100% 全自動狙擊、大市氣候完美接軌 AI、15% 溢價護盾、Event Loop 防阻塞、ML 毒藥收集器。
 
 require('dotenv').config();
 const express = require('express');
 const Redis = require('ioredis');
 const crypto = require('crypto');
 const axios = require('axios'); // 🎯 補回 axios 供 Python ML 呼叫
+const { createClient } = require('@supabase/supabase-js'); // 🎯 新增 Supabase 供毒藥收集器使用
 
 // 載入 V10 底層模組
 const { getPortfolio, initPortfolio, canBuyMeme, canBuyTrending } = require('../services/portfolioService'); 
@@ -33,6 +34,11 @@ const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_
 const redisSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 const burnSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 const watchdogSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379'); // 🎯 Watchdog 廣播
+
+// 🎯 初始化 Supabase 客戶端 (供毒藥收集器寫入負樣本使用)
+const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 let globalConfig = { is_running: true };
 
@@ -243,7 +249,7 @@ setInterval(async () => {
 }, 10000);
 
 // ------------------------------------------------------------------
-// 6. 100% 全自動狙擊漏斗
+// 6. 100% 全自動狙擊漏斗 (加入高級 Rug Pull 毒藥收集器)
 // ------------------------------------------------------------------
 async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
     try {
@@ -259,6 +265,38 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         const secResult = await securityGuard.calculateQuantScore(mint, poolType);
         if (!secResult.isSafe) {
             console.log(`🛑 [Quant Reject] ${symbol} 未達基準: ${secResult.reason}`);
+            
+            // 🎯 毒藥收集器：專門捕捉 Rug Pull / 貔貅陷阱 (高流動性誘餌 + 致命合約/籌碼缺憾)
+            const isRugTrap = marketData.l > 10000 && (
+                secResult.reason.includes('合約高危') || 
+                secResult.reason.includes('籌碼過度集中') || 
+                secResult.reason.includes('貔貅攔截')
+            );
+
+            // 如果係高級陷阱，我哋抽樣寫入 ML Database，教 Python 認住呢種特徵！
+            if (isRugTrap) {
+                // 🎲 20% 隨機抽樣，避免 Database 爆炸及 ML 樣本過度失衡
+                if (Math.random() < 0.20) {
+                    console.log(`☠️ [Poison Data] 捕獲高級 Rug Pull 陷阱 (${symbol})！作為負樣本寫入 ML 數據庫...`);
+                    const totalTxs = marketData.b + marketData.s;
+                    const ofi = totalTxs > 0 ? (marketData.b - marketData.s) / totalTxs : 0;
+                    
+                    // 背景靜默寫入，不阻塞主線程
+                    supabase.from('trade_patterns').insert([{
+                        mint_address: mint,
+                        token_symbol: symbol,
+                        entry_price_sol: marketData.p || 0,
+                        entry_ofi: ofi,
+                        entry_liquidity_usd: marketData.l,
+                        entry_volume_5m: marketData.v,
+                        realized_pnl_pct: -100.00, // 🩸 標記為絕對死局 (秒 Rug)
+                        trade_type: 'ML_NEGATIVE_SAMPLE',
+                        action: 'LIQUIDATED'
+                    }]).then(({error}) => {
+                        if (error) console.error(`❌ [Poison Data] 寫入負樣本失敗:`, error.message);
+                    });
+                }
+            }
             return;
         }
 
