@@ -1,25 +1,25 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10 【獵人中樞】微服務 (Microservice Core)
-// 🚀 核心升級：100% 全自動狙擊、大市氣候完美接軌 AI、15% 溢價護盾、Event Loop 防阻塞、ML 毒藥收集器。
+// 📝 檔案功能用途：V10.18 【獵人中樞】微服務 (Microservice Core)
+// 🚀 核心升級：實裝「三權分立」計分法 (Quant20+ML60+LLM20)、取消 LLM 一票否決權、實裝 ML 動態注碼乘數 (Kelly Multiplier)。
 
 require('dotenv').config();
 const express = require('express');
 const Redis = require('ioredis');
 const crypto = require('crypto');
-const axios = require('axios'); // 🎯 補回 axios 供 Python ML 呼叫
-const { createClient } = require('@supabase/supabase-js'); // 🎯 新增 Supabase 供毒藥收集器使用
+const axios = require('axios'); 
+const { createClient } = require('@supabase/supabase-js'); 
 
 // 載入 V10 底層模組
 const { getPortfolio, initPortfolio, canBuyMeme, canBuyTrending } = require('../services/portfolioService'); 
 const { securityGuard } = require('../services/securityGuard'); 
 const { consensusService } = require('../services/consensusService'); 
-const { executeBuy, runSellPipeline } = require('../services/tradeService'); // 🎯 補回 runSellPipeline 供 Watchdog 使用
+const { executeBuy, runSellPipeline } = require('../services/tradeService'); 
 const { sendTelegramAlert, processTelegramCallback } = require('../services/telegramService'); 
 const { getJupiterFinalQuote } = require('../services/tradeService');
 const { sourceAggregator } = require('../services/sourceAggregator'); 
 const { walletMonitorRouter } = require('../services/walletMonitor'); 
-const { keyRotator } = require('../services/keyRotator'); // 🎯 補回 keyRotator 供 Mistral 使用
-const { cacheManager } = require('../services/cacheManager'); // 🎯 補回 cacheManager
+const { keyRotator } = require('../services/keyRotator'); 
+const { cacheManager } = require('../services/cacheManager'); 
 
 // ------------------------------------------------------------------
 // 1. 初始化與全域防禦變數
@@ -27,15 +27,13 @@ const { cacheManager } = require('../services/cacheManager'); // 🎯 補回 cac
 const app = express();
 app.use(express.json());
 
-// 🎯 掛載 Alchemy 錢包監聽 Router (保留！)
 app.use('/', walletMonitorRouter);
 
 const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 const redisSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 const burnSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
-const watchdogSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379'); // 🎯 Watchdog 廣播
+const watchdogSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379'); 
 
-// 🎯 初始化 Supabase 客戶端 (供毒藥收集器寫入負樣本使用)
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -47,7 +45,7 @@ const latest_market_data = new Map();
 const symbol_cache = new Map(); 
 let ml_compiled_rule_func = () => false; 
 
-// 🛡️ Layer 1：實體巨頭與大廠品牌黑名單 (保留！)
+// 🛡️ Layer 1：實體巨頭與大廠品牌黑名單 (極端明顯的山寨名單，隱晦的山寨交由 LLM 處理)
 const BRAND_BLACKLIST = new Set([
     'OPENAI', 'CHATGPT', 'SORA', 'CLAUDE', 'GEMINI', 'NVIDIA', 'APPLE', 'META', 'GOOGLE', 'MICROSOFT', 'AMAZON', 'TSMC', 'AMD', 'INTEL',
     'GROK', 'ELON', 'MUSK', 'TRUMP', 'BIDEN', 'OBAMA', 'PUTIN', 'ZELENSKY', 'TATE', 'MRBEAST',
@@ -60,7 +58,7 @@ const BRAND_BLACKLIST = new Set([
 // ------------------------------------------------------------------
 // 2. 時光倒流護盾 & 訊號接收
 // ------------------------------------------------------------------
-redisSub.subscribe('price_updates', 'trending_signal'); // 🎯 補回 trending_signal
+redisSub.subscribe('price_updates', 'trending_signal'); 
 redisSub.on('message', (channel, message) => {
     if (channel === 'price_updates') {
         try {
@@ -73,7 +71,6 @@ redisSub.on('message', (channel, message) => {
         } catch (e) {}
     }
     
-    // 🎯 接聽藍籌訊號
     if (channel === 'trending_signal') {
         try {
             const { mint, symbol } = JSON.parse(message);
@@ -133,7 +130,7 @@ watchdogSub.on('message', async (channel, message) => {
 });
 
 // ------------------------------------------------------------------
-// 3. 🚨 OOM 防禦：記憶體清道夫 (保留！)
+// 3. 🚨 OOM 防禦：記憶體清道夫
 // ------------------------------------------------------------------
 setInterval(() => {
     const now = Date.now();
@@ -158,27 +155,22 @@ setInterval(async () => {
     const portfolio = getPortfolio();
     const activeMints = portfolio.positions?.map(p => p.mint_address) || [];
     
-    // 🎯 條件 1：手頭上冇倉位 -> 系統處於「空倉掛機」狀態，絕對唔會判定為斷氣
     if (activeMints.length === 0) return;
 
     const now = Date.now();
-    let deadMints = []; // 紀錄邊幾隻幣真係斷咗氣
+    let deadMints = []; 
 
-    // 🎯 條件 2：檢查手上「每一隻」倉位嘅最後報價時間
     for (const mint of activeMints) {
         const lastTs = last_valid_ts.get(mint) || 0;
-        // 如果超過 6 秒 (6000ms) 冇更新，或者根本從來未收過報價 (lastTs = 0)
         if (now - lastTs > 6000) { 
             deadMints.push(mint);
         }
     }
 
-    // 🎯 條件 3：有倉位 + 發現有幣斷氣超過 6 秒 -> 啟動 Jupiter 救援
     if (deadMints.length > 0) {
         console.warn(`🚨 [DEFCON 6] Koyeb 查價中斷！有 ${deadMints.length} 隻持倉幣超過 6 秒無報價，啟動 Jupiter 救援！`);
         
         try {
-            // 淨係查斷氣嗰啲幣同 SOL 嘅美金價，慳 API Quota
             const jupMints = [...deadMints, 'So11111111111111111111111111111111111111112'];
             const res = await axios.get(`https://api.jup.ag/price/v3?ids=${jupMints.join(',')}`, { timeout: 3000 });
             
@@ -188,17 +180,14 @@ setInterval(async () => {
             
             deadMints.forEach(m => {
                 if (res.data?.data?.[m]?.price) {
-                    // 將 Jupiter 嘅純價格轉化為系統需要嘅格式
                     fallbackPayload[m] = { p: parseFloat(res.data.data[m].price) / solUsd, v: 0, b: 0, s: 0, l: 0, ts: ts };
-                    last_valid_ts.set(m, ts); // 更新時間戳，等佢下個 4 秒唔會再叫救命
+                    last_valid_ts.set(m, ts); 
                     latest_market_data.set(m, fallbackPayload[m]); 
                 }
             });
             
-            // 將救援報價廣播出去，等 Watchdog 繼續運作
             if (Object.keys(fallbackPayload).length > 0) {
                 await redisClient.publish('price_updates', JSON.stringify(fallbackPayload));
-                // console.log(`🚑 [Jupiter Rescue] 成功為 ${Object.keys(fallbackPayload).length} 隻代幣注入救援報價！`); // 隱藏以免洗版
             }
             
         } catch (err) {
@@ -216,7 +205,7 @@ function runLayer1PhysicalFilter(symbol) {
 }
 
 // ------------------------------------------------------------------
-// 5. Webhook 與保溫箱 (加入併發限流)
+// 5. Webhook 與保溫箱
 // ------------------------------------------------------------------
 app.post('/webhook/radar', (req, res) => {
     res.status(200).send('OK'); 
@@ -239,7 +228,6 @@ setInterval(async () => {
         const ripeTokens = await redisClient.zrangebyscore('v9_nursery_queue', 0, now - (5 * 60 * 1000));
         if (ripeTokens.length > 0) {
             await redisClient.zrem('v9_nursery_queue', ...ripeTokens);
-            // 🛡️ RPC 併發限流：加入 await 與 delay
             for (const mint of ripeTokens) {
                 await processAsymmetricRouting(mint, 'NEWBORN');
                 await new Promise(r => setTimeout(r, 1000)); 
@@ -249,7 +237,7 @@ setInterval(async () => {
 }, 10000);
 
 // ------------------------------------------------------------------
-// 6. 100% 全自動狙擊漏斗 (加入高級 Rug Pull 毒藥收集器)
+// 6. 100% 全自動狙擊漏斗 (三權分立計分版)
 // ------------------------------------------------------------------
 async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
     try {
@@ -261,85 +249,111 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const symbol = symbol_cache.get(mint) || 'UNKNOWN';
 
-        // 1. 量化基準分 (V9 靈魂)
+        // 🛡️ 第一權：Quant 量化物理安檢 (滿分 20 分)
         const secResult = await securityGuard.calculateQuantScore(mint, poolType);
         if (!secResult.isSafe) {
             console.log(`🛑 [Quant Reject] ${symbol} 未達基準: ${secResult.reason}`);
             
-            // 🎯 毒藥收集器：專門捕捉 Rug Pull / 貔貅陷阱 (高流動性誘餌 + 致命合約/籌碼缺憾)
+            // 毒藥收集器：專門捕捉 Rug Pull / 貔貅陷阱 (寫入 DB 畀 ML 學習)
             const isRugTrap = marketData.l > 10000 && (
                 secResult.reason.includes('合約高危') || 
-                secResult.reason.includes('籌碼過度集中') || 
+                secResult.reason.includes('籌碼集中') || 
                 secResult.reason.includes('貔貅攔截')
             );
 
-            // 如果係高級陷阱，我哋抽樣寫入 ML Database，教 Python 認住呢種特徵！
-            if (isRugTrap) {
-                // 🎲 20% 隨機抽樣，避免 Database 爆炸及 ML 樣本過度失衡
-                if (Math.random() < 0.20) {
-                    console.log(`☠️ [Poison Data] 捕獲高級 Rug Pull 陷阱 (${symbol})！作為負樣本寫入 ML 數據庫...`);
-                    const totalTxs = marketData.b + marketData.s;
-                    const ofi = totalTxs > 0 ? (marketData.b - marketData.s) / totalTxs : 0;
-                    
-                    // 背景靜默寫入，不阻塞主線程
-                    supabase.from('trade_patterns').insert([{
-                        mint_address: mint,
-                        token_symbol: symbol,
-                        entry_price_sol: marketData.p || 0,
-                        entry_ofi: ofi,
-                        entry_liquidity_usd: marketData.l,
-                        entry_volume_5m: marketData.v,
-                        realized_pnl_pct: -100.00 // 🩸 標記為絕對死局 (秒 Rug)
-                    }]).then(({error}) => {
-                        if (error) console.error(`❌ [Poison Data] 寫入負樣本失敗:`, error.message);
-                    });
-                }
+            if (isRugTrap && Math.random() < 0.20) {
+                console.log(`☠️ [Poison Data] 捕獲高級 Rug Pull 陷阱 (${symbol})！作為負樣本寫入 ML 數據庫...`);
+                const totalTxs = marketData.b + marketData.s;
+                const ofi = totalTxs > 0 ? (marketData.b - marketData.s) / totalTxs : 0;
+                
+                supabase.from('trade_patterns').insert([{
+                    mint_address: mint,
+                    token_symbol: symbol,
+                    entry_price_sol: marketData.p || 0,
+                    entry_ofi: ofi,
+                    entry_liquidity_usd: marketData.l,
+                    entry_volume_5m: marketData.v,
+                    realized_pnl_pct: -100.00 
+                }]).then(({error}) => {
+                    if (error) console.error(`❌ [Poison Data] 寫入負樣本失敗:`, error.message);
+                });
             }
             return;
         }
 
-        // 2. Python ML 推論
-        let mlScore = 50;
+        const quantScore = secResult.numeric_score; // 0 - 20
+        const appliedMlStrategyId = secResult.applied_ml_strategy_id || 0;
+
+        // 🧠 第二權：Python ML 大腦預測勝率 (滿分 60 分) + 計算信心注碼乘數
+        let mlScore = 30; // 保底 30 分 (代表 50% 勝率)
+        let mlConfidenceMultiplier = 1.0; // 保底 1x 注碼
+        
         try {
-            const res = await axios.post('http://127.0.0.1:8000/predict', { features: marketData }, { timeout: 2000 });
-            mlScore = res.data.score || 50;
+            // 呼叫 Python 大腦，要求回傳 win_probability (0-1) 同 confidence_multiplier
+            const res = await axios.post('http://127.0.0.1:8000/predict', { features: marketData, type: poolType }, { timeout: 2000 });
+            if (res.data && typeof res.data.win_probability === 'number') {
+                mlScore = Math.floor(res.data.win_probability * 60); // 將 0.0 - 1.0 的勝率轉為 0 - 60 分
+                mlConfidenceMultiplier = res.data.confidence_multiplier || 1.0;
+            }
         } catch (e) {
-            console.warn(`⚠️ [ML Down] 無法連接 Python 智腦，使用基準分。`);
+            console.warn(`⚠️ [ML Down] 無法連接 Python 智腦，使用保底 50% 勝率。`);
         }
 
-        // 3. GROQ 語意審批
+        // 🗣️ 第三權：LLM 敘事與防山寨審批 (-20 分 到 +20 分)
         const envStateStr = await redisClient.get('global_env_state');
         const envState = envStateStr ? JSON.parse(envStateStr) : { climate: 'CHOPPY' };
         
-        const llmResult = await consensusService.runMemeConsensus(mint, marketData, { 
-            baseScore: secResult.numeric_score, poolType, climate: envState.climate 
-        });
-
-        if (!llmResult.buy) {
-            console.log(`🛑 [GROQ VETO] ${symbol} 被 AI 否決: ${llmResult.reason}`);
-            return;
+        let llmScore = 0;
+        let llmReason = "LLM 未啟用";
+        try {
+            // 呼叫 consensusService，要求回傳 { narrative_score: int, reason: string }
+            const llmResult = await consensusService.runMemeConsensus(mint, marketData, { poolType, climate: envState.climate });
+            llmScore = llmResult.narrative_score || 0;
+            llmReason = llmResult.reason || "";
+        } catch (e) {
+            console.warn(`⚠️ [LLM Down] 敘事分析失敗，跳過 LLM 加減分。`);
         }
 
-        // 🚀 4. 全自動發射 (廢除 TG 手動按鈕)
-        const finalScore = Math.floor((mlScore + llmResult.score) / 2);
+        // 🚀 4. 全自動發射決策 
+        const finalScore = quantScore + mlScore + llmScore;
         
-        // 讀取動態 buy_score_threshold (預設 70)
+        // 讀取動態 buy_score_threshold (預設 70)，如果 ml_strategy_params 有就用
         let buyThreshold = 70;
-        const baselineStr = await redisClient.get("cache:14d_baseline_model");
-        if (baselineStr) {
-            try { buyThreshold = JSON.parse(baselineStr).buy_threshold || 70; } catch(e){}
-        }
+        try {
+            const mlParamsStr = await redisClient.get('ml_strategy_params');
+            if (mlParamsStr) {
+                const mlParams = JSON.parse(mlParamsStr);
+                buyThreshold = mlParams.buy_threshold || 70;
+            }
+        } catch(e){}
 
         if (finalScore >= buyThreshold) {
-            console.log(`🔥 [AUTO SNIPER] ${symbol} 突破重圍！綜合得分: ${finalScore}，1 毫秒內執行買入！`);
-            const tradeAmountSol = parseFloat(process.env.DEFAULT_TRADE_AMOUNT_SOL || '0.1');
-            await executeBuy(mint, symbol, poolType, finalScore, `🤖 全自動狙擊 (量化+ML+GROQ綜合: ${finalScore})`, tradeAmountSol, marketData, envState);
+            // 🎯 動態注碼計算：讀取 Supabase 配置的基礎注碼，再乘以 ML 畀的乘數
+            const portfolio = getPortfolio();
+            const baseAmountSol = poolType === 'TRENDING' 
+                ? (portfolio.trending_trade_amount_sol || 0.1) 
+                : (portfolio.meme_trade_amount_sol || 0.05);
+            
+            // 限制乘數在 0.5x 到 2.0x 之間，防止 ML 發神經叫你 All-in
+            const safeMultiplier = Math.max(0.5, Math.min(2.0, mlConfidenceMultiplier));
+            const finalTradeAmountSol = parseFloat((baseAmountSol * safeMultiplier).toFixed(4));
+
+            console.log(`🔥 [AUTO SNIPER] ${symbol} 突破重圍！綜合得分: ${finalScore} (Quant:${quantScore} + ML:${mlScore} + LLM:${llmScore})`);
+            console.log(`💰 [Kelly Bet] ML 信心乘數: ${safeMultiplier}x | 最終落單金額: ${finalTradeAmountSol} SOL`);
+            console.log(`📝 [LLM Reason] ${llmReason}`);
+            
+            // 將 ml_strategy_id 同 multiplier 傳入 executeBuy，寫入 DB
+            await executeBuy(
+                mint, symbol, poolType, finalScore, 
+                `🤖 三權決策 (Q:${quantScore} + M:${mlScore} + L:${llmScore}) | LLM: ${llmReason}`, 
+                finalTradeAmountSol, marketData, envState, appliedMlStrategyId, safeMultiplier
+            );
         } else {
-            console.log(`🛑 [AUTO VETO] ${symbol} 綜合得分 ${finalScore} 未達動態門檻 ${buyThreshold}。`);
+            console.log(`🛑 [AUTO VETO] ${symbol} 綜合得分 ${finalScore} (Quant:${quantScore} + ML:${mlScore} + LLM:${llmScore}) 未達及格線 ${buyThreshold}。`);
+            console.log(`📝 [LLM Reason] ${llmReason}`);
         }
 
     } catch (err) {
-        // 🎯 致命 Bug 修復：強化錯誤輸出，避免死機而無聲無息
         const symbol = symbol_cache.get(mint) || 'UNKNOWN';
         console.error(`❌ [Routing Error] 決策漏斗處理 ${symbol} (${mint}) 時發生崩潰:`, err.message);
         if (err.stack) console.error(err.stack);
@@ -372,7 +386,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10 (大數據統計防禦網) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10 (三權分立 AI 天網) 啟動中...");
     
     await initPortfolio();
     

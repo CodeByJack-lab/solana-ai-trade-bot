@@ -1,7 +1,7 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10 交易執行大腦 (Microservice Core)
+// 📝 檔案功能及用途：V10.18 交易執行大腦 (Microservice Core)
 // 🚀 核心升級：Redis 鎖 10秒自動降級、Jupiter 單跳板流動性鎖定、Shadow/Main 雙軌歸檔。
-// 🛡️ 終極修復：拔除假賣出函數，正式接軌 liveTradeService 與 fallbackEscapeService。
+// 🛡️ 終極修復：拔除假賣出函數，正式接軌 liveTradeService 與 fallbackEscapeService。加入 ML 動態注碼與策略 ID 歸檔。
 
 require('dotenv').config();
 const axios = require('axios');
@@ -66,14 +66,20 @@ async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyTy
 // ------------------------------------------------------------------
 // 3. 執行買入 (Shadow vs Main 雙腦不對稱路由分配)
 // ------------------------------------------------------------------
-async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, amountSol, marketData, envState) {
+// 🚀 V10.18 升級：接收 finalTradeAmountSol, appliedMlStrategyId, safeMultiplier
+async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalTradeAmountSol, marketData, envState, appliedMlStrategyId = 0, safeMultiplier = 1.0) {
     try {
-        console.log(`🛒 [Trade Service] 準備買入 ${symbol} (${mint}) | 分數: ${aiScore}`);
+        console.log(`🛒 [Trade Service] 準備買入 ${symbol} (${mint}) | 分數: ${aiScore} | 注碼: ${finalTradeAmountSol} SOL`);
 
-        const isShadow = aiScore < 80;
+        // 根據 Quant + ML + LLM 的總分決定入邊條 Route
+        const isShadow = aiScore < 80; 
         
-        const quote = await getJupiterFinalQuote(mint, true, amountSol, 500, strategyVersion);
-        if (!quote) return false;
+        // 🚨 使用動態注碼向 Jupiter 攞 Quote
+        const quote = await getJupiterFinalQuote(mint, true, finalTradeAmountSol, 500, strategyVersion);
+        if (!quote) {
+            console.log(`⚠️ [Trade Service] 無法獲取 ${symbol} 的 Jupiter 買入報價，放棄交易。`);
+            return false;
+        }
 
         const entryPrice = quote.pricePerToken;
         const mode = process.env.TRADE_MODE || 'PAPER';
@@ -84,7 +90,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, amount
             strategy_version: strategyVersion,
             entry_price_sol: entryPrice,
             highest_price_sol: entryPrice,
-            quantity: (amountSol / entryPrice),
+            quantity: (finalTradeAmountSol / entryPrice),
             ai_score: aiScore,
             ai_reason: reason,
             buy_dex_label: 'JUPITER_DIRECT',
@@ -98,8 +104,32 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, amount
             await supabase.from(tableName).insert([positionData]);
             console.log(`⚔️ [Main Route] ${symbol} 已建立真實/模擬倉位！`);
             
+            // 📝 記錄買入歷史，包含 ML 參數 (供未來覆盤)
+            const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
+            await supabase.from(historyTable).insert([{
+                token_mint: mint,
+                token_symbol: symbol,
+                action: 'BUY',
+                strategy_type: strategyVersion,
+                strategy_version: strategyVersion,
+                ai_used: true,
+                ai_score: aiScore,
+                review_history: reason,
+                price_sol: entryPrice,
+                quantity: (finalTradeAmountSol / entryPrice),
+                total_value_sol: finalTradeAmountSol,
+                realized_pnl_pct: 0,
+                realized_pnl_sol: 0,
+                txid: `BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`, // 模擬 TXID
+                market_climate: envState.climate || 'UNKNOWN',
+                entry_liquidity_usd: marketData.l || 0,
+                entry_volume_5m_usd: marketData.v || 0,
+                applied_ml_strategy_id: appliedMlStrategyId, // 🚀 記錄用咗邊條 ML Rule
+                ml_confidence_multiplier: safeMultiplier     // 🚀 記錄 ML 畀嘅注碼乘數
+            }]);
+
             if (typeof sendTelegramAlert === 'function') {
-                await sendTelegramAlert(`🟢 <b>買入建倉</b>\n幣種: <b>${symbol}</b>\n模式: ${mode}\n策略: ${strategyVersion}\n分數: ${aiScore}\n買入價: ${entryPrice.toFixed(8)} SOL`);
+                await sendTelegramAlert(`🟢 <b>買入建倉</b>\n幣種: <b>${symbol}</b>\n模式: ${mode}\n策略: ${strategyVersion} (ID: ${appliedMlStrategyId})\n分數: ${aiScore}\n注碼: ${finalTradeAmountSol} SOL (${safeMultiplier}x)\n買入價: ${entryPrice.toFixed(8)} SOL`);
             }
         }
         return true;
@@ -190,14 +220,18 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             await supabase.from(historyTable).insert([{
                 token_mint: mint,
                 token_symbol: position.token_symbol,
-                action: 'SELL',
+                action: fraction === 1.0 ? 'SELL' : 'SELL_HALF',
                 strategy_type: position.strategy_type,
                 strategy_version: position.strategy_version || 'v10_default',
                 ai_used: true,
                 price_sol: currentPrice,
+                quantity: sellQuantity,
+                total_value_sol: sellQuantity * currentPrice,
                 realized_pnl_pct: realizedPnlPct,
+                realized_pnl_sol: (currentPrice - entryPrice) * sellQuantity,
                 txid: txid,
-                market_climate: climate
+                market_climate: climate,
+                // 賣出時雖然冇產生新 ML ID，但可以留空或填 0
             }]);
 
             if (typeof sendTelegramAlert === 'function') {

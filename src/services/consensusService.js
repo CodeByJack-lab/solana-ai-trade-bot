@@ -1,6 +1,6 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V10 終極防彈版 AI 議事廳。唯一負責買入把關的 AI。
-// 🚀 升級功能：全線轉用 GROQ，完美對接 cacheManager，並加入純數動態量化兜底。
+// 📝 檔案功能用途：V10.18 終極防彈版 AI 議事廳 (文科生敘事與防山寨中樞)。
+// 🚀 升級功能：剝奪 LLM 一票否決權及價格計算權，轉型為純粹的「敘事評分器 (-20 到 +20)」，專注於鑒定高智商山寨騙局與潛力邪教。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -12,49 +12,31 @@ class ConsensusService {
     async runMemeConsensus(mint, marketData, options = {}) {
         const poolType = options.poolType || 'TRENDING';
         const climate = options.climate || 'CHOPPY';
-        const buyThreshold = options.buyThreshold || 70;
 
         const isMeme = poolType === 'NEWBORN';
         const promptId = isMeme ? 'meme_scout' : 'trending_scout';
 
+        // 提取專供 LLM 鑒定山寨與敘事使用的文字數據
+        const symbol = marketData.symbol || 'UNKNOWN';
+        const name = marketData.name || 'UNKNOWN';
+        const desc = marketData.description || 'No description';
+
+        if (!config.aiKeys.GROQ || config.aiKeys.GROQ.length === 0) {
+            console.log(`[Consensus] ⚠️ 無 GROQ 金鑰，跳過敘事評分`);
+            return { narrative_score: 0, reason: "GROQ 未啟用，敘事+0" };
+        }
+
+        // 保留給舊版 Prompt 模板可能需要的變數，避免報錯
         const buys = marketData.buys5m || 0;
         const sells = marketData.sells5m || 0;
         const totalTxs = buys + sells;
         const avgTrade = totalTxs > 0 ? (marketData.volume5m / totalTxs).toFixed(2) : 0;
         const pseudoOfi = totalTxs > 0 ? ((buys - sells) / totalTxs).toFixed(2) : 'N/A';
 
-        // 🧮 V10 核心升級：若 AI 失效，讀取 Python 智腦計算的「動態量化評分」兜底
-        let dynamicMathScore = options.baseScore || 70;
-        try {
-            const modelStr = await cacheManager.redis.get("cache:dynamic_scoring_model");
-            if (modelStr) {
-                const mlModel = JSON.parse(modelStr);
-                const ofiNum = totalTxs > 0 ? (buys - sells) / totalTxs : 0;
-                const liq = marketData.liquidity || 0;
-                const vol = marketData.volume5m || 0;
-                const turnover = liq > 0 ? vol / liq : 0;
-                
-                let score = mlModel.base_math_score || 50;
-                if (ofiNum >= (mlModel.avg_ofi || 0.1)) score += (mlModel.ofi_bonus_score || 15);
-                if (liq >= (mlModel.avg_entry_liq || 5000) * 0.8) score += (mlModel.liq_bonus_score || 10);
-                if (turnover >= 0.2 && turnover <= 2.0) score += (mlModel.volume_bonus_score || 15);
-                
-                dynamicMathScore = Math.min(100, Math.max(0, Math.floor(score)));
-            }
-        } catch(e) {
-            // 忽略讀取錯誤，使用預設 baseScore
-        }
-
-        if (!config.aiKeys.GROQ || config.aiKeys.GROQ.length === 0) {
-            console.log(`[Consensus] ⚠️ 無 GROQ 金鑰，直接使用量化動態原判 (${dynamicMathScore} 分)`);
-            return { buy: dynamicMathScore >= buyThreshold, score: dynamicMathScore, reason: "純量化動態模式 (GROQ 未啟用)" };
-        }
-
-        // 🚀 核心：對接 cacheManager，確保所有 {{變數}} 都有對應的數值傳入，並注入動態基準分
         const aiConfig = cacheManager.getPromptConfig(promptId, {
-            token_symbol: marketData.symbol,
+            token_symbol: symbol,
             climate: climate,
-            baseScore: dynamicMathScore, 
+            baseScore: 0, 
             ofi: pseudoOfi,
             avg_trade: avgTrade,
             volume: marketData.volume5m ? marketData.volume5m.toFixed(0) : 0,
@@ -62,7 +44,29 @@ class ConsensusService {
             h1: marketData.h1 ? marketData.h1.toFixed(2) : 0 
         });
 
-        const prompt = aiConfig.parsedPrompt;
+        // 🚀 V10 核心升級：強制注入防山寨指令，限制 LLM 只能輸出加減分數
+        const formatInstruction = `\n\n[CRITICAL INSTRUCTION FOR V10 SYSTEM]
+You are NO LONGER making BUY or VETO decisions. Your ONLY job is to evaluate the narrative, detect cult potential, and heavily penalize fake/impersonation tokens.
+
+Evaluate the following token:
+Symbol: ${symbol}
+Name: ${name}
+Description: ${desc}
+
+You MUST output EXACTLY this JSON format (no extra text):
+{
+  "narrative_score": <integer from -20 to +20>,
+  "reason": "<short explanation>"
+}
+
+Scoring Guide:
++15 to +20: Top-tier narrative (e.g., AI Agent, Elon Musk latest trend), highly original, strong cult potential.
++5 to +10: Good normal meme, clear concept, no red flags.
+0: Uncertain, lack of info, or neutral. If you are unsure if it's a scam, give 0.
+-10 to -15: Emotional manipulation ("buy or stay poor", "guaranteed 100x"), low-effort copycat.
+-20: FAKE / IMPERSONATION. If it attempts to mimic famous brands, celebrities, countries, or tickers but looks like a suspicious variation (e.g., "AppIe", "E1on", "OPENAI", "USAOIL"), apply MAXIMUM PENALTY!`;
+
+        const prompt = aiConfig.parsedPrompt + formatInstruction;
 
         try {
             // 🚀 指定 GROQ 並傳入 promptId 供 KeyRotator 識別
@@ -72,7 +76,7 @@ class ConsensusService {
                 const modelName = aiConfig.models[0] || 'llama-3.3-70b-versatile';
                 const providerName = 'GROQ';
                 
-                console.log(`[KeyRotator] 🔫 系統抽中 ${providerName} (${modelName}) 進行審批 [劇本: ${promptId}]...`);
+                console.log(`[KeyRotator] 🧠 系統抽中 ${providerName} (${modelName}) 進行敘事鑒定 [劇本: ${promptId}]...`);
 
                 try {
                     const payload = {
@@ -84,7 +88,7 @@ class ConsensusService {
 
                     const res = await axios.post(apiUrl, payload, {
                         headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' },
-                        timeout: 15000 
+                        timeout: 10000 // 縮短超時至 10 秒，避免阻塞漏斗
                     });
 
                     const rawText = res.data.choices[0].message.content;
@@ -99,34 +103,27 @@ class ConsensusService {
                 } catch (e) {
                     const status = e.response?.status || 'N/A';
                     const errMsg = e.response?.data?.error?.message || e.response?.data?.message || e.message;
-                    console.warn(`❌ [AI Failed] ${providerName} (${modelName}) 審批陣亡 | Status: ${status} | 死因: ${errMsg}`);
+                    console.warn(`❌ [AI Failed] ${providerName} (${modelName}) 鑒定異常 | Status: ${status} | 錯誤: ${errMsg}`);
                     throw e; 
                 }
             }, promptId); 
 
             const aiSignature = aiResult.ai_signature || 'GROQ_UNKNOWN';
-            const decision = aiResult.decision || 'PASS';
-
-            // 🛑 VETO 攔截
-            if (decision === 'VETO') {
-                console.log(`[Consensus] 🛑 AI 強制否決 (VETO)！`);
-                return { buy: false, score: 0, reason: `[${aiSignature}] 🛑 觸發 VETO: ${aiResult.reason}` };
+            
+            // 🧮 提取敘事分數，並強制限制在 -20 到 +20 之間，防止 LLM 亂畀分
+            let nScore = 0;
+            if (aiResult.narrative_score !== undefined && !isNaN(aiResult.narrative_score)) {
+                nScore = parseInt(aiResult.narrative_score);
+                nScore = Math.max(-20, Math.min(20, nScore)); // 絕對邊界防護
             }
 
-            // 🧮 提取最終分數 (如果 AI 無畀，用動態基準分)
-            let finalScore = dynamicMathScore;
-            if (aiResult.score !== undefined && !isNaN(aiResult.score)) {
-                finalScore = parseInt(aiResult.score);
-            }
+            console.log(`[Consensus] 🗣️ LLM 敘事評分: ${nScore > 0 ? '+' : ''}${nScore} 分`);
 
-            const isBuy = finalScore >= buyThreshold;
-            console.log(`[Consensus] 🧠 AI 最終裁決: 得分 ${finalScore}`);
-
-            return { buy: isBuy, score: finalScore, reason: `[${aiSignature}] 裁決: ${aiResult.reason}` };
+            return { narrative_score: nScore, reason: `[${aiSignature}] ${aiResult.reason || '無解釋'}` };
 
         } catch (err) {
-            console.warn(`⚠️ [Consensus] AI 資源池異常，降級為純量化動態分數: ${err.message}`);
-            return { buy: dynamicMathScore >= buyThreshold, score: dynamicMathScore, reason: "AI 資源池異常或全線冷卻，降級採用純量化動態結果" };
+            console.warn(`⚠️ [Consensus] LLM 敘事鑒定異常或全線冷卻，跳過加減分: ${err.message}`);
+            return { narrative_score: 0, reason: "LLM 資源池異常，敘事分數 +0" };
         }
     }
 }
