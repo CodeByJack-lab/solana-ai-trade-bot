@@ -303,7 +303,10 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         }
 
     } catch (err) {
-        console.error(`❌ [Routing Error] 處理 ${mint} 失敗:`, err.message);
+        // 🎯 致命 Bug 修復：強化錯誤輸出，避免死機而無聲無息
+        const symbol = symbol_cache.get(mint) || 'UNKNOWN';
+        console.error(`❌ [Routing Error] 決策漏斗處理 ${symbol} (${mint}) 時發生崩潰:`, err.message);
+        if (err.stack) console.error(err.stack);
     }
 }
 
