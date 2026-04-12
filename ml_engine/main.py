@@ -190,13 +190,14 @@ def extract_and_save_toxic_clusters(X: pd.DataFrame, y_toxic: pd.Series):
 def execute_evolution_pipeline():
     print("🚀 [ML Engine] 啟動大數據雙塔建模 (動態參數 + EMA 記憶)...")
     try:
-        # 1. 獲取 DB 動態參數 (防彈寫法，移除 .single() 防止 PGRST116 報錯)
-        resp = supabase.table('ai_strategy_params').select('*').eq('id', 1).execute()
+        # 1. 獲取 DB 動態參數 (防彈寫法，移除 .single()，並指定獲取 ID 2 和 3 的設定)
+        resp = supabase.table('ai_strategy_params').select('*').in_('id', [2, 3]).execute()
         
         if resp.data and len(resp.data) > 0:
-            params = resp.data[0]
+            # 優先提取 id=3 (Trending) 的參數作為 ML 的全域學習基準
+            params = next((p for p in resp.data if p['id'] == 3), resp.data[0])
         else:
-            print("⚠️ [ML Engine] 找不到 id=1 的 ai_strategy_params，使用安全預設值。")
+            print("⚠️ [ML Engine] 找不到 id=2 或 3 的 ai_strategy_params，使用安全預設值。")
             params = {}
 
         lookback_days = params.get('ml_lookback_days', 14)
@@ -254,7 +255,7 @@ def execute_evolution_pipeline():
         }
         redis_client.set("cache:dynamic_scoring_model", json.dumps(dynamic_model))
         
-        # 同步 SL/TP 回 DB (讓 Node 前線掛單)
+        # 同步 SL/TP 回 DB (讓 Node 前線掛單，同時更新 id 2 和 3)
         supabase.table('ai_strategy_params').update({ 'stop_loss_pct': round(final_sl, 2), 'trailing_tp_trigger': round(final_tp, 2) }).in_('id', [2, 3]).execute()
         
         # 5. ML 訓練 (讀取 DB 內的超參數)
