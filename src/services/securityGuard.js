@@ -1,6 +1,6 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V10.15 量化安檢中樞 (解決 429 併發限流版)
-// 🚀 升級功能：加入 DexScreener 全局防爆閥，防止瞬間射出大量請求導致 429。
+// 📝 檔案功能用途：V10.16 量化安檢中樞 (動態 OFI + 防 429 限流版)
+// 🚀 升級功能：加入動態 OFI 容忍度 (防殺錯良民)，並保留 DexScreener 全局防爆閥。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -212,8 +212,18 @@ class SecurityGuard {
         const buyRatio = buys / totalTxs5m;
         if (totalTxs5m > 30 && buyRatio > 0.45 && buyRatio < 0.55) return { numeric_score: 0, isSafe: false, reason: `🛑 女巫刷量: 買賣極度對稱`, marketData };
 
+        // 🎯 V10.16 核心升級：動態 OFI 容忍度 (防禦殺錯良民)
+        let minOFI = -0.4; // CHOPPY 震盪市容許 30%買/70%賣 (正常回調)
+        if (climate === 'RAGING_BULL' || newsScore >= 4) {
+            minOFI = -0.7; // 狂牛市容許短暫極端洗盤 (15%買/85%賣)，等接大回調底
+        } else if (climate === 'BEAR_PANIC' || newsScore <= -3) {
+            minOFI = -0.2; // 熊市嚴防瀑布 (40%買/60%賣即斬)
+        }
+
         const pseudoOfi = (buys - sells) / totalTxs5m; 
-        if (totalTxs5m >= 10 && pseudoOfi < -0.2) return { numeric_score: 0, isSafe: false, reason: `🛑 惡劣 OFI: 買賣力道嚴重失衡`, marketData };
+        if (totalTxs5m >= 10 && pseudoOfi < minOFI) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 惡劣 OFI: 買賣失衡 (OFI: ${pseudoOfi.toFixed(2)} < ${minOFI})`, marketData };
+        }
 
         const VERIFIED_TOKENS = cacheManager.getVerifiedTokens();
         if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) return { numeric_score: 0, isSafe: false, reason: `🛑 終極防偽攔截: 假冒幣`, marketData };

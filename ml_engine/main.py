@@ -1,6 +1,6 @@
 # ml_engine/main.py
 # 📝 檔案功能用途：V10 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：實裝 Scikit-Learn 隨機森林 + 決策樹。支援 Supabase 全動態參數與 EMA 記憶學習機制！
+# 🚀 核心升級：全動態參數讀取 + EMA 歷史記憶平滑學習機制 (防彈修復版)
 
 import os
 import json
@@ -51,7 +51,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=background_scheduler, daemon=True).start()
     yield 
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.5", lifespan=lifespan)
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.6", lifespan=lifespan)
 
 # ------------------------------------------------------------------
 # 2. 即時推論端點 (動態純數與 ML 融合)
@@ -190,9 +190,15 @@ def extract_and_save_toxic_clusters(X: pd.DataFrame, y_toxic: pd.Series):
 def execute_evolution_pipeline():
     print("🚀 [ML Engine] 啟動大數據雙塔建模 (動態參數 + EMA 記憶)...")
     try:
-        # 1. 獲取 DB 動態參數 (若未配置，自動使用安全預設值)
-        resp = supabase.table('ai_strategy_params').select('*').eq('id', 1).single().execute()
-        params = resp.data or {}
+        # 1. 獲取 DB 動態參數 (防彈寫法，移除 .single() 防止 PGRST116 報錯)
+        resp = supabase.table('ai_strategy_params').select('*').eq('id', 1).execute()
+        
+        if resp.data and len(resp.data) > 0:
+            params = resp.data[0]
+        else:
+            print("⚠️ [ML Engine] 找不到 id=1 的 ai_strategy_params，使用安全預設值。")
+            params = {}
+
         lookback_days = params.get('ml_lookback_days', 14)
         ema_alpha = float(params.get('ema_alpha', 0.3)) 
         
