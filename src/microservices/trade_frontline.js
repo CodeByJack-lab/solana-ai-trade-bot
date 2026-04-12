@@ -289,9 +289,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                         entry_ofi: ofi,
                         entry_liquidity_usd: marketData.l,
                         entry_volume_5m: marketData.v,
-                        realized_pnl_pct: -100.00, // 🩸 標記為絕對死局 (秒 Rug)
-                        trade_type: 'ML_NEGATIVE_SAMPLE',
-                        action: 'LIQUIDATED'
+                        realized_pnl_pct: -100.00 // 🩸 標記為絕對死局 (秒 Rug)
                     }]).then(({error}) => {
                         if (error) console.error(`❌ [Poison Data] 寫入負樣本失敗:`, error.message);
                     });
