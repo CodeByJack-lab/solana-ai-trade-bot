@@ -144,37 +144,60 @@ setInterval(() => {
 }, 60 * 1000); 
 
 // ------------------------------------------------------------------
-// 4. DEFCON 6 秒接管 (保留！)
+// 4. DEFCON 6 秒接管 (智能護航版)
 // ------------------------------------------------------------------
 setInterval(async () => {
     if (!globalConfig.is_running) return;
+    
     const portfolio = getPortfolio();
     const activeMints = portfolio.positions?.map(p => p.mint_address) || [];
+    
+    // 🎯 條件 1：手頭上冇倉位 -> 系統處於「空倉掛機」狀態，絕對唔會判定為斷氣
     if (activeMints.length === 0) return;
 
     const now = Date.now();
-    let isKoyebDead = false;
+    let deadMints = []; // 紀錄邊幾隻幣真係斷咗氣
+
+    // 🎯 條件 2：檢查手上「每一隻」倉位嘅最後報價時間
     for (const mint of activeMints) {
-        if (now - (last_valid_ts.get(mint) || 0) > 6000) { isKoyebDead = true; break; }
+        const lastTs = last_valid_ts.get(mint) || 0;
+        // 如果超過 6 秒 (6000ms) 冇更新，或者根本從來未收過報價 (lastTs = 0)
+        if (now - lastTs > 6000) { 
+            deadMints.push(mint);
+        }
     }
 
-    if (isKoyebDead) {
-        console.warn("🚨 [DEFCON 6] Koyeb 查價中斷超過 6 秒，啟動後備救援查價！");
+    // 🎯 條件 3：有倉位 + 發現有幣斷氣超過 6 秒 -> 啟動 Jupiter 救援
+    if (deadMints.length > 0) {
+        console.warn(`🚨 [DEFCON 6] Koyeb 查價中斷！有 ${deadMints.length} 隻持倉幣超過 6 秒無報價，啟動 Jupiter 救援！`);
+        
         try {
-            const jupMints = [...activeMints, 'So11111111111111111111111111111111111111112'];
+            // 淨係查斷氣嗰啲幣同 SOL 嘅美金價，慳 API Quota
+            const jupMints = [...deadMints, 'So11111111111111111111111111111111111111112'];
             const res = await axios.get(`https://api.jup.ag/price/v3?ids=${jupMints.join(',')}`, { timeout: 3000 });
+            
             const solUsd = parseFloat(res.data?.data?.['So11111111111111111111111111111111111111112']?.price || '1');
             const fallbackPayload = {};
             const ts = Date.now();
-            activeMints.forEach(m => {
+            
+            deadMints.forEach(m => {
                 if (res.data?.data?.[m]?.price) {
+                    // 將 Jupiter 嘅純價格轉化為系統需要嘅格式
                     fallbackPayload[m] = { p: parseFloat(res.data.data[m].price) / solUsd, v: 0, b: 0, s: 0, l: 0, ts: ts };
-                    last_valid_ts.set(m, ts); 
+                    last_valid_ts.set(m, ts); // 更新時間戳，等佢下個 4 秒唔會再叫救命
                     latest_market_data.set(m, fallbackPayload[m]); 
                 }
             });
-            if (Object.keys(fallbackPayload).length > 0) await redisClient.publish('price_updates', JSON.stringify(fallbackPayload));
-        } catch (err) {}
+            
+            // 將救援報價廣播出去，等 Watchdog 繼續運作
+            if (Object.keys(fallbackPayload).length > 0) {
+                await redisClient.publish('price_updates', JSON.stringify(fallbackPayload));
+                // console.log(`🚑 [Jupiter Rescue] 成功為 ${Object.keys(fallbackPayload).length} 隻代幣注入救援報價！`); // 隱藏以免洗版
+            }
+            
+        } catch (err) {
+            console.error(`❌ [Jupiter Rescue] 救援失敗: ${err.message}`);
+        }
     }
 }, 4000); 
 
