@@ -1,6 +1,6 @@
 // ecosystem.config.js
-// 📝 檔案功能用途：V10 艦隊 PM2 進程編排與算力分配 (Railway 部署專用)
-// 🚀 核心分配：3 核 Node.js 前線防禦 + 5 核 Python ML 智腦，嚴格劃分 RAM 上限防 OOM。
+// 📝 檔案功能用途：V10 艦隊 PM2 進程編排與算力分配 (Railway 部署防爆版)
+// 🚀 核心升級：大幅收緊 RAM 上限防止全機 OOM 崩潰，並確保進程資源分配更合理。
 
 module.exports = {
     apps: [
@@ -12,7 +12,7 @@ module.exports = {
         script: "./src/microservices/macro_sync_center.js",
         instances: 1,
         exec_mode: "fork",
-        max_memory_restart: "512M", // ✅ 輕量級進程 (無小數點)
+        max_memory_restart: "256M", // 📉 由 512M 降至 256M (極低耗能，夠晒用)
         autorestart: true,
         watch: false,
         env: {
@@ -28,7 +28,7 @@ module.exports = {
         script: "./src/microservices/trade_frontline.js",
         instances: 1,
         exec_mode: "fork",
-        max_memory_restart: "1000M", // ✅ 1G 改為 1000M (絕對安全)
+        max_memory_restart: "512M", // 📉 由 1000M 降至 512M (純 API 請求，防內存洩漏)
         autorestart: true,
         watch: false,
         env: {
@@ -45,7 +45,7 @@ module.exports = {
         script: "./src/microservices/monitor_guards.js",
         instances: 1,
         exec_mode: "fork",
-        max_memory_restart: "1500M", // 🎯 致命元兇修復：1.5G 改為 1500M
+        max_memory_restart: "512M", // 📉 由 1500M 降至 512M (O(1) 數學引擎非常慳 RAM)
         autorestart: true,
         watch: false,
         env: {
@@ -63,10 +63,9 @@ module.exports = {
         interpreter: "python",
         instances: 1, 
         exec_mode: "fork",
-        max_memory_restart: "3000M", // ✅ 3G 改為 3000M
+        max_memory_restart: "1500M", // 📉 由 3000M 降至 1500M (逼使 PM2 喺大塞車前介入)
         autorestart: true,
         watch: false,
-        // 🎯 終極解法：強制將 Uvicorn 預設嘅 stderr (錯誤流) 全部倒落 stdout (標準流)
         error_file: "/dev/stdout",
         out_file: "/dev/stdout",
         merge_logs: true,
