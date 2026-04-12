@@ -1,6 +1,6 @@
 # ml_engine/main.py
 # 📝 檔案功能用途：V10 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：全動態參數讀取 + EMA 歷史記憶平滑學習機制 (防彈修復版)
+# 🚀 核心升級：全動態參數讀取 + EMA 歷史記憶平滑學習機制 (修復開機 CPU 核爆問題)
 
 import os
 import json
@@ -33,9 +33,9 @@ MODEL_PATH = "/tmp/v10_rf_model.pkl"
 if not SUPABASE_URL or not SUPABASE_KEY:
     raise RuntimeError("❌ [FATAL] 缺少 Supabase 環境變數，Data Engine 無法啟動。")
 
-# 🎯 終極修復：加入 ClientOptions 關閉 proxy 檢查，防止 httpx 崩潰
+# 🎯 終極修復：加長 Timeout 並保留 Options，防止龐大數據下載時連線崩潰
 try:
-    opts = ClientOptions(postgrest_client_timeout=10, storage_client_timeout=10)
+    opts = ClientOptions(postgrest_client_timeout=30, storage_client_timeout=30)
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, options=opts)
 except Exception as e:
     print(f"⚠️ [System] 帶 Options 建立 Supabase Client 失敗，嘗試回退原始連線。錯誤: {e}")
@@ -190,11 +190,10 @@ def extract_and_save_toxic_clusters(X: pd.DataFrame, y_toxic: pd.Series):
 def execute_evolution_pipeline():
     print("🚀 [ML Engine] 啟動大數據雙塔建模 (動態參數 + EMA 記憶)...")
     try:
-        # 1. 獲取 DB 動態參數 (防彈寫法，移除 .single()，並指定獲取 ID 2 和 3 的設定)
+        # 1. 獲取 DB 動態參數
         resp = supabase.table('ai_strategy_params').select('*').in_('id', [2, 3]).execute()
         
         if resp.data and len(resp.data) > 0:
-            # 優先提取 id=3 (Trending) 的參數作為 ML 的全域學習基準
             params = next((p for p in resp.data if p['id'] == 3), resp.data[0])
         else:
             print("⚠️ [ML Engine] 找不到 id=2 或 3 的 ai_strategy_params，使用安全預設值。")
@@ -242,7 +241,7 @@ def execute_evolution_pipeline():
         else:
             final_sl, final_tp, final_ofi, final_liq = new_sl, new_tp, new_ofi, new_liq
 
-        # 4. 打包全套動態參數 + 計算結果寫入 Redis (包含純數參數)
+        # 4. 打包全套動態參數 + 計算結果寫入 Redis
         dynamic_model = {
             "avg_ofi": final_ofi,
             "avg_entry_liq": final_liq,
@@ -255,7 +254,7 @@ def execute_evolution_pipeline():
         }
         redis_client.set("cache:dynamic_scoring_model", json.dumps(dynamic_model))
         
-        # 同步 SL/TP 回 DB (讓 Node 前線掛單，同時更新 id 2 和 3)
+        # 同步 SL/TP 回 DB
         supabase.table('ai_strategy_params').update({ 'stop_loss_pct': round(final_sl, 2), 'trailing_tp_trigger': round(final_tp, 2) }).in_('id', [2, 3]).execute()
         
         # 5. ML 訓練 (讀取 DB 內的超參數)
@@ -280,6 +279,9 @@ def execute_evolution_pipeline():
 # 4. 全自動無人值守排程器
 # ------------------------------------------------------------------
 def background_scheduler():
+    # 🎯 避開開機 CPU 峰值，延遲 15 秒先開始 Train Model
+    print("⏳ [ML Engine] 伺服器啟動中，延遲 15 秒後再開始大數據訓練，避免 CPU 瞬間核爆...")
+    time.sleep(15)
     while True:
         execute_evolution_pipeline()
         time.sleep(86400)  # 暫停 24 小時
@@ -298,4 +300,5 @@ def health_check():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=2, log_config="log_config.json")
+    # 🎯 終極修復：將 workers=2 改為 workers=1，防止雙核同時開機核爆
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=1, log_config="log_config.json")
