@@ -1,6 +1,6 @@
 // src/services/consensusService.js
 // 📝 檔案功能用途：V10 終極防彈版 AI 議事廳。唯一負責買入把關的 AI。
-// 🚀 升級功能：全線轉用 GROQ，並完美對接 cacheManager 讀取 Redis 熱更新劇本。
+// 🚀 升級功能：全線轉用 GROQ，完美對接 cacheManager，並加入純數動態量化兜底。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -10,15 +10,9 @@ const axios = require('axios');
 class ConsensusService {
     
     async runMemeConsensus(mint, marketData, options = {}) {
-        const baseScore = options.baseScore || 70; 
         const poolType = options.poolType || 'TRENDING';
         const climate = options.climate || 'CHOPPY';
         const buyThreshold = options.buyThreshold || 70;
-
-        if (!config.aiKeys.GROQ || config.aiKeys.GROQ.length === 0) {
-            console.log(`[Consensus] ⚠️ 無 GROQ 金鑰，直接使用量化原判 (${baseScore} 分)`);
-            return { buy: baseScore >= buyThreshold, score: baseScore, reason: "純量化模式 (GROQ 未啟用)" };
-        }
 
         const isMeme = poolType === 'NEWBORN';
         const promptId = isMeme ? 'meme_scout' : 'trending_scout';
@@ -29,11 +23,38 @@ class ConsensusService {
         const avgTrade = totalTxs > 0 ? (marketData.volume5m / totalTxs).toFixed(2) : 0;
         const pseudoOfi = totalTxs > 0 ? ((buys - sells) / totalTxs).toFixed(2) : 'N/A';
 
-        // 🚀 核心：對接 cacheManager，確保所有 {{變數}} 都有對應的數值傳入
+        // 🧮 V10 核心升級：若 AI 失效，讀取 Python 智腦計算的「動態量化評分」兜底
+        let dynamicMathScore = options.baseScore || 70;
+        try {
+            const modelStr = await cacheManager.redis.get("cache:dynamic_scoring_model");
+            if (modelStr) {
+                const mlModel = JSON.parse(modelStr);
+                const ofiNum = totalTxs > 0 ? (buys - sells) / totalTxs : 0;
+                const liq = marketData.liquidity || 0;
+                const vol = marketData.volume5m || 0;
+                const turnover = liq > 0 ? vol / liq : 0;
+                
+                let score = mlModel.base_math_score || 50;
+                if (ofiNum >= (mlModel.avg_ofi || 0.1)) score += (mlModel.ofi_bonus_score || 15);
+                if (liq >= (mlModel.avg_entry_liq || 5000) * 0.8) score += (mlModel.liq_bonus_score || 10);
+                if (turnover >= 0.2 && turnover <= 2.0) score += (mlModel.volume_bonus_score || 15);
+                
+                dynamicMathScore = Math.min(100, Math.max(0, Math.floor(score)));
+            }
+        } catch(e) {
+            // 忽略讀取錯誤，使用預設 baseScore
+        }
+
+        if (!config.aiKeys.GROQ || config.aiKeys.GROQ.length === 0) {
+            console.log(`[Consensus] ⚠️ 無 GROQ 金鑰，直接使用量化動態原判 (${dynamicMathScore} 分)`);
+            return { buy: dynamicMathScore >= buyThreshold, score: dynamicMathScore, reason: "純量化動態模式 (GROQ 未啟用)" };
+        }
+
+        // 🚀 核心：對接 cacheManager，確保所有 {{變數}} 都有對應的數值傳入，並注入動態基準分
         const aiConfig = cacheManager.getPromptConfig(promptId, {
             token_symbol: marketData.symbol,
             climate: climate,
-            baseScore: baseScore,
+            baseScore: dynamicMathScore, 
             ofi: pseudoOfi,
             avg_trade: avgTrade,
             volume: marketData.volume5m ? marketData.volume5m.toFixed(0) : 0,
@@ -92,8 +113,8 @@ class ConsensusService {
                 return { buy: false, score: 0, reason: `[${aiSignature}] 🛑 觸發 VETO: ${aiResult.reason}` };
             }
 
-            // 🧮 提取最終分數
-            let finalScore = baseScore;
+            // 🧮 提取最終分數 (如果 AI 無畀，用動態基準分)
+            let finalScore = dynamicMathScore;
             if (aiResult.score !== undefined && !isNaN(aiResult.score)) {
                 finalScore = parseInt(aiResult.score);
             }
@@ -104,8 +125,8 @@ class ConsensusService {
             return { buy: isBuy, score: finalScore, reason: `[${aiSignature}] 裁決: ${aiResult.reason}` };
 
         } catch (err) {
-            console.warn(`⚠️ [Consensus] AI 資源池異常，降級為純量化分數: ${err.message}`);
-            return { buy: baseScore >= buyThreshold, score: baseScore, reason: "AI 資源池異常或全線冷卻，降級採用純量化結果" };
+            console.warn(`⚠️ [Consensus] AI 資源池異常，降級為純量化動態分數: ${err.message}`);
+            return { buy: dynamicMathScore >= buyThreshold, score: dynamicMathScore, reason: "AI 資源池異常或全線冷卻，降級採用純量化動態結果" };
         }
     }
 }
