@@ -1,6 +1,6 @@
 // src/services/consensusService.js
 // 📝 檔案功能用途：V10.22 終極防彈版 AI 議事廳 (文科生敘事與防山寨中樞)。
-// 🚀 升級功能：響應指揮官要求，將 LLM 最大扣分幅度限制為 -5，防止錯殺良民 (範圍: -5 到 +15)。
+// 🚀 升級功能：響應指揮官要求，將 LLM 最大扣分幅度限制為 -5，防止錯殺良民 (範圍: -5 到 +15)。完美印出分析理由。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -116,6 +116,7 @@ Scoring Guide:
 
             const aiReason = aiResult.reason || '無解釋';
             
+            // 🚨 FIX: 完美印出分數與理由！
             console.log(`[Consensus] 🗣️ LLM 敘事評分: ${nScore > 0 ? '+' : ''}${nScore} 分 | 理由: ${aiReason}`);
 
             return { narrative_score: nScore, reason: `[${aiSignature}] ${aiReason}` };

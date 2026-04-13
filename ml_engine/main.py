@@ -1,6 +1,6 @@
 # ml_engine/main.py
 # 📝 檔案功能用途：V10.22 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：實裝「EMA 記憶平滑進化」，Python 會讀取舊設定並結合今日數據進行融合，受限於動態安全邊界 (Safe Bounds)。
+# 🚀 核心升級：完美對齊合併版 Schema，全面由 ml_strategy_params 讀寫 lookback, ema_alpha, SL/TP，徹底廢除 ai_strategy_params。
 
 import os
 import json
@@ -101,7 +101,6 @@ async def predict_score(req: PredictRequest):
     survival_prob += macro_adjustment
     survival_prob = max(0.0, min(1.0, survival_prob)) 
 
-    # 🎯 整合總分 (滿分 65 分，四捨五入精準對齊三權分立)
     final_score = round(survival_prob * 65)
 
     multiplier = 1.0
@@ -174,23 +173,22 @@ def extract_and_save_toxic_clusters(X: pd.DataFrame, y_toxic: pd.Series):
         print(f"☠️ [ML Engine] 成功萃取並寫入 {len(toxic_rules)} 條必死毒藥組合至 DB！")
 
 def evolve_param(old_val, target_val, alpha, min_bound, max_bound):
-    """🧠 EMA 平滑進化器：融合舊記憶與新現實，並約束在安全邊界內"""
     blended = (old_val * (1.0 - alpha)) + (target_val * alpha)
     return max(min_bound, min(blended, max_bound))
 
 def execute_evolution_pipeline():
     print(f"🚀 [ML Engine] 啟動大數據訓練管線 (觸發時間: {datetime.now(timezone.utc).isoformat()})...")
     try:
-        # 1. 獲取 DB 超參數
-        resp = supabase.table('ai_strategy_params').select('*').in_('id', [2, 3]).execute()
-        params = next((p for p in resp.data if p['id'] == 3), resp.data[0]) if resp.data else {}
+        # 🚨 對齊 Schema：從 ml_strategy_params 讀取全局機器學習參數 (讀取任意一行即可獲得全局設定)
+        resp = supabase.table('ml_strategy_params').select('*').limit(1).execute()
+        params = resp.data[0] if resp.data else {}
 
-        lookback_days = params.get('ml_lookback_days', 14)
+        lookback_days = int(params.get('ml_lookback_days', 14))
         ema_alpha = float(params.get('ema_alpha', 0.3)) 
         
         df = fetch_trade_patterns_paginated(lookback_days)
         if df.empty or len(df) < 10:
-            print("⚠️ [ML Engine] 歷史樣本庫不足 (需至少 10 條)，中止訓練。")
+            print("⚠️ [ML Engine] 歷史樣本庫不足 (需至少 10 條)，中止訓練。請讓系統空轉收集數據。")
             return
 
         df['realized_pnl_pct'] = pd.to_numeric(df['realized_pnl_pct'], errors='coerce').fillna(0)
@@ -210,7 +208,6 @@ def execute_evolution_pipeline():
 
         recent_win_rate = len(winning_df) / len(df) if len(df) > 0 else 0.5
 
-        # 2. 從 Redis 讀取舊有參數記憶 (Old Memory)
         old_ml_str = redis_client.get("ml_strategy_params")
         old_ml = json.loads(old_ml_str) if old_ml_str else {}
         
@@ -220,15 +217,10 @@ def execute_evolution_pipeline():
             except:
                 return default_val
 
-        # 3. 根據大數據計算今日的理想目標值 (Target Reality)
         win_ofi_p15 = float(np.percentile(winning_df['entry_ofi'], 15)) if not winning_df.empty else -0.2
         win_vol_p15 = float(np.percentile(winning_df['entry_volume_5m_usd'], 15)) if not winning_df.empty else 1000.0
         
-        # 根據勝率決定及格線的趨勢：勝率高於 50% 可降及格線(進攻)，低於 50% 提高及格線(防守)
         threshold_target_offset = -3 if recent_win_rate > 0.5 else 3
-
-        # 4. 🧠 EMA 平滑進化 (融合舊記憶與新目標)，並套用安全邊界 Range
-        # 參數: evolve_param(old_val, target_val, alpha, min_bound, max_bound)
         
         evolved_params = {
             "strategy_id": int(time.time()), 
@@ -274,7 +266,6 @@ def execute_evolution_pipeline():
             }
         }
         
-        # 5. 更新動態 SL/TP
         new_sl = max(-25.0, min(-10.0, float(np.average(losing_df['realized_pnl_pct'], weights=losing_df['w_time']) * 1.2))) if not losing_df.empty else -15.0
         new_tp = max(15.0, min(40.0, float(np.average(winning_df['realized_pnl_pct'], weights=winning_df['w_time']) * 0.8))) if not winning_df.empty else 20.0
         
@@ -284,7 +275,6 @@ def execute_evolution_pipeline():
         final_sl = evolve_param(old_dynamic.get("dynamic_sl", -15.0), new_sl, ema_alpha, -25.0, -10.0)
         final_tp = evolve_param(old_dynamic.get("dynamic_tp_trigger", 20.0), new_tp, ema_alpha, 15.0, 40.0)
 
-        # 6. 寫入 Redis 及 Supabase
         dynamic_model = {
             "dynamic_sl": final_sl,
             "dynamic_tp_trigger": final_tp,
@@ -294,6 +284,7 @@ def execute_evolution_pipeline():
         redis_client.set("cache:dynamic_scoring_model", json.dumps(dynamic_model))
         redis_client.set("ml_strategy_params", json.dumps(evolved_params))
         
+        # 🚨 寫入 Supabase：將所有進化後的參數 (包含 Stop Loss & TP) 寫入 ml_strategy_params 對應的情境行
         for t_type, climates in evolved_params.items():
             if t_type in ['NEWBORN', 'TRENDING']:
                 for cli, p in climates.items():
@@ -305,22 +296,18 @@ def execute_evolution_pipeline():
                             'min_avg_trade_usd': p['minAvgTradeUsd'],
                             'max_turnover_5m': p['maxTurnover5m'],
                             'zombie_vol_req': p['zombieVolReq'],
+                            'stop_loss_pct': round(final_sl, 2),        # 統一寫入 ml_strategy_params
+                            'trailing_tp_trigger': round(final_tp, 2),  # 統一寫入 ml_strategy_params
                             'updated_at': datetime.now(timezone.utc).isoformat()
                         }).eq('token_type', t_type).eq('market_climate', cli).execute()
                     except Exception as e:
                         print(f"⚠️ [ML Engine] 更新 DB 失敗 ({t_type}-{cli}): {e}")
 
-        supabase.table('ai_strategy_params').update({ 
-            'stop_loss_pct': round(final_sl, 2), 
-            'trailing_tp_trigger': round(final_tp, 2) 
-        }).in_('id', [2, 3]).execute()
-
         print(f"🧠 [ML Engine] 自動進化完成！近期勝率: {recent_win_rate*100:.1f}%。參數已受 EMA 與安全邊界約束。")
         
-        # 7. ML 訓練 (限制 n_jobs=1)
         if len((df['realized_pnl_pct'] > 0).unique()) > 1:
-            n_est = params.get('rf_n_estimators', 100)
-            m_depth = params.get('rf_max_depth', 5)
+            n_est = int(params.get('rf_n_estimators', 100))
+            m_depth = int(params.get('rf_max_depth', 5))
             rf = RandomForestClassifier(n_estimators=n_est, max_depth=m_depth, random_state=42, n_jobs=1)
             rf.fit(df[['entry_ofi', 'entry_liquidity_usd']], (df['realized_pnl_pct'] > 0).astype(int), sample_weight=df['w_time'])
             joblib.dump(rf, MODEL_PATH)

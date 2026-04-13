@@ -1,6 +1,6 @@
 // src/microservices/trade_frontline.js
 // 📝 檔案功能用途：V10.22 【獵人中樞】微服務 (Microservice Core)
-// 🚀 核心升級：修復 LLM 決策日誌無顯示理由的視覺 Bug。實裝「三權分立」計分法 (Quant20+ML65+LLM15)。
+// 🚀 核心升級：修復 securityGuard.calculateQuantScore 函數呼叫名稱錯誤。實裝「三權分立」計分法 (Quant20+ML65+LLM15)。
 
 require('dotenv').config();
 const express = require('express');
@@ -21,8 +21,12 @@ const { walletMonitorRouter } = require('../services/walletMonitor');
 const { keyRotator } = require('../services/keyRotator'); 
 const { cacheManager } = require('../services/cacheManager'); 
 
+// ------------------------------------------------------------------
+// 1. 初始化與全域防禦變數
+// ------------------------------------------------------------------
 const app = express();
 app.use(express.json());
+
 app.use('/', walletMonitorRouter);
 
 const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
@@ -41,6 +45,7 @@ const latest_market_data = new Map();
 const symbol_cache = new Map(); 
 let ml_compiled_rule_func = () => false; 
 
+// 🛡️ Layer 1：實體巨頭與大廠品牌黑名單
 const BRAND_BLACKLIST = new Set([
     'OPENAI', 'CHATGPT', 'SORA', 'CLAUDE', 'GEMINI', 'NVIDIA', 'APPLE', 'META', 'GOOGLE', 'MICROSOFT', 'AMAZON', 'TSMC', 'AMD', 'INTEL',
     'GROK', 'ELON', 'MUSK', 'TRUMP', 'BIDEN', 'OBAMA', 'PUTIN', 'ZELENSKY', 'TATE', 'MRBEAST',
@@ -50,6 +55,9 @@ const BRAND_BLACKLIST = new Set([
     'BINANCE', 'COINBASE', 'KRAKEN', 'FTX', 'ALAMEDA', 'TETHER', 'CIRCLE', 'ZARA'
 ]);
 
+// ------------------------------------------------------------------
+// 2. 時光倒流護盾 & 訊號接收
+// ------------------------------------------------------------------
 redisSub.subscribe('price_updates', 'trending_signal'); 
 redisSub.on('message', (channel, message) => {
     if (channel === 'price_updates') {
@@ -73,6 +81,7 @@ redisSub.on('message', (channel, message) => {
     }
 });
 
+// 🤖 接收 monitor_guards 的 AI 體檢請求 (Event-Driven Watchdog)
 watchdogSub.subscribe('watchdog_alerts');
 watchdogSub.on('message', async (channel, message) => {
     if (channel === 'watchdog_alerts') {
@@ -120,6 +129,9 @@ watchdogSub.on('message', async (channel, message) => {
     }
 });
 
+// ------------------------------------------------------------------
+// 3. 🚨 OOM 防禦：記憶體清道夫
+// ------------------------------------------------------------------
 setInterval(() => {
     const now = Date.now();
     let cleanedCount = 0;
@@ -134,11 +146,15 @@ setInterval(() => {
     if (cleanedCount > 0) console.log(`🧹 [Garbage Collector] 已釋放 ${cleanedCount} 隻過期代幣的 RAM 緩存。`);
 }, 60 * 1000); 
 
+// ------------------------------------------------------------------
+// 4. DEFCON 6 秒接管 (智能護航版)
+// ------------------------------------------------------------------
 setInterval(async () => {
     if (!globalConfig.is_running) return;
     
     const portfolio = getPortfolio();
     const activeMints = portfolio.positions?.map(p => p.mint_address) || [];
+    
     if (activeMints.length === 0) return;
 
     const now = Date.now();
@@ -153,6 +169,7 @@ setInterval(async () => {
 
     if (deadMints.length > 0) {
         console.warn(`🚨 [DEFCON 6] Koyeb 查價中斷！有 ${deadMints.length} 隻持倉幣超過 6 秒無報價，啟動 Jupiter 救援！`);
+        
         try {
             const jupMints = [...deadMints, 'So11111111111111111111111111111111111111112'];
             const res = await axios.get(`https://api.jup.ag/price/v3?ids=${jupMints.join(',')}`, { timeout: 3000 });
@@ -172,6 +189,7 @@ setInterval(async () => {
             if (Object.keys(fallbackPayload).length > 0) {
                 await redisClient.publish('price_updates', JSON.stringify(fallbackPayload));
             }
+            
         } catch (err) {
             console.error(`❌ [Jupiter Rescue] 救援失敗: ${err.message}`);
         }
@@ -186,6 +204,9 @@ function runLayer1PhysicalFilter(symbol) {
     return true;
 }
 
+// ------------------------------------------------------------------
+// 5. Webhook 與保溫箱
+// ------------------------------------------------------------------
 app.post('/webhook/radar', (req, res) => {
     res.status(200).send('OK'); 
     setImmediate(async () => {
@@ -217,6 +238,9 @@ setInterval(async () => {
     } catch (e) {}
 }, 10000);
 
+// ------------------------------------------------------------------
+// 6. 100% 全自動狙擊漏斗 (三權分立計分版)
+// ------------------------------------------------------------------
 async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
     try {
         if (poolType === 'NEWBORN' && !canBuyMeme()) return;
@@ -232,6 +256,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         if (!secResult.isSafe) {
             console.log(`🛑 [Quant Reject] ${symbol} 未達基準: ${secResult.reason}`);
             
+            // 毒藥收集器：專門捕捉 Rug Pull / 貔貅陷阱 (寫入 DB 畀 ML 學習)
             const isRugTrap = marketData.l > 10000 && (
                 secResult.reason.includes('合約高危') || 
                 secResult.reason.includes('籌碼集中') || 
@@ -263,7 +288,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         console.log(`   - 🛡️ [Quant] 基礎物理審核通過，得分: ${quantScore}/20`);
 
         // 🧠 第二權：Python ML 大腦預測勝率 (滿分 65 分)
-        let mlScore = 32; 
+        let mlScore = 32; // 保底 (約 50% 勝率)
         let mlConfidenceMultiplier = 1.0; 
         
         try {
@@ -277,7 +302,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             console.warn(`   - ⚠️ [ML Brain] 離線或超時，無法獲取勝率預測 (給予預設 32 分)`);
         }
 
-        // 🗣️ 第三權：LLM 敘事與防山寨審批 (-15 分 到 +15 分)
+        // 🗣️ 第三權：LLM 敘事與防山寨審批 (-5 分 到 +15 分)
         const envStateStr = await redisClient.get('global_env_state');
         const envState = envStateStr ? JSON.parse(envStateStr) : { climate: 'CHOPPY' };
         
@@ -288,9 +313,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             const llmResult = await consensusService.runMemeConsensus(mint, marketData, { poolType, climate: envState.climate });
             llmScore = llmResult.narrative_score || 0;
             llmReason = llmResult.reason || "無解釋";
-            
-            // 🚨 FIX: 完美印出分數與理由
-            console.log(`   - 🗣️ [LLM Consensus] 敘事得分: ${llmScore > 0 ? '+' : ''}${llmScore} 分 | 簡評: ${llmReason}`);
         } catch (e) {
             console.warn(`   - ⚠️ [LLM Down] 敘事分析失敗，跳過 LLM 加減分。`);
         }
@@ -298,13 +320,17 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         // 🚀 4. 全自動發射決策 
         const finalScore = quantScore + mlScore + llmScore;
         
-        let buyThreshold = 70; 
+        let buyThreshold = 70; // 預設安全底線
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
             if (mlParamsStr) {
                 const mlParams = JSON.parse(mlParamsStr);
                 const currentClimate = envState.climate || 'CHOPPY';
-                buyThreshold = mlParams?.[poolType]?.[currentClimate]?.buyThreshold || mlParams?.buy_threshold || 70;
+                
+                // 深入 JSON 結構讀取及格線
+                buyThreshold = mlParams?.[poolType]?.[currentClimate]?.buyThreshold 
+                            || mlParams?.buy_threshold 
+                            || 70;
             }
         } catch(e) {
             console.warn(`⚠️ [Frontline] 讀取動態及格線失敗，使用預設值 70`);
@@ -339,6 +365,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
+            // 將邊緣幣放入 Shadow 追蹤
             if (finalScore >= (buyThreshold - 5)) {
                 const { data: config } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
                 if (config && config.trade_mode !== 'LIVE') {
@@ -364,9 +391,13 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
     } catch (err) {
         const symbol = symbol_cache.get(mint) || 'UNKNOWN';
         console.error(`❌ [Routing Error] 決策漏斗處理 ${symbol} (${mint}) 時發生崩潰:`, err.message);
+        if (err.stack) console.error(err.stack);
     }
 }
 
+// ------------------------------------------------------------------
+// 7. LP Burn 越獄接收器
+// ------------------------------------------------------------------
 burnSub.subscribe('lp_burn_alerts');
 burnSub.on('message', async (channel, message) => {
     if (channel === 'lp_burn_alerts') {
@@ -386,6 +417,9 @@ burnSub.on('message', async (channel, message) => {
     }
 });
 
+// ------------------------------------------------------------------
+// 8. 啟動程序
+// ------------------------------------------------------------------
 async function bootstrap() {
     console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.22 (三權分立 AI 天網) 啟動中...");
     
