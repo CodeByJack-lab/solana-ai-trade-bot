@@ -1,6 +1,7 @@
 // src/microservices/trade_frontline.js
 // 📝 檔案功能用途：V10.22 【獵人中樞】微服務 (Microservice Core)
 // 🚀 核心升級：修復 securityGuard.calculateQuantScore 函數呼叫名稱錯誤。實裝「三權分立」計分法 (Quant20+ML65+LLM15)。
+// 🛡️ 終極修復：修正 LLM 誤判空白幣 Bug (正確傳遞富文本 marketData)，及修復 buyThreshold 陣列讀取問題。
 
 require('dotenv').config();
 const express = require('express');
@@ -306,6 +307,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         try {
             // 🚀 記錄 ML 推論開始時間
             const mlStartTime = Date.now();
+            // 這裡傳純數字 marketData 畀 Python 是正確的
             const res = await axios.post('http://127.0.0.1:8000/predict', { features: marketData, type: poolType }, { timeout: 2000 });
             healthMonitor.recordAiLatency(Date.now() - mlStartTime);
 
@@ -329,7 +331,11 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             
             // 🚀 記錄 LLM 推論開始時間
             const llmStartTime = Date.now();
-            const llmResult = await consensusService.runMemeConsensus(mint, marketData, { poolType, climate: envState.climate });
+            
+            // 🚨 終極修復 1：把帶有真實 Name 和 Description 的富文本數據 secResult.marketData 傳給 LLM，避免它當作空白騙局幣！
+            const richMarketData = secResult.marketData || { symbol, name: symbol, description: '' };
+            const llmResult = await consensusService.runMemeConsensus(mint, richMarketData, { poolType, climate: envState.climate });
+            
             healthMonitor.recordAiLatency(Date.now() - llmStartTime);
 
             llmScore = llmResult.narrative_score || 0;
@@ -348,10 +354,13 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const mlParams = JSON.parse(mlParamsStr);
                 const currentClimate = envState.climate || 'CHOPPY';
                 
-                // 深入 JSON 結構讀取及格線
-                buyThreshold = mlParams?.[poolType]?.[currentClimate]?.buyThreshold 
-                            || mlParams?.buy_threshold 
-                            || 70;
+                // 🚨 終極修復 2：支援 Array 結構，精準抽出及格線，不再錯誤 fallback 去 70 分
+                const paramsArray = Array.isArray(mlParams) ? mlParams : (mlParams.data || []);
+                const targetParam = paramsArray.find(x => x.token_type === poolType && x.market_climate === currentClimate);
+                
+                if (targetParam && targetParam.buy_threshold) {
+                    buyThreshold = Number(targetParam.buy_threshold);
+                }
             }
         } catch(e) {
             console.warn(`⚠️ [Frontline] 讀取動態及格線失敗，使用預設值 70`);
@@ -377,6 +386,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const finalTradeAmountSol = parseFloat((baseAmount * safeMultiplier).toFixed(3));
                 console.log(`💰 [Sizing] 基礎注碼: ${baseAmount} SOL, 乘數: x${safeMultiplier} -> 最終下單: ${finalTradeAmountSol} SOL`);
 
+                // 這裡傳回給 tradeService 的 marketData 保持為純數字結構，符合 pnl 計算需求
                 await executeBuy(
                     mint, symbol, poolType, finalScore, 
                     `🤖 三權決策 (Q:${quantScore} + M:${mlScore} + L:${llmScore}) | LLM: ${llmReason}`, 
