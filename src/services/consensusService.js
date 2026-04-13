@@ -1,6 +1,6 @@
 // src/services/consensusService.js
 // 📝 檔案功能用途：V10.23 盲測版 AI 議事廳 (僅依賴 Symbol/Name 進行敘事鑒定)
-// 🚀 核心更新：動態適配 DB Prompts，權重物理下調至 10 分，徹底廢除 Description 注入。
+// 🚀 核心更新：修復 Cache 讀取 Object 導致的 .replace 錯誤，徹底廢除 Description 注入。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -26,15 +26,23 @@ class ConsensusService {
         }
 
         try {
-            // 🧠 從 cacheManager 拉取 DB 裡的 Prompt
-            let systemPrompt = cacheManager.cache.prompts?.get(promptId);
+            // 🧠 從 cacheManager 拉取 DB 裡的 Prompt (此處拉取到的可能是 Object)
+            let rawPromptData = cacheManager.cache.prompts?.get(promptId);
             
-            // ⚠️ Fallback 機制：如果 Redis/DB 未同步，使用內建盲測 Prompt
+            // 🛡️ 提取真正的字串內容 (處理 Object vs String 差異)
+            let systemPrompt = '';
+            if (rawPromptData && typeof rawPromptData === 'object' && rawPromptData.content) {
+                systemPrompt = rawPromptData.content;
+            } else if (typeof rawPromptData === 'string') {
+                systemPrompt = rawPromptData;
+            }
+            
+            // ⚠️ Fallback 機制：如果 Redis/DB 未同步或讀取失敗，使用內建盲測 Prompt
             if (!systemPrompt) {
                 systemPrompt = `You are an elite Crypto Narrative Analyst. Evaluate: Symbol: {{token_symbol}} Name: {{name}}. Output JSON format: {"narrative_score": <integer from -5 to +10>, "reason": "<string>"}. Guide: +8 to +10: Top-tier. +1 to +7: Good meme. 0: Neutral. -1 to -4: Copycat. -5: SCAM.`;
             }
 
-            // 🛡️ 動態注入變數 (完全移除了 .replace('{{desc}}', desc) 嘅邏輯)
+            // 🛡️ 動態注入變數 (完美解決 .replace is not a function 嘅 bug)
             systemPrompt = systemPrompt
                 .replace(/{{token_symbol}}/g, symbol)
                 .replace(/{{name}}/g, name);
@@ -66,7 +74,7 @@ class ConsensusService {
 
             const aiSignature = aiResult.ai_signature || 'GROQ_UNKNOWN';
             
-            // 🚨 物理邊界防護：強制卡死在 -5 到 +10 (就算 DB Prompt 被改錯，或者 AI 幻覺，Code 都會擋住)
+            // 🚨 物理邊界防護：強制卡死在 -5 到 +10
             let nScore = 0;
             if (aiResult.narrative_score !== undefined && !isNaN(aiResult.narrative_score)) {
                 nScore = parseInt(aiResult.narrative_score);
