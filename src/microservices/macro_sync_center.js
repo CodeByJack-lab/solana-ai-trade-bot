@@ -18,6 +18,9 @@ const { trendingMonitorService } = require('../services/trendingMonitorService')
 const { initPortfolio, getPortfolio } = require('../services/portfolioService'); 
 const { getSolPriceInHKD } = require('../services/priceService'); 
 
+// 🚀 引入維運中樞 (新增)
+const { healthMonitor } = require('../services/healthMonitor');
+
 // 🎯 引入 V9 孤兒排程
 const { janitorJob } = require('../jobs/janitorJob');
 const { graveyardJob } = require('../jobs/graveyardJob');
@@ -268,6 +271,9 @@ Output exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "<
             aiReasoning = parsedAI.reasoning || '無具體解釋';
             
             console.log(`🤖 [AI Macro] 判定: ${currentClimate} | 情感: ${newsScore} | 理由: ${aiReasoning}`);
+            
+            // 🚀 氣候更新成功，向 HealthMonitor 報平安
+            healthMonitor.setStatus('Macro_Sync_Center', '🟢 氣候監控中', `當前氣候: ${currentClimate}`);
 
         } catch (err) {
             console.warn(`⚠️ [AI Macro] 交叉分析失敗 (${err.message})，降級使用硬邏輯判斷。`);
@@ -276,6 +282,8 @@ Output exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "<
             } else if (metrics.sol_change >= 5.0 && winRate > 60) {
                 currentClimate = 'RAGING_BULL';
             }
+            // 🚀 氣候更新降級，向 HealthMonitor 報告
+            healthMonitor.setStatus('Macro_Sync_Center', '🟡 AI 分析超時，已降級硬邏輯', `降級氣候: ${currentClimate}`);
         }
 
         const envState = { climate: currentClimate, newsScore, jitoP50, timestamp: Date.now() };
@@ -404,6 +412,9 @@ async function bootstrap() {
     janitorJob.start();
     graveyardJob.start();
     retrospectiveJob.start();
+
+    // 🚀 新增：啟動時寫入 Database 報平安
+    await healthMonitor.setStatus('Macro_Sync_Center', '🟢 氣候監控中');
 
     // 💓 🎯 [Dashboard Heartbeat] 每 60 秒更新 bot_status，向前端 Dashboard 報平安
     setInterval(async () => {

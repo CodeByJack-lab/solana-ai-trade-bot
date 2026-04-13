@@ -21,6 +21,9 @@ const { walletMonitorRouter } = require('../services/walletMonitor');
 const { keyRotator } = require('../services/keyRotator'); 
 const { cacheManager } = require('../services/cacheManager'); 
 
+// 🚀 引入維運中樞 (新增)
+const { healthMonitor } = require('../services/healthMonitor');
+
 // ------------------------------------------------------------------
 // 1. 初始化與全域防禦變數
 // ------------------------------------------------------------------
@@ -61,6 +64,9 @@ const BRAND_BLACKLIST = new Set([
 redisSub.subscribe('price_updates', 'trending_signal'); 
 redisSub.on('message', (channel, message) => {
     if (channel === 'price_updates') {
+        // 🚀 新增：記錄 Koyeb 心跳，證明 PriceBot 仲生存緊
+        healthMonitor.recordHeartbeat('PriceBot_Koyeb');
+        
         try {
             const payload = JSON.parse(message);
             for (const [mint, data] of Object.entries(payload)) {
@@ -95,6 +101,9 @@ watchdogSub.on('message', async (channel, message) => {
             });
             const dataPrompt = `${aiConfig.parsedPrompt}\n[Hard Data] CVD Slope: ${cvd.toFixed(0)}, VWAP Dev: ${vwap_dev.toFixed(2)}%, Volatility: ${volatility.toFixed(4)}`;
 
+            // 🚀 記錄 AI 請求開始時間 (計算 Latency)
+            const aiStartTime = Date.now();
+
             const decision = await keyRotator.enqueueRequest('MISTRAL', async (apiKey) => {
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
                 const res = await axios.post('https://api.mistral.ai/v1/chat/completions', {
@@ -104,6 +113,9 @@ watchdogSub.on('message', async (channel, message) => {
                 }, { headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' }, timeout: 15000 });
                 return JSON.parse(res.data.choices[0].message.content);
             }, 'POSITION_WATCHDOG');
+
+            // 🚀 記錄 AI 延遲
+            healthMonitor.recordAiLatency(Date.now() - aiStartTime);
 
             console.log(`🤖 [AI Watchdog] $${symbol} | 判定: ${decision.action} | 理由: ${decision.thought_process}`);
 
@@ -292,7 +304,11 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         let mlConfidenceMultiplier = 1.0; 
         
         try {
+            // 🚀 記錄 ML 推論開始時間
+            const mlStartTime = Date.now();
             const res = await axios.post('http://127.0.0.1:8000/predict', { features: marketData, type: poolType }, { timeout: 2000 });
+            healthMonitor.recordAiLatency(Date.now() - mlStartTime);
+
             if (res.data && typeof res.data.win_probability === 'number') {
                 mlScore = res.data.score || 0; 
                 mlConfidenceMultiplier = res.data.confidence_multiplier || 1.0;
@@ -310,7 +326,12 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         let llmReason = "LLM 未啟用";
         try {
             console.log(`   - 🧠 [LLM Consensus] 發起 ${symbol} 的敘事潛力會議...`);
+            
+            // 🚀 記錄 LLM 推論開始時間
+            const llmStartTime = Date.now();
             const llmResult = await consensusService.runMemeConsensus(mint, marketData, { poolType, climate: envState.climate });
+            healthMonitor.recordAiLatency(Date.now() - llmStartTime);
+
             llmScore = llmResult.narrative_score || 0;
             llmReason = llmResult.reason || "無解釋";
         } catch (e) {
@@ -434,6 +455,9 @@ async function bootstrap() {
         console.log(`🌐 [Frontline] Webhook 閘口開啟，Port ${PORT} (1ms 防堵塞機制啟動)`);
     });
     sourceAggregator.start();
+    
+    // 🚀 新增：啟動時寫入 Database 報平安
+    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中');
 }
 
 bootstrap();

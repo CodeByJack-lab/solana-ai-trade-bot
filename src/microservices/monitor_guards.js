@@ -12,6 +12,9 @@ const { getPortfolio, initPortfolio } = require('../services/portfolioService');
 const { runSellPipeline } = require('../services/tradeService');
 const { fallbackEscapeService } = require('../services/fallbackEscapeService');
 
+// 🚀 引入維運中樞 (新增)
+const { healthMonitor } = require('../services/healthMonitor');
+
 // ------------------------------------------------------------------
 // 1. 初始化與全域防禦變數
 // ------------------------------------------------------------------
@@ -323,6 +326,10 @@ setInterval(async () => {
 async function bootstrap() {
     console.log("🛡️ SOL QUANT MONITOR_GUARDS V10 (護盤鐵衛) 啟動中...");
     await initPortfolio();
+    
+    // 🚀 新增：啟動時寫入 Database 報平安
+    await healthMonitor.setStatus('Monitor_Guards', '🟢 鐵衛巡邏中');
+    
     console.log("   - O(1) Float64Array 數學引擎已就緒 (含 CVD 量價背離過濾與 Watchdog 廣播)。");
     console.log("   - 1 分鐘冷啟動靜默期與 Redis 併發平倉鎖已就緒。");
     console.log("   - 實體隔離逃生艙與 LIQUIDATE_ALL 全域強平通道已就緒。");
