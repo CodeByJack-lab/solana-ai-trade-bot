@@ -366,7 +366,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
             // 將邊緣幣放入 Shadow 追蹤
-            if (finalScore >= (buyThreshold - 5)) {
+            if (finalScore >= (buyThreshold - 10)) {
                 const { data: config } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
                 if (config && config.trade_mode !== 'LIVE') {
                      console.log(`👻 [Shadow] ${symbol} 分數邊緣 (${finalScore})，收入 Shadow 觀察池供 ML 學習。`);
