@@ -1,6 +1,6 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V10.21 終極防彈版 AI 議事廳 (文科生敘事與防山寨中樞)。
-// 🚀 升級功能：剝奪 LLM 一票否決權及價格計算權，轉型為純粹的「敘事評分器 (-15 到 +15)」。
+// 📝 檔案功能用途：V10.22 終極防彈版 AI 議事廳 (文科生敘事與防山寨中樞)。
+// 🚀 升級功能：響應指揮官要求，將 LLM 最大扣分幅度限制為 -5，防止錯殺良民 (範圍: -5 到 +15)。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -42,7 +42,7 @@ class ConsensusService {
             h1: marketData.h1 ? marketData.h1.toFixed(2) : 0 
         });
 
-        // 強制注入防山寨指令，限制 LLM 只能輸出加減分數 (-15 to +15)
+        // 🚨 FIX: Prompt 指引改為 -5 到 +15
         const formatInstruction = `\n\n[CRITICAL INSTRUCTION FOR V10 SYSTEM]
 You are NO LONGER making BUY or VETO decisions. Your ONLY job is to evaluate the narrative, detect cult potential, and heavily penalize fake/impersonation tokens.
 
@@ -53,7 +53,7 @@ Description: ${desc}
 
 You MUST output EXACTLY this JSON format (no extra text):
 {
-  "narrative_score": <integer from -15 to +15>,
+  "narrative_score": <integer from -5 to +15>,
   "reason": "<short explanation>"
 }
 
@@ -61,8 +61,8 @@ Scoring Guide:
 +10 to +15: Top-tier narrative (e.g., AI Agent, Elon Musk latest trend), highly original, strong cult potential.
 +1 to +9: Good normal meme, clear concept, no red flags.
 0: Uncertain, lack of info, or neutral. If you are unsure if it's a scam, give 0.
--5 to -10: Emotional manipulation ("buy or stay poor", "guaranteed 100x"), low-effort copycat.
--15: FAKE / IMPERSONATION. If it attempts to mimic famous brands, celebrities, countries, or tickers but looks like a suspicious variation (e.g., "AppIe", "E1on", "OPENAI", "USAOIL"), apply MAXIMUM PENALTY!`;
+-1 to -4: Emotional manipulation ("buy or stay poor"), low-effort copycat.
+-5: FAKE / IMPERSONATION. If it attempts to mimic famous brands, celebrities, countries, or tickers but looks like a suspicious variation (e.g., "AppIe", "E1on", "OPENAI", "USAOIL"), apply MAXIMUM PENALTY (-5)!`;
 
         const prompt = aiConfig.parsedPrompt + formatInstruction;
 
@@ -107,16 +107,18 @@ Scoring Guide:
 
             const aiSignature = aiResult.ai_signature || 'GROQ_UNKNOWN';
             
-            // 🚨 FIX: 強制限制在 -15 到 +15 之間，配合三權分立！
+            // 🚨 FIX: 邊界防護卡死在 -5 到 +15
             let nScore = 0;
             if (aiResult.narrative_score !== undefined && !isNaN(aiResult.narrative_score)) {
                 nScore = parseInt(aiResult.narrative_score);
-                nScore = Math.max(-15, Math.min(15, nScore)); 
+                nScore = Math.max(-5, Math.min(15, nScore)); 
             }
 
-            console.log(`[Consensus] 🗣️ LLM 敘事評分: ${nScore > 0 ? '+' : ''}${nScore} 分`);
+            const aiReason = aiResult.reason || '無解釋';
+            
+            console.log(`[Consensus] 🗣️ LLM 敘事評分: ${nScore > 0 ? '+' : ''}${nScore} 分 | 理由: ${aiReason}`);
 
-            return { narrative_score: nScore, reason: `[${aiSignature}] ${aiResult.reason || '無解釋'}` };
+            return { narrative_score: nScore, reason: `[${aiSignature}] ${aiReason}` };
 
         } catch (err) {
             console.warn(`⚠️ [Consensus] LLM 敘事鑒定異常或全線冷卻，跳過加減分: ${err.message}`);
@@ -124,7 +126,6 @@ Scoring Guide:
         }
     }
 
-    // Watchdog Consensus 保留不變
     async runWatchdogConsensus(mint, symbol, pnl, cvd, vwap_dev, volatility, climate) {
         return { action: 'HOLD', reason: 'Fallback to Math Guard' }; 
     }
