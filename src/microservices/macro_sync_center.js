@@ -111,6 +111,12 @@ async function syncCoreConfigsToRedis() {
             console.log(`🛡️ [Hot Cache] 已同步 ${brandArray.length} 個動態品牌黑名單至 Redis。`);
         }
         
+        const { data: mlParams } = await supabase.from('ml_strategy_params').select('*');
+        if (mlParams) {
+            await redis.set('ml_strategy_params', JSON.stringify(mlParams));
+            console.log(`🧠 [Hot Cache] 已同步 ${mlParams.length} 組 ML 策略參數至 Redis。`);
+        }
+
         console.log('✅ [Hot Cache] 神經網絡與黑名單緩存同步完成！');
     } catch (e) {
         console.error('❌ [Hot Cache] 同步失敗:', e.message);
@@ -125,6 +131,7 @@ function setupRealtimeListeners() {
            .on('postgres_changes', { event: '*', schema: 'public', table: 'ai_strategy_params' }, syncCoreConfigsToRedis)
            .on('postgres_changes', { event: '*', schema: 'public', table: 'ml_blacklist_rules' }, syncCoreConfigsToRedis)
            .on('postgres_changes', { event: '*', schema: 'public', table: 'brand_blacklist' }, syncCoreConfigsToRedis)
+           .on('postgres_changes', { event: '*', schema: 'public', table: 'ml_strategy_params' }, syncCoreConfigsToRedis)
            .subscribe();
 }
 
