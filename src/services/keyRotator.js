@@ -1,6 +1,6 @@
 // src/services/keyRotator.js
 // 📝 檔案功能用途：AI 金鑰輪替與佇列排程器。
-// 🚀 核心升級：實裝「1秒絕對冷卻 (Free Tier Survival)」，同一條 Key 用完 1 秒內絕對不再派發，防止 429。
+// 🚀 核心升級：實裝「1秒絕對冷卻 (Free Tier Survival)」與排隊機制，完美適配 V10 高頻防爆。
 
 const config = require('../config/config');
 
@@ -105,6 +105,14 @@ class KeyRotator {
             });
             this._processQueue();
         });
+    }
+
+    // 🚀 新增：完美橋樑！將 consensusService 的呼叫轉接入 Queue 系統
+    async runWithKey(providerName, taskFn, promptId = 'default') {
+        return this.enqueueRequest(providerName, async (apiKey) => {
+            // 將 API Key 注入，並將 modelName 設為 null 交由外部處理 fallback
+            return await taskFn(apiKey, null, providerName);
+        }, promptId);
     }
 }
 
