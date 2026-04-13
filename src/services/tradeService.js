@@ -1,23 +1,17 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10.18 交易執行大腦 (Microservice Core)
-// 🚀 核心升級：Redis 鎖 10秒自動降級、Jupiter 單跳板流動性鎖定、Shadow/Main 雙軌歸檔。
-// 🛡️ 終極修復：拔除假賣出函數，正式接軌 liveTradeService 與 fallbackEscapeService。加入 ML 動態注碼與策略 ID 歸檔。
+// 📝 檔案功能及用途：V10.22 交易執行大腦 (Microservice Core)
+// 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！動態感應 Dashboard 的 LIVE/PAPER 模式。
 
 require('dotenv').config();
 const axios = require('axios');
 const Redis = require('ioredis');
+const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
-const { PublicKey } = require('@solana/web3.js');
 const { getPortfolio } = require('./portfolioService');
 const { sendTelegramAlert } = require('./telegramService');
 const { fallbackEscapeService } = require('./fallbackEscapeService');
-
-// 🚨 FIX 1: 引入真正的實盤 Jito 發射器
 const { executeLiveSwapUAT } = require('./liveTradeService');
 
-// ------------------------------------------------------------------
-// 1. 初始化與全域變數
-// ------------------------------------------------------------------
 const supabase = createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL,
     process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY
@@ -26,15 +20,11 @@ const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL ||
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-// ------------------------------------------------------------------
-// 2. 獲取 Jupiter 報價 (修復小數位與流動性幻象)
-// ------------------------------------------------------------------
 async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyType = 'NEWBORN') {
     try {
         const inputMint = isBuy ? SOL_MINT : mint;
         const outputMint = isBuy ? mint : SOL_MINT;
         
-        // 🚨 FIX 2: 處理賣出時的 Token 小數位 (Meme 幣預設 6 位，SOL 為 9 位)
         const decimals = isBuy ? 9 : 6;
         const amountRaw = Math.floor(amount * Math.pow(10, decimals));
 
@@ -63,26 +53,49 @@ async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyTy
     }
 }
 
-// ------------------------------------------------------------------
-// 3. 執行買入 (Shadow vs Main 雙腦不對稱路由分配)
-// ------------------------------------------------------------------
-// 🚀 V10.18 升級：接收 finalTradeAmountSol, appliedMlStrategyId, safeMultiplier
 async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalTradeAmountSol, marketData, envState, appliedMlStrategyId = 0, safeMultiplier = 1.0) {
     try {
         console.log(`🛒 [Trade Service] 準備買入 ${symbol} (${mint}) | 分數: ${aiScore} | 注碼: ${finalTradeAmountSol} SOL`);
 
-        // 根據 Quant + ML + LLM 的總分決定入邊條 Route
-        const isShadow = aiScore < 80; 
-        
-        // 🚨 使用動態注碼向 Jupiter 攞 Quote
+        // 動態讀取系統設定的 Trade Mode，不再寫死 process.env
+        const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
+        const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
+
+        // 決定是否入 Shadow 池 (例如 80 分以下)
+        let buyThreshold = 70;
+        try {
+            const mlParamsStr = await redis.get('ml_strategy_params');
+            if (mlParamsStr) {
+                const mlParams = JSON.parse(mlParamsStr);
+                const currentClimate = envState.climate || 'CHOPPY';
+                const poolType = strategyVersion.includes('NEWBORN') ? 'NEWBORN' : 'TRENDING';
+                buyThreshold = mlParams?.[poolType]?.[currentClimate]?.buyThreshold || 70;
+            }
+        } catch(e) {}
+        const isShadow = aiScore < buyThreshold; 
+
         const quote = await getJupiterFinalQuote(mint, true, finalTradeAmountSol, 500, strategyVersion);
-        if (!quote) {
+        if (!quote || !quote.quoteResponse) {
             console.log(`⚠️ [Trade Service] 無法獲取 ${symbol} 的 Jupiter 買入報價，放棄交易。`);
             return false;
         }
 
         const entryPrice = quote.pricePerToken;
-        const mode = process.env.TRADE_MODE || 'PAPER';
+        let txid = `BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`; // 模擬 TXID 預設值
+
+        // 🚨 真金白銀發射區：實盤模式必須真正上鏈買入！
+        if (!isShadow && mode === 'LIVE') {
+            console.log(`⚡ [Live Engine] 觸發實盤買入: ${symbol}`);
+            const buyResult = await executeLiveSwapUAT(quote.quoteResponse, 'BUY', reason);
+            
+            if (buyResult && buyResult.success) {
+                txid = buyResult.txid;
+                console.log(`🎉 [Live Trade] ${symbol} 真實買入成功！TX: ${txid}`);
+            } else {
+                console.error(`❌ [Live Trade] ${symbol} 真實買入失敗或超時，中止建倉！`);
+                return false; // 買入失敗，絕對不可寫入 Database！
+            }
+        }
 
         const positionData = {
             mint_address: mint,
@@ -93,7 +106,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             quantity: (finalTradeAmountSol / entryPrice),
             ai_score: aiScore,
             ai_reason: reason,
-            buy_dex_label: 'JUPITER_DIRECT',
+            buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER',
         };
 
         if (isShadow) {
@@ -102,9 +115,8 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         } else {
             const tableName = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
             await supabase.from(tableName).insert([positionData]);
-            console.log(`⚔️ [Main Route] ${symbol} 已建立真實/模擬倉位！`);
+            console.log(`⚔️ [Main Route] ${symbol} 已建立 ${mode} 倉位！`);
             
-            // 📝 記錄買入歷史，包含 ML 參數 (供未來覆盤)
             const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
             await supabase.from(historyTable).insert([{
                 token_mint: mint,
@@ -120,16 +132,16 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
                 total_value_sol: finalTradeAmountSol,
                 realized_pnl_pct: 0,
                 realized_pnl_sol: 0,
-                txid: `BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`, // 模擬 TXID
+                txid: txid, 
                 market_climate: envState.climate || 'UNKNOWN',
                 entry_liquidity_usd: marketData.l || 0,
                 entry_volume_5m_usd: marketData.v || 0,
-                applied_ml_strategy_id: appliedMlStrategyId, // 🚀 記錄用咗邊條 ML Rule
-                ml_confidence_multiplier: safeMultiplier     // 🚀 記錄 ML 畀嘅注碼乘數
+                applied_ml_strategy_id: appliedMlStrategyId, 
+                ml_confidence_multiplier: safeMultiplier     
             }]);
 
             if (typeof sendTelegramAlert === 'function') {
-                await sendTelegramAlert(`🟢 <b>買入建倉</b>\n幣種: <b>${symbol}</b>\n模式: ${mode}\n策略: ${strategyVersion} (ID: ${appliedMlStrategyId})\n分數: ${aiScore}\n注碼: ${finalTradeAmountSol} SOL (${safeMultiplier}x)\n買入價: ${entryPrice.toFixed(8)} SOL`);
+                await sendTelegramAlert(`🟢 <b>買入建倉</b>\n幣種: <b>${symbol}</b>\n模式: ${mode}\n策略: ${strategyVersion} (ID: ${appliedMlStrategyId})\n分數: ${aiScore}\n注碼: ${finalTradeAmountSol} SOL (${safeMultiplier}x)\n買入價: ${entryPrice.toFixed(8)} SOL\nTX: <code>${txid}</code>`);
             }
         }
         return true;
@@ -139,9 +151,6 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
     }
 }
 
-// ------------------------------------------------------------------
-// 4. 執行賣出與歸檔 (正式接軌 Jito 與逃生艙)
-// ------------------------------------------------------------------
 async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
     const mint = position.mint_address;
     const lockKey = `sell_lock:${mint}`;
@@ -150,15 +159,12 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
     try {
         const sellQuantity = position.quantity * fraction;
-
-        // 1. 獲取真實賣出報價 (放寬至 15% 滑點供市價出逃)
         const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || 'v10');
 
         let txid = null;
         let success = false;
 
         if (quoteData && quoteData.quoteResponse) {
-            // 🚨 FIX 3: 呼叫真實的 liveTradeService，並維持 10秒爆鎖防禦
             const txPromise = executeLiveSwapUAT(quoteData.quoteResponse, 'SELL', reason);
             const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TX_TIMEOUT')), 10000));
 
@@ -175,7 +181,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             console.warn(`⚠️ [Trade Service] 無法獲取 Jupiter 賣出報價！`);
         }
 
-        // 🚨 FIX 4: 逃生艙完美接入！如果常規 Jito 失敗/超時/無報價，立刻啟動黑客級砸盤
         if (!success) {
             console.log(`🚨 [Sell Pipeline] 常規賣出失敗，啟動神風逃生艙！`);
             const escapeResult = await fallbackEscapeService.executeEscape(position, sellQuantity);
@@ -189,17 +194,16 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             }
         }
 
-        // 🧮 計算 PnL 與清理數據庫
         const entryPrice = position.entry_price_sol;
         const realizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
         const isShadow = position.strategy_version?.includes('shadow') || false; 
 
+        // 清理活動倉位
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
         for (const table of activeTables) {
             await supabase.from(table).delete().eq('mint_address', mint);
         }
 
-        // 📦 雙重歸檔機制
         const climateStr = await redis.get('global_env_state');
         const climate = climateStr ? JSON.parse(climateStr).climate : 'UNKNOWN';
 
@@ -216,7 +220,10 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         }]);
 
         if (!isShadow) {
-            const historyTable = process.env.TRADE_MODE === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
+            const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
+            const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
+
+            const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
             await supabase.from(historyTable).insert([{
                 token_mint: mint,
                 token_symbol: position.token_symbol,
@@ -231,12 +238,11 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                 realized_pnl_sol: (currentPrice - entryPrice) * sellQuantity,
                 txid: txid,
                 market_climate: climate,
-                // 賣出時雖然冇產生新 ML ID，但可以留空或填 0
             }]);
 
             if (typeof sendTelegramAlert === 'function') {
                 const icon = realizedPnlPct > 0 ? '🟢' : '🔴';
-                await sendTelegramAlert(`${icon} <b>平倉結算</b>\n幣種: <b>${position.token_symbol}</b>\n原因: ${reason}\n利潤: ${realizedPnlPct.toFixed(2)}%\nTX: <code>${txid}</code>`);
+                await sendTelegramAlert(`${icon} <b>平倉結算</b>\n幣種: <b>${position.token_symbol}</b>\n模式: ${mode}\n原因: ${reason}\n利潤: ${realizedPnlPct.toFixed(2)}%\nTX: <code>${txid}</code>`);
             }
         }
 
@@ -245,7 +251,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
     } catch (err) {
         console.error(`❌ [Sell Pipeline] 平倉異常:`, err.message);
-        // 主動爆鎖，避免假死
         await redis.del(lockKey);
         return false;
     }
