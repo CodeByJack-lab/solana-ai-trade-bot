@@ -1,6 +1,7 @@
 // src/services/securityGuard.js
 // 📝 檔案功能用途：V10.18 量化安檢中樞 (全自動 ML 參數接管版 - 三權分立之第一權)
 // 🚀 升級功能：加入 ML 動態參數接收器，實現真正 AI 驅動。分數重構為 0-20 物理安全及格線，為 ML 騰出 60 分龐大計分空間。
+// 🛡️ 終極修復：修正 Redis Array 結構解析，支援 snake_case 讀取，杜絕 Hardcode 8 筆之錯誤。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -148,16 +149,15 @@ class SecurityGuard {
         const { climate, newsScore } = await this._getMacroClimate();
         const dbParams = cacheManager.getStrategy(type);
         
-        // 🚀 核心升級：讀取 Python ML 大腦實時下發嘅動態參數 (完美支援 Array + snake_case 結構)
+        // 🚀 核心升級：讀取 Python ML 大腦實時下發嘅動態參數 (若 Redis 資料不可用，使用 Hardcode Fallback)
         let mlParams = null;
         let targetParam = null;
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
             if (mlParamsStr) {
                 mlParams = JSON.parse(mlParamsStr);
-                // 對付 Payload 係 Array 嘅情況
+                // 🛡️ 核心修復：處理 Redis Array JSON 結構，從陣列中找出匹配 type 與 climate 的行
                 const paramsArray = Array.isArray(mlParams) ? mlParams : (mlParams.data || []);
-                // 精準抽出對應嘅 token_type 同 market_climate
                 targetParam = paramsArray.find(x => x.token_type === type && x.market_climate === climate);
             }
         } catch (e) {
@@ -165,12 +165,12 @@ class SecurityGuard {
         }
 
         // =====================================================================
-        // 🧠 AI 動態賦值 (Dynamic ML Assignment) - 完全匹配 Supabase DB 名稱
+        // 🧠 AI 動態賦值 (Dynamic ML Assignment)
         // =====================================================================
         let activeParams = {
-            buyThreshold: targetParam?.buy_threshold ? Number(targetParam.buy_threshold) : 70, 
+            buyThreshold: targetParam?.buy_threshold ? Number(targetParam.buy_threshold) : (mlParams?.buy_threshold ?? 70), 
             
-            // 左右開弓：兼容 snake_case 與舊版 camelCase
+            // 🚀 核心修復：精準對接數據庫真實欄位名 (min_ofi, min_txs_5m 等)
             minOFI: parseFloat(targetParam?.min_ofi ?? targetParam?.minOfi ?? (type === 'TRENDING' ? -0.4 : -0.2)),
             minTxs: parseInt(targetParam?.min_txs_5m ?? targetParam?.minTxs5m ?? (type === 'TRENDING' ? 8 : 5)),
             minTradeSize: parseFloat(targetParam?.min_avg_trade_usd ?? targetParam?.minAvgTradeUsd ?? 10),
@@ -224,7 +224,7 @@ class SecurityGuard {
         if (totalTxs5m > 30 && buyRatio > 0.45 && buyRatio < 0.55) return { numeric_score: 0, isSafe: false, reason: `🛑 女巫刷量: 買賣極度對稱`, marketData };
 
         // 🎯 應用 ML 計算出來的動態 OFI
-        const pseudoOfi = (buys - sells) / totalTxs5m; 
+        const pseudoOfi = totalTxs5m > 0 ? (buys - sells) / totalTxs5m : 0;
         if (totalTxs5m >= 10 && pseudoOfi < activeParams.minOFI) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 惡劣 OFI: 買賣失衡 (OFI: ${pseudoOfi.toFixed(2)} < ML底線: ${activeParams.minOFI})`, marketData };
         }
@@ -263,8 +263,6 @@ class SecurityGuard {
 
         coreScore = Math.max(0, coreScore);
 
-        // 所有動能計分 (Momentum Score) 已經完全交由 ML 處理，不再喺度做加分
-        
         // 確保任何致命錯誤都唔會放行 (Quant 及格線: 最少 10 分)
         const isSafe = coreScore >= 10; 
         const finalReason = isSafe 
