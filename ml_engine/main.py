@@ -1,6 +1,6 @@
 # ml_engine/main.py
-# 📝 檔案功能用途：V10.22 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：完美對齊合併版 Schema，全面由 ml_strategy_params 讀寫 lookback, ema_alpha, SL/TP。
+# 📝 檔案功能用途：V10.23 【Python 雙塔融合智腦】 (Microservice Core)
+# 🚀 核心升級：配合 V10.23 三權分立架構，ML 權重滿分上調至 70 分。
 # 🛡️ 數據防護：加入 np.inf 洗刷機制，絕對防止 Random Forest 被 Infinity 搞崩潰。
 
 import os
@@ -49,7 +49,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=background_scheduler, daemon=True).start()
     yield 
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.22", lifespan=lifespan)
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.23", lifespan=lifespan)
 
 # ------------------------------------------------------------------
 # 2. 即時推論端點
@@ -102,7 +102,8 @@ async def predict_score(req: PredictRequest):
     survival_prob += macro_adjustment
     survival_prob = max(0.0, min(1.0, survival_prob)) 
 
-    final_score = round(survival_prob * 65)
+    # 🚀 V10.23 核心升級：將滿分由 65 提升至 70
+    final_score = round(survival_prob * 70)
 
     multiplier = 1.0
     if survival_prob < 0.4:
