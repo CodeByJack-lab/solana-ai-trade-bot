@@ -1,6 +1,7 @@
 // src/services/tradeService.js
 // 📝 檔案功能及用途：V10.22 交易執行大腦 (Microservice Core)
 // 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！動態感應 Dashboard 的 LIVE/PAPER 模式。
+// 🛡️ 數據防護：加入 Infinity PnL 阻截機制，防止 entry_price 為 0 時搞冧 ML 大腦。
 
 require('dotenv').config();
 const axios = require('axios');
@@ -57,11 +58,9 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
     try {
         console.log(`🛒 [Trade Service] 準備買入 ${symbol} (${mint}) | 分數: ${aiScore} | 注碼: ${finalTradeAmountSol} SOL`);
 
-        // 動態讀取系統設定的 Trade Mode，不再寫死 process.env
         const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
         const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
 
-        // 決定是否入 Shadow 池 (例如 80 分以下)
         let buyThreshold = 70;
         try {
             const mlParamsStr = await redis.get('ml_strategy_params');
@@ -81,9 +80,8 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         }
 
         const entryPrice = quote.pricePerToken;
-        let txid = `BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`; // 模擬 TXID 預設值
+        let txid = `BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`; 
 
-        // 🚨 真金白銀發射區：實盤模式必須真正上鏈買入！
         if (!isShadow && mode === 'LIVE') {
             console.log(`⚡ [Live Engine] 觸發實盤買入: ${symbol}`);
             const buyResult = await executeLiveSwapUAT(quote.quoteResponse, 'BUY', reason);
@@ -93,7 +91,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
                 console.log(`🎉 [Live Trade] ${symbol} 真實買入成功！TX: ${txid}`);
             } else {
                 console.error(`❌ [Live Trade] ${symbol} 真實買入失敗或超時，中止建倉！`);
-                return false; // 買入失敗，絕對不可寫入 Database！
+                return false; 
             }
         }
 
@@ -194,11 +192,17 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             }
         }
 
-        const entryPrice = position.entry_price_sol;
-        const realizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
+        // 🚨 PREVENT INFINITY BUG: 確保 entryPrice 大於 0
+        const entryPrice = position.entry_price_sol || 0;
+        let realizedPnlPct = 0;
+        if (entryPrice > 0) {
+            realizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
+        } else {
+            console.warn(`⚠️ [Sell Pipeline] 警告: ${position.token_symbol} 入場價為 0，已強制將 PnL% 歸零以防 ML 大腦崩潰！`);
+        }
+        
         const isShadow = position.strategy_version?.includes('shadow') || false; 
 
-        // 清理活動倉位
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
         for (const table of activeTables) {
             await supabase.from(table).delete().eq('mint_address', mint);
@@ -216,7 +220,10 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             max_vwap_deviation: position.max_vwap_dev || 0, 
             final_cvd_slope: position.final_cvd_slope || 0,
             realized_pnl_pct: realizedPnlPct,
-            market_climate: climate
+            market_climate: climate,
+            entry_price_sol: entryPrice, // 補回紀錄供參考
+            entry_volume_5m: position.entry_volume_5m_usd || 0,
+            token_symbol: position.token_symbol || 'UNKNOWN'
         }]);
 
         if (!isShadow) {

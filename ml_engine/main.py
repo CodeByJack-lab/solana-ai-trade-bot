@@ -1,6 +1,7 @@
 # ml_engine/main.py
 # 📝 檔案功能用途：V10.22 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：完美對齊合併版 Schema，全面由 ml_strategy_params 讀寫 lookback, ema_alpha, SL/TP，徹底廢除 ai_strategy_params。
+# 🚀 核心升級：完美對齊合併版 Schema，全面由 ml_strategy_params 讀寫 lookback, ema_alpha, SL/TP。
+# 🛡️ 數據防護：加入 np.inf 洗刷機制，絕對防止 Random Forest 被 Infinity 搞崩潰。
 
 import os
 import json
@@ -179,7 +180,6 @@ def evolve_param(old_val, target_val, alpha, min_bound, max_bound):
 def execute_evolution_pipeline():
     print(f"🚀 [ML Engine] 啟動大數據訓練管線 (觸發時間: {datetime.now(timezone.utc).isoformat()})...")
     try:
-        # 🚨 對齊 Schema：從 ml_strategy_params 讀取全局機器學習參數 (讀取任意一行即可獲得全局設定)
         resp = supabase.table('ml_strategy_params').select('*').limit(1).execute()
         params = resp.data[0] if resp.data else {}
 
@@ -191,10 +191,14 @@ def execute_evolution_pipeline():
             print("⚠️ [ML Engine] 歷史樣本庫不足 (需至少 10 條)，中止訓練。請讓系統空轉收集數據。")
             return
 
+        # 🚨 PREVENT INFINITY BUG: 強制洗刷 DataFrame，消滅所有 Infinity 數據
         df['realized_pnl_pct'] = pd.to_numeric(df['realized_pnl_pct'], errors='coerce').fillna(0)
         df['entry_ofi'] = pd.to_numeric(df['entry_ofi'], errors='coerce').fillna(0)
         df['entry_liquidity_usd'] = pd.to_numeric(df['entry_liquidity_usd'], errors='coerce').fillna(0)
         df['entry_volume_5m_usd'] = pd.to_numeric(df.get('entry_volume_5m_usd', df.get('entry_volume_5m', 0)), errors='coerce').fillna(0)
+        
+        # 核心淨化：將所有 numpy infinity 替換為 0
+        df.replace([np.inf, -np.inf], 0, inplace=True)
         
         now_utc = pd.Timestamp.utcnow()
         df['created_at'] = pd.to_datetime(df['created_at'], utc=True, errors='coerce')
@@ -284,7 +288,6 @@ def execute_evolution_pipeline():
         redis_client.set("cache:dynamic_scoring_model", json.dumps(dynamic_model))
         redis_client.set("ml_strategy_params", json.dumps(evolved_params))
         
-        # 🚨 寫入 Supabase：將所有進化後的參數 (包含 Stop Loss & TP) 寫入 ml_strategy_params 對應的情境行
         for t_type, climates in evolved_params.items():
             if t_type in ['NEWBORN', 'TRENDING']:
                 for cli, p in climates.items():
@@ -296,8 +299,8 @@ def execute_evolution_pipeline():
                             'min_avg_trade_usd': p['minAvgTradeUsd'],
                             'max_turnover_5m': p['maxTurnover5m'],
                             'zombie_vol_req': p['zombieVolReq'],
-                            'stop_loss_pct': round(final_sl, 2),        # 統一寫入 ml_strategy_params
-                            'trailing_tp_trigger': round(final_tp, 2),  # 統一寫入 ml_strategy_params
+                            'stop_loss_pct': round(final_sl, 2),
+                            'trailing_tp_trigger': round(final_tp, 2),
                             'updated_at': datetime.now(timezone.utc).isoformat()
                         }).eq('token_type', t_type).eq('market_climate', cli).execute()
                     except Exception as e:
