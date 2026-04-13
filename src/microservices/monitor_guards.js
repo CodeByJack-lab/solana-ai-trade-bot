@@ -1,9 +1,11 @@
 // src/microservices/monitor_guards.js
-// 📝 檔案功能用途：V10 【護盤鐵衛】微服務 (Microservice Core)
+// 📝 檔案功能用途：V10.18 【護盤鐵衛】微服務 (Microservice Core)
 // 🚀 核心升級：O(1) 無迴圈運算、事件驅動觸發 AI Watchdog、完整繼承 V9 神風逃生艙與硬止損。
+// 🛡️ 終極修復：完美對接 Python 動態 SL/TP 參數；修復 DEFCON 逃生後的 Database 幽靈倉位卡死 Bug。
 
 require('dotenv').config();
 const Redis = require('ioredis');
+const { supabase } = require('../config/supabase'); // 🚨 FIX: 引入 supabase 用於斬殺幽靈倉位
 
 // 載入 V10 底層依賴
 const { getPortfolio, initPortfolio } = require('../services/portfolioService'); 
@@ -18,8 +20,8 @@ const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_
 
 let globalConfig = { is_running: true };
 let localClimate = 'CHOPPY'; 
-let dynamic_sl_limit = -15.0; // 🎯 新增：預設動態止損 (將從 Redis 獲取)
-let dynamic_tp_step = 20.0;   // 🎯 新增：預設動態階梯體檢點 (將從 Redis 獲取)
+let dynamic_sl_limit = -15.0; // 動態止損 (將從 Redis 獲取)
+let dynamic_tp_step = 20.0;   // 動態階梯體檢點 (將從 Redis 獲取)
 
 // 🛡️ 時光倒流護盾 Map (O(1) 查詢)
 const last_valid_ts = new Map();
@@ -43,7 +45,6 @@ class MathGuardState {
         if (p > this.highest_price) this.highest_price = p;
         if (this.last_p > 0) {
             const jumpPct = Math.abs((p - this.last_p) / this.last_p);
-            // 🛡️ CVD 斷層過濾：只有價格跳動 <= 2% 才計入，防止 API 切換失真
             if (jumpPct <= 0.02) { if (p > this.last_p) this.cvd += v; else if (p < this.last_p) this.cvd -= v; }
         }
         this.last_p = p;
@@ -60,26 +61,34 @@ class MathGuardState {
 }
 
 // ------------------------------------------------------------------
-// 3. 神風逃生艙實體隔離
+// 3. 神風逃生艙實體隔離 (修復幽靈倉位 Bug)
 // ------------------------------------------------------------------
 async function triggerDefconEscape(pos, portfolio) {
     if (quarantine_lock.has(pos.mint_address)) return;
 
     quarantine_lock.add(pos.mint_address);
-
-    // 🎯 物理刪除，防止異步陣列錯位
+    // 從記憶體中剔除
     const actualIndex = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
     if (actualIndex > -1) portfolio.positions.splice(actualIndex, 1); 
 
     console.log(`🚨 [DEFCON] ${pos.token_symbol} 觸發極端崩盤，已實體隔離進入神風逃生艙！`);
 
     try {
+        // 呼叫底層砸盤
         const escapeResult = await fallbackEscapeService.executeEscape(pos, pos.quantity);
 
         if (escapeResult && escapeResult.success) {
-            console.log(`☠️ [DEFCON] ${pos.token_symbol} 逃生成功！已完成歸檔。`);
+            console.log(`☠️ [DEFCON] ${pos.token_symbol} 逃生成功！正在清理 Database 幽靈紀錄...`);
+            
+            // 🚨 FIX 2: 徹底清除 Database 中的幽靈倉位，防止 Dashboard 卡死
+            const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
+            for (const table of activeTables) {
+                await supabase.from(table).delete().eq('mint_address', pos.mint_address);
+            }
+
             guard_states.delete(pos.mint_address);
             last_valid_ts.delete(pos.mint_address);
+            console.log(`✅ [DEFCON] ${pos.token_symbol} 實體清理完畢。`);
         } else {
             console.warn(`❌ [DEFCON] ${pos.token_symbol} 逃生失敗！代幣重新塞回活躍陣列。`);
             portfolio.positions.push(pos);
@@ -95,7 +104,6 @@ async function triggerDefconEscape(pos, portfolio) {
 // ------------------------------------------------------------------
 // 4. V9 硬止損與 V10 Math Guards 演算核心
 // ------------------------------------------------------------------
-// 🎯 V9 冷啟動硬止損 (改用 Python 動態止損)
 async function executeV9HardStopLoss(pos, pnlPct, currentPrice) {
     if (pnlPct <= dynamic_sl_limit) { 
         const lockKey = `sell_lock:${pos.mint_address}`;
@@ -110,20 +118,22 @@ async function executeV9HardStopLoss(pos, pnlPct, currentPrice) {
     return false;
 }
 
-// 🎯 定期同步氣候與 Python 最新參數
+// 🎯 定期同步氣候與 Python 最新參數 (修復瞎眼鐵衛 Bug)
 setInterval(async () => {
     try {
         const envStr = await redisClient.get('global_env_state');
         if (envStr) localClimate = JSON.parse(envStr).climate || 'CHOPPY';
         
-        // 🎯 讀取 Python 每日派發的最新戰鬥參數
-        const baselineStr = await redisClient.get("cache:14d_baseline_model");
-        if (baselineStr) {
-            const base = JSON.parse(baselineStr);
-            if (base.dynamic_sl) dynamic_sl_limit = base.dynamic_sl;
-            if (base.dynamic_tp_trigger) dynamic_tp_step = base.dynamic_tp_trigger;
+        // 🚨 FIX 1: 讀取 Python 輸出的最新統一結構 cache:dynamic_scoring_model
+        const paramsStr = await redisClient.get('cache:dynamic_scoring_model');
+        if (paramsStr) {
+            const mlModel = JSON.parse(paramsStr);
+            if (mlModel.dynamic_sl !== undefined) dynamic_sl_limit = parseFloat(mlModel.dynamic_sl);
+            if (mlModel.dynamic_tp_trigger !== undefined) dynamic_tp_step = parseFloat(mlModel.dynamic_tp_trigger);
         }
-    } catch(e) {}
+    } catch(e) {
+        // 靜默處理
+    }
 }, 10000);
 
 async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio) {
@@ -138,7 +148,6 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
         return;
     }
 
-    // 🎯 替換原本的 -5.0，套用動態止損 (VWAP防線較敏感，取動態止損的一半)
     if (vwap > 0 && currentPrice < vwap * 0.90 && pnlPct <= (dynamic_sl_limit * 0.5)) {
         const lockKey = `sell_lock:${pos.mint_address}`;
         if (await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX')) {
@@ -150,7 +159,6 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
         return;
     }
 
-    // 🎯 觸發 AI Watchdog 事件 (應用 Python 動態階梯)
     const highestPnlPct = ((state.highest_price - pos.entry_price_sol) / pos.entry_price_sol) * 100;
     const milestoneLevel = Math.floor(pnlPct / dynamic_tp_step) * dynamic_tp_step;
 
@@ -158,7 +166,6 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
         const checkedKey = `watchdog_checked:${pos.mint_address}:L${milestoneLevel}`;
         const isChecked = await redisClient.set(checkedKey, 'DONE', 'EX', 86400, 'NX');
         if (isChecked) {
-            // 不阻塞，直接 Publish 給 trade_frontline
             await redisClient.publish('watchdog_alerts', JSON.stringify({
                 mint: pos.mint_address, symbol: pos.token_symbol,
                 pnl: pnlPct, cvd: cvd, vwap_dev: vwapDev, volatility: volatility, climate: localClimate
@@ -166,7 +173,6 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
         }
     }
 
-    // 🎯 CVD 數學直斬 (無需等 AI，瞬間波段逃頂)
     if (highestPnlPct > 30.0 && volatility > (currentPrice * 0.15)) {
         if (pnlPct < highestPnlPct - 15.0 || cvd < 0) { 
             const lockKey = `sell_lock:${pos.mint_address}`;
@@ -186,8 +192,6 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
 redisSub.subscribe('price_updates', 'emergency_action');
 
 redisSub.on('message', async (channel, message) => {
-    
-    // 🎯 接收來自 macro_sync_center 的死亡開關指令
     if (channel === 'emergency_action') {
         try {
             const { action, reason } = JSON.parse(message);
@@ -247,7 +251,6 @@ redisSub.on('message', async (channel, message) => {
                 state.updateTick(marketData.p, marketData.v);
                 const pnlPct = ((marketData.p - pos.entry_price_sol) / pos.entry_price_sol) * 100;
 
-                // 分流：冷啟動 < 30 Ticks 走 V9 硬止損；>= 30 Ticks 走 V10 數學引擎
                 if (state.ticks_collected < 30) {
                     const sold = await executeV9HardStopLoss(pos, pnlPct, marketData.p);
                     if (sold) { guard_states.delete(mint); last_valid_ts.delete(mint); }

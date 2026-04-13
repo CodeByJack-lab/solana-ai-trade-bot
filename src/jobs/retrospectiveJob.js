@@ -1,6 +1,7 @@
 // src/jobs/retrospectiveJob.js
 // 📝 檔案功能用途：V10 總指揮日會。專注每日覆盤並自動升級【前線買入 Scout】的劇本。
 // 🚀 升級功能：適配 Provider 專屬排隊引擎，強制呼叫 GEMINI 進行複雜邏輯運算。
+// 🎯 動態更新：啟動時從 Supabase 讀取動態 Cron 排程時間。
 
 const { supabase } = require('../config/supabase');
 const { keyRotator } = require('../services/keyRotator'); 
@@ -126,8 +127,25 @@ const retrospectiveJob = {
             healthMonitor.setStatus('Retrospective_AI', `🔴 執行異常: ${err.message}`);
         }
     },
-    start() {
-        cron.schedule('0 9 * * *', () => { this.runDailyBriefing(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
+    // 🎯 動態排程啟動邏輯
+    async start() {
+        try {
+            // 從 DB 讀取 cron_retro 設定
+            const { data: config, error } = await supabase
+                .from('system_config')
+                .select('cron_retro')
+                .eq('id', 1)
+                .single();
+            
+            // 如果 DB 找不到或者錯誤，使用預設值
+            const cronTime = (config && config.cron_retro) ? config.cron_retro : '0 9 * * *';
+            
+            cron.schedule(cronTime, () => { this.runDailyBriefing(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
+            console.log(`🕒 [Retrospective AI] 總指揮日會已排程於 ${cronTime} (Asia/Hong_Kong) 執行`);
+        } catch (e) {
+            console.error('❌ [Retrospective AI] 讀取排程設定失敗，使用預設時間 09:00:', e.message);
+            cron.schedule('0 9 * * *', () => { this.runDailyBriefing(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
+        }
     }
 };
 module.exports = { retrospectiveJob };

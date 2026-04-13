@@ -1,6 +1,6 @@
 # ml_engine/main.py
-# 📝 檔案功能用途：V10.18 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：HKT 19:00 定時訓練排程、整合大市分數 (Macro Score) 修正勝率、取消開機核爆訓練、限制單核運行、雙向寫入 Supabase。
+# 📝 檔案功能用途：V10.20 【Python 雙塔融合智腦】 (Microservice Core)
+# 🚀 核心升級：實裝「智能安全枷鎖 (Clamp Bounds)」，根據真實勝率數據動態調節 ml_strategy_params，並寫入 Supabase，實現防暴走自動進化。
 
 import os
 import json
@@ -48,7 +48,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=background_scheduler, daemon=True).start()
     yield 
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.18", lifespan=lifespan)
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.20", lifespan=lifespan)
 
 # ------------------------------------------------------------------
 # 2. 即時推論端點 (勝率 + 大市加權 + 動態注碼乘數)
@@ -83,7 +83,7 @@ async def predict_score(req: PredictRequest):
     ofi = (f.b - f.s) / total_tx if total_tx > 0 else 0
 
     # 🤖 塔 1：Scikit-Learn 隨機森林概率計算
-    survival_prob = 0.5 # 預設 50% 勝率
+    survival_prob = 0.5 
     if os.path.exists(MODEL_PATH):
         try:
             rf_model = joblib.load(MODEL_PATH)
@@ -93,32 +93,28 @@ async def predict_score(req: PredictRequest):
             pass 
 
     # 🌍 塔 2：大市氣候融合 (Macro Climate Integration)
-    # 讀取 Redis 上的 4D 大市分數 (由硬數據與新聞 AI 產生)
     news_score = 0
     env_str = redis_client.get("global_env_state")
     if env_str:
         try:
             env_data = json.loads(env_str)
-            news_score = env_data.get("newsScore", 0) # 範圍約 -5 到 +5
+            news_score = env_data.get("newsScore", 0) 
         except:
             pass
 
-    # 每 1 分大市分數，影響勝率 2% (上限影響 ±10%)
     macro_adjustment = news_score * 0.02
     survival_prob += macro_adjustment
-    survival_prob = max(0.0, min(1.0, survival_prob)) # 限制在 0.0 - 1.0 之間
+    survival_prob = max(0.0, min(1.0, survival_prob)) 
 
-    # 🎯 整合總分 (滿分 60 分，交給 Node.js 前線)
-    final_score = int(survival_prob * 60)
+    final_score = round(survival_prob * 65)
 
-    # 💰 計算動態注碼乘數 (Kelly Criterion 簡化版)
     multiplier = 1.0
     if survival_prob < 0.4:
-        multiplier = 0.5   # 勝率低，縮注 50%
+        multiplier = 0.5   
     elif survival_prob >= 0.6 and survival_prob < 0.8:
-        multiplier = 1.5   # 勝率高，加注 150%
+        multiplier = 1.5   
     elif survival_prob >= 0.8:
-        multiplier = 2.0   # 絕殺盤，重倉 200%
+        multiplier = 2.0   
 
     return PredictResponse(score=final_score, win_probability=survival_prob, confidence_multiplier=multiplier)
 
@@ -145,7 +141,6 @@ def fetch_trade_patterns_paginated(days_back: int = 14) -> pd.DataFrame:
     return pd.DataFrame(all_data)
 
 def extract_and_save_toxic_clusters(X: pd.DataFrame, y_toxic: pd.Series):
-    """🧠 決策樹毒藥萃取：找出導致嚴重虧損的特徵組合，寫入 Supabase"""
     if sum(y_toxic) < 5: return 
     
     dt = DecisionTreeClassifier(max_depth=3, min_samples_leaf=3, random_state=42)
@@ -184,6 +179,10 @@ def extract_and_save_toxic_clusters(X: pd.DataFrame, y_toxic: pd.Series):
         supabase.table('ml_blacklist_rules').insert(insert_payload).execute()
         print(f"☠️ [ML Engine] 成功萃取並寫入 {len(toxic_rules)} 條必死毒藥組合至 DB！")
 
+def clamp(val, min_val, max_val):
+    """🛡️ 限制數值在安全區間內的輔助函數"""
+    return max(min_val, min(val, max_val))
+
 def execute_evolution_pipeline():
     print(f"🚀 [ML Engine] 啟動大數據訓練管線 (觸發時間: {datetime.now(timezone.utc).isoformat()})...")
     try:
@@ -202,6 +201,7 @@ def execute_evolution_pipeline():
         df['realized_pnl_pct'] = pd.to_numeric(df['realized_pnl_pct'], errors='coerce').fillna(0)
         df['entry_ofi'] = pd.to_numeric(df['entry_ofi'], errors='coerce').fillna(0)
         df['entry_liquidity_usd'] = pd.to_numeric(df['entry_liquidity_usd'], errors='coerce').fillna(0)
+        df['entry_volume_5m_usd'] = pd.to_numeric(df.get('entry_volume_5m_usd', df.get('entry_volume_5m', 0)), errors='coerce').fillna(0)
         
         now_utc = pd.Timestamp.utcnow()
         df['created_at'] = pd.to_datetime(df['created_at'], utc=True, errors='coerce')
@@ -213,13 +213,12 @@ def execute_evolution_pipeline():
         winning_df = df[df['realized_pnl_pct'] > 0]
         losing_df = df[df['realized_pnl_pct'] < 0]
 
-        # 2. 計算今日新數據基準
+        # 2. 計算 EMA SL/TP 基準
         new_sl = max(-25.0, min(-10.0, float(np.average(losing_df['realized_pnl_pct'], weights=losing_df['w_time']) * 1.2))) if not losing_df.empty else -15.0
         new_tp = max(15.0, min(40.0, float(np.average(winning_df['realized_pnl_pct'], weights=winning_df['w_time']) * 0.8))) if not winning_df.empty else 20.0
         new_ofi = float(np.average(winning_df['entry_ofi'], weights=winning_df['w_time'])) if not winning_df.empty else 0.2
         new_liq = float(np.average(winning_df['entry_liquidity_usd'], weights=winning_df['w_time'])) if not winning_df.empty else 5000.0
 
-        # 3. 讀取昨日記憶，執行 EMA 平滑融合
         old_model_str = redis_client.get("cache:dynamic_scoring_model")
         if old_model_str:
             try:
@@ -233,57 +232,119 @@ def execute_evolution_pipeline():
         else:
             final_sl, final_tp, final_ofi, final_liq = new_sl, new_tp, new_ofi, new_liq
 
-        # 4. ML 參數動態決策 (寫入 Redis 及 Supabase)
+        # 🚀 3. 根據 Winning Data 動態生成策略邊界 (Data-Driven Parameters with Safe Bounds)
+        # 提取勝利組的第 15 百分位，作為底線依據
+        win_ofi_p15 = float(np.percentile(winning_df['entry_ofi'], 15)) if not winning_df.empty else -0.3
+        win_vol_p15 = float(np.percentile(winning_df['entry_volume_5m_usd'], 15)) if not winning_df.empty else 800.0
+        
+        # 套用安全枷鎖
+        base_min_ofi = clamp(win_ofi_p15, -0.6, 0.2)
+        base_zombie = clamp(win_vol_p15 * 0.5, 300, 3000)
+
         optimal_liq = max(2000.0, final_liq * 0.5) 
+        
         ml_strategy_params = {
-            "buy_threshold": 70,
             "strategy_id": int(time.time()), 
             "NEWBORN": {
-                "RAGING_BULL": {"minOFI": -0.6, "minTxs5m": 3, "minAvgTradeUsd": 5, "maxTurnover5m": 2.0, "deadPoolVolReq": 500, "optimalMinLiquidityUsd": optimal_liq},
-                "CHOPPY":      {"minOFI": -0.2, "minTxs5m": 5, "minAvgTradeUsd": 10, "maxTurnover5m": 1.0, "deadPoolVolReq": 500, "optimalMinLiquidityUsd": optimal_liq},
-                "BEAR_PANIC":  {"minOFI": 0.0,  "minTxs5m": 10, "minAvgTradeUsd": 20, "maxTurnover5m": 0.5, "deadPoolVolReq": 500, "optimalMinLiquidityUsd": optimal_liq}
+                "RAGING_BULL": {
+                    "buyThreshold": 60, 
+                    "minOFI": round(clamp(base_min_ofi - 0.2, -0.6, -0.2), 2), 
+                    "minTxs5m": 3, 
+                    "minAvgTradeUsd": 5.0, 
+                    "maxTurnover5m": 2.5, 
+                    "zombieVolReq": round(clamp(base_zombie * 0.5, 200, 1000), 2)
+                },
+                "CHOPPY": {
+                    "buyThreshold": 70, 
+                    "minOFI": round(clamp(base_min_ofi, -0.4, 0.0), 2), 
+                    "minTxs5m": 5, 
+                    "minAvgTradeUsd": 10.0, 
+                    "maxTurnover5m": 1.5, 
+                    "zombieVolReq": round(clamp(base_zombie, 500, 2000), 2)
+                },
+                "BEAR_PANIC": {
+                    "buyThreshold": 80, 
+                    "minOFI": round(clamp(base_min_ofi + 0.2, -0.1, 0.3), 2), 
+                    "minTxs5m": 8, 
+                    "minAvgTradeUsd": 20.0, 
+                    "maxTurnover5m": 0.8, 
+                    "zombieVolReq": round(clamp(base_zombie * 1.5, 1000, 5000), 2)
+                }
             },
             "TRENDING": {
-                "RAGING_BULL": {"minOFI": -0.7, "minTxs5m": 5, "minAvgTradeUsd": 10, "maxTurnover5m": 2.0, "zombieVolReq": 200, "optimalMinLiquidityUsd": optimal_liq * 2},
-                "CHOPPY":      {"minOFI": -0.4, "minTxs5m": 8, "minAvgTradeUsd": 25, "maxTurnover5m": 1.0, "zombieVolReq": 800, "optimalMinLiquidityUsd": optimal_liq * 2},
-                "BEAR_PANIC":  {"minOFI": -0.2, "minTxs5m": 15, "minAvgTradeUsd": 50, "maxTurnover5m": 0.5, "zombieVolReq": 1500, "optimalMinLiquidityUsd": optimal_liq * 2}
+                "RAGING_BULL": {
+                    "buyThreshold": 65, 
+                    "minOFI": round(clamp(base_min_ofi - 0.2, -0.6, -0.2), 2), 
+                    "minTxs5m": 5, 
+                    "minAvgTradeUsd": 10.0, 
+                    "maxTurnover5m": 2.5, 
+                    "zombieVolReq": round(clamp(base_zombie, 500, 2000), 2)
+                },
+                "CHOPPY": {
+                    "buyThreshold": 75, 
+                    "minOFI": round(clamp(base_min_ofi, -0.4, 0.0), 2), 
+                    "minTxs5m": 8, 
+                    "minAvgTradeUsd": 25.0, 
+                    "maxTurnover5m": 1.5, 
+                    "zombieVolReq": round(clamp(base_zombie * 2, 1000, 4000), 2)
+                },
+                "BEAR_PANIC": {
+                    "buyThreshold": 85, 
+                    "minOFI": round(clamp(base_min_ofi + 0.2, 0.0, 0.4), 2), 
+                    "minTxs5m": 12, 
+                    "minAvgTradeUsd": 50.0, 
+                    "maxTurnover5m": 0.8, 
+                    "zombieVolReq": round(clamp(base_zombie * 3, 2000, 8000), 2)
+                }
             }
         }
         
-        # 4.1 寫入 Redis (Node.js 即時用)
+        # 4. 寫入 Redis 及 Supabase (現在是自動產生 + 安全限制 + 自動更新)
+        dynamic_model = {
+            "avg_ofi": final_ofi,
+            "avg_entry_liq": final_liq,
+            "dynamic_sl": final_sl,
+            "dynamic_tp_trigger": final_tp,
+            "base_math_score": params.get('base_math_score', 50),
+            "ofi_bonus_score": params.get('ofi_bonus_score', 15),
+            "liq_bonus_score": params.get('liq_bonus_score', 10),
+            "volume_bonus_score": params.get('volume_bonus_score', 15),
+            "ml_strategy_params": ml_strategy_params 
+        }
+        redis_client.set("cache:dynamic_scoring_model", json.dumps(dynamic_model))
         redis_client.set("ml_strategy_params", json.dumps(ml_strategy_params))
         
-        # 4.2 寫入 Supabase (永久保存)
         for t_type, climates in ml_strategy_params.items():
             if t_type in ['NEWBORN', 'TRENDING']:
                 for cli, p in climates.items():
                     try:
                         supabase.table('ml_strategy_params').update({
-                            'buy_threshold': ml_strategy_params["buy_threshold"],
+                            'buy_threshold': p['buyThreshold'],
                             'min_ofi': p['minOFI'],
                             'min_txs_5m': p['minTxs5m'],
                             'min_avg_trade_usd': p['minAvgTradeUsd'],
                             'max_turnover_5m': p['maxTurnover5m'],
-                            'zombie_vol_req': p.get('zombieVolReq', 500),
+                            'zombie_vol_req': p['zombieVolReq'],
                             'updated_at': datetime.now(timezone.utc).isoformat()
                         }).eq('token_type', t_type).eq('market_climate', cli).execute()
                     except Exception as e:
-                        print(f"⚠️ [ML Engine] 更新 Supabase ml_strategy_params 失敗 ({t_type}-{cli}): {e}")
+                        print(f"⚠️ [ML Engine] 更新 DB 失敗 ({t_type}-{cli}): {e}")
 
-        print("🧠 [ML Engine] 已將最新戰術參數同步至 Redis 與 Supabase！")
+        supabase.table('ai_strategy_params').update({ 
+            'stop_loss_pct': round(final_sl, 2), 
+            'trailing_tp_trigger': round(final_tp, 2) 
+        }).in_('id', [2, 3]).execute()
 
-        # 同步舊版 SL/TP 回 DB (供 Watchdog 參考)
-        supabase.table('ai_strategy_params').update({ 'stop_loss_pct': round(final_sl, 2), 'trailing_tp_trigger': round(final_tp, 2) }).in_('id', [2, 3]).execute()
+        print("🧠 [ML Engine] 已根據歷史勝率動態更新參數，並受安全邊界保護，成功同步至 DB！")
         
-        # 5. ML 訓練 (🚀 限制 n_jobs=1，防止 CPU 核爆)
+        # 5. ML 訓練 (限制 n_jobs=1，防止 CPU 核爆)
         if len((df['realized_pnl_pct'] > 0).unique()) > 1:
             n_est = params.get('rf_n_estimators', 100)
             m_depth = params.get('rf_max_depth', 5)
-            # n_jobs=1: 只用單核進行運算，減輕系統負荷
             rf = RandomForestClassifier(n_estimators=n_est, max_depth=m_depth, random_state=42, n_jobs=1)
             rf.fit(df[['entry_ofi', 'entry_liquidity_usd']], (df['realized_pnl_pct'] > 0).astype(int), sample_weight=df['w_time'])
             joblib.dump(rf, MODEL_PATH)
-            print(f"🌲 [ML Engine] Random Forest 模型訓練完成，已儲存至 RAM ({MODEL_PATH})")
+            print(f"🌲 [ML Engine] Random Forest 模型訓練完成 ({MODEL_PATH})")
 
         y_toxic = (df['realized_pnl_pct'] <= -15).astype(int)
         if len(y_toxic.unique()) > 1:
@@ -295,21 +356,18 @@ def execute_evolution_pipeline():
         print(f"❌ [Baseline Engine] 建模管線發生崩潰: {str(e)}")
 
 # ------------------------------------------------------------------
-# 4. 全自動無人值守排程器 (HKT 19:00 / UTC 11:00 執行)
+# 4. 全自動無人值守排程器
 # ------------------------------------------------------------------
 def run_evolution_job():
-    """包裝函數，用於 schedule 調用"""
     execute_evolution_pipeline()
 
 def background_scheduler():
-    # 🚀 移除開機自動訓練，徹底解決開機 CPU 峰值問題
-    # 🕒 設定每日 UTC 11:00 (即 HKT 晚上 7 點) 執行
     schedule.every().day.at("11:00").do(run_evolution_job)
     print("🕒 [ML Engine] 已設定每日 HKT 19:00 (UTC 11:00) 進行大數據覆盤訓練。開機不作初次訓練。")
     
     while True:
         schedule.run_pending()
-        time.sleep(60) # 每分鐘檢查一次排程
+        time.sleep(60) 
 
 # ------------------------------------------------------------------
 # 5. 管理端點
@@ -321,7 +379,7 @@ def trigger_evolution(background_tasks: BackgroundTasks):
 
 @app.get("/health")
 def health_check():
-    return {"status": "alive", "engine": "V10 Dual-Tower ML Brain", "cores": 1} # 標示為單核安全版
+    return {"status": "alive", "engine": "V10 Dual-Tower ML Brain", "cores": 1}
 
 if __name__ == "__main__":
     import uvicorn

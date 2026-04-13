@@ -114,7 +114,7 @@ Scoring Guide:
             let nScore = 0;
             if (aiResult.narrative_score !== undefined && !isNaN(aiResult.narrative_score)) {
                 nScore = parseInt(aiResult.narrative_score);
-                nScore = Math.max(-20, Math.min(20, nScore)); // 絕對邊界防護
+                nScore = Math.max(-15, Math.min(15, nScore)); // 絕對邊界防護
             }
 
             console.log(`[Consensus] 🗣️ LLM 敘事評分: ${nScore > 0 ? '+' : ''}${nScore} 分`);

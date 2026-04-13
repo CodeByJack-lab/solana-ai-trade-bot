@@ -1,6 +1,6 @@
 // src/jobs/trendingJob.js
-// 📝 檔案功能用途：V10.9 數學雷達排程器 (天網級防禦)。內建雙重前置物理防禦網。
-// 🚀 V10 核心升級：不再自行越權買幣，動能達標後改為透過 Redis 發射 `trending_signal` 交由前線雙腦處理 (加入訊號發射限流閥與數據填補)。
+// 📝 檔案功能用途：V10.21 數學雷達排程器 (天網級防禦)。
+// 🚀 V10 核心升級：拔除越權的硬核 OFI/均單攔截，將參數裁決權全數交還給 securityGuard 與 Python ML。保留女巫與高階造市防禦。
 
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
@@ -84,9 +84,7 @@ const trendingJob = {
                 return;
             }
 
-            console.log(`👑 [Trending VIP] 已過濾假幣，向 DexScreener 查詢 ${validPoolTokens.length} 隻保溫箱獵物...`);
-
-            // 🚀 V9.1 批次查詢 (防 429)
+            // 🚀 批次查詢 DexScreener (防 429)
             const mintsArray = validPoolTokens.map(t => t.mint_address);
             const batchMarketData = {};
             
@@ -110,7 +108,6 @@ const trendingJob = {
                                         liquidity: pair.liquidity?.usd || 0,
                                         buys5m: pair.txns?.m5?.buys || 0,
                                         sells5m: pair.txns?.m5?.sells || 0,
-                                        // 🎯 終極修復 1：擷取價錢，準備餵畀前線大腦
                                         priceUsd: parseFloat(pair.priceUsd) || 0
                                     };
                                 }
@@ -120,7 +117,6 @@ const trendingJob = {
                     } catch (err) {
                         retry++;
                         const is429 = err.response?.status === 429 || err.message.includes('429');
-                        console.warn(`⚠️ [Trending] 批次查價失敗 (嘗試 ${retry}/3): ${err.message}`);
                         if (is429) await new Promise(r => setTimeout(r, Math.floor(Math.random() * 5000) + 5000));
                         else await new Promise(r => setTimeout(r, 2000));
                     }
@@ -148,32 +144,18 @@ const trendingJob = {
                 const buys = mData.buys5m;
                 const sells = mData.sells5m;
 
-                // =====================================================================
-                // 🗡️ 物理防禦 Phase B：【API 呼叫後】狗莊刷量與極惡 OFI 攔截 
-                // =====================================================================
                 const totalTxns = buys + sells;
-                const avgTrade = totalTxns > 0 ? (vol5m / totalTxns) : 0;
-                const pseudoOfi = totalTxns > 0 ? (buys - sells) / totalTxns : 0;
                 const turnover5m = liq > 0 ? (vol5m / liq) : 0;
                 const buyRatio = totalTxns > 0 ? (buys / totalTxns) : 0;
 
-                if (totalTxns >= 15 && avgTrade < 25) {
-                    console.log(`🗑️ [Nano Spam Guard] 攔截乞衣刷量！${token.token_symbol} 均單 $${avgTrade.toFixed(2)}，踢出保溫箱！`);
-                    await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
-                    continue;
-                }
+                // =====================================================================
+                // 🗡️ 物理防禦 Phase B：保留絕對防線 (高階造市與女巫防禦)，剔除純數值限制
+                // =====================================================================
                 if (turnover5m > 1.5 && h1 < 100) {
-                    console.log(`🗑️ [Divergence Guard] 攔截高階造市！${token.token_symbol} 換手率高達 ${(turnover5m*100).toFixed(0)}% 但價格不漲，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     continue;
                 }
                 if (totalTxns > 50 && buyRatio > 0.45 && buyRatio < 0.55) {
-                    console.log(`🗑️ [Sybil Guard] 攔截腳本對沖！${token.token_symbol} 買賣對稱率 ${(buyRatio*100).toFixed(1)}%，踢出保溫箱！`);
-                    await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
-                    continue;
-                }
-                if (totalTxns >= 15 && pseudoOfi < -0.2) {
-                    console.log(`🗑️ [OFI Guard] 空軍壓境！${token.token_symbol} OFI 極差 (${pseudoOfi.toFixed(2)})，踢出保溫箱！`);
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
                     continue;
                 }
@@ -192,13 +174,9 @@ const trendingJob = {
                     console.log(`   - 1H 升幅: ${h1}% | 實際 5m 量/池比: ${liq > 0 ? ((vol5m/liq)*100).toFixed(2) : 0}% | 買/賣: ${buys}/${sells}`);
                     console.log(`======================================================\n`);
 
-                    console.log(`🚀 [Trending] 數學動能達標！透過 Redis 傳送 $${token.token_symbol} 至前線雙腦路由...`);
-                    
-                    // 🎯 終極修復 2：填補「數據黑洞」！
-                    // 將啱啱 DexScreener 查到嘅即時數據，打包成前線大腦識睇嘅 payload 格式。
                     const priceSnapshot = {
                         [mintAddress]: {
-                            p: mData.priceUsd || 0.001, // 注入價錢
+                            p: mData.priceUsd || 0.001,
                             v: vol5m,
                             b: buys,
                             s: sells,
@@ -207,20 +185,12 @@ const trendingJob = {
                         }
                     };
                     
-                    // 1. 先將最新 MarketData 寫入全域 Cache，等前線大腦唔會再出現 "undefined" 靜默丟棄
                     await redis.publish('price_updates', JSON.stringify(priceSnapshot));
-                    
-                    // 2. 再發射開火訊號
                     await redis.publish('trending_signal', JSON.stringify({ mint: mintAddress, symbol: token.token_symbol }));
-                    
-                    // 3. 防塞車安全閥：強制等 2 秒
                     await new Promise(r => setTimeout(r, 2000));
-                    
-                    // 4. 踢出保溫箱
                     await supabase.from('trending_pool').delete().eq('mint_address', mintAddress);
 
                 } else {
-                    // 動能未達標，只更新數值
                     await supabase.from('trending_pool').update({ volume_5m: vol5m, price_change_h1: h1, updated_at: new Date().toISOString() }).eq('mint_address', mintAddress);
                 }
             }
