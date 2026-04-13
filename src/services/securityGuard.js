@@ -148,36 +148,44 @@ class SecurityGuard {
         const { climate, newsScore } = await this._getMacroClimate();
         const dbParams = cacheManager.getStrategy(type);
         
-        // 🚀 核心升級：讀取 Python ML 大腦實時下發嘅動態參數 (如果 Redis 死咗，用 Hardcode Fallback)
+        // 🚀 核心升級：讀取 Python ML 大腦實時下發嘅動態參數 (完美支援 Array + snake_case 結構)
         let mlParams = null;
+        let targetParam = null;
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
-            if (mlParamsStr) mlParams = JSON.parse(mlParamsStr);
+            if (mlParamsStr) {
+                mlParams = JSON.parse(mlParamsStr);
+                // 對付 Payload 係 Array 嘅情況
+                const paramsArray = Array.isArray(mlParams) ? mlParams : (mlParams.data || []);
+                // 精準抽出對應嘅 token_type 同 market_climate
+                targetParam = paramsArray.find(x => x.token_type === type && x.market_climate === climate);
+            }
         } catch (e) {
             console.warn("⚠️ 無法讀取 ML 動態參數，降級使用經驗預設值");
         }
 
         // =====================================================================
-        // 🧠 AI 動態賦值 (Dynamic ML Assignment)
+        // 🧠 AI 動態賦值 (Dynamic ML Assignment) - 完全匹配 Supabase DB 名稱
         // =====================================================================
         let activeParams = {
-            buyThreshold: mlParams?.buy_threshold ?? 70, 
+            buyThreshold: targetParam?.buy_threshold ? Number(targetParam.buy_threshold) : 70, 
             
-            minOFI: mlParams?.[type]?.[climate]?.minOFI ?? (type === 'TRENDING' ? -0.4 : -0.2),
-            minTxs: mlParams?.[type]?.[climate]?.minTxs5m ?? (type === 'TRENDING' ? 8 : 5),
-            minTradeSize: mlParams?.[type]?.[climate]?.minAvgTradeUsd ?? 10,
-            maxTurnover: mlParams?.[type]?.[climate]?.maxTurnover5m ?? (type === 'TRENDING' ? 0.50 : 0.80),
-            zombieVolReq: mlParams?.[type]?.[climate]?.zombieVolReq ?? 500,
+            // 左右開弓：兼容 snake_case 與舊版 camelCase
+            minOFI: parseFloat(targetParam?.min_ofi ?? targetParam?.minOfi ?? (type === 'TRENDING' ? -0.4 : -0.2)),
+            minTxs: parseInt(targetParam?.min_txs_5m ?? targetParam?.minTxs5m ?? (type === 'TRENDING' ? 8 : 5)),
+            minTradeSize: parseFloat(targetParam?.min_avg_trade_usd ?? targetParam?.minAvgTradeUsd ?? 10),
+            maxTurnover: parseFloat(targetParam?.max_turnover_5m ?? targetParam?.maxTurnover5m ?? (type === 'TRENDING' ? 0.50 : 0.80)),
+            zombieVolReq: parseFloat(targetParam?.zombie_vol_req ?? targetParam?.zombieVolReq ?? 500),
             
             // 物理極限防滑點：Quant 保留 $2000 絕對安全網，之上由 ML 動態調控
-            minLiquidityUsd: Math.max(2000, mlParams?.[type]?.[climate]?.optimalMinLiquidityUsd ?? dbParams.min_liquidity)
+            minLiquidityUsd: Math.max(2000, parseFloat(targetParam?.optimal_min_liquidity_usd ?? targetParam?.optimalMinLiquidityUsd ?? (dbParams?.min_liquidity || 2000)))
         };
 
         const marketData = await this._fetchMarketData(mint);
         
         if (!marketData) {
             console.log(`🛑 [Quant Reject] ${mint} 無法獲取 DexScreener 報價數據 (API 限制)`);
-            return { numeric_score: 0, isSafe: false, reason: '無法獲取 DexScreener 報價數據', marketData: null, applied_ml_strategy_id: mlParams?.strategy_id || 0 };
+            return { numeric_score: 0, isSafe: false, reason: '無法獲取 DexScreener 報價數據', marketData: null, applied_ml_strategy_id: targetParam?.id || 0 };
         }
 
         const upperSymbol = marketData.symbol.toUpperCase();
@@ -188,7 +196,7 @@ class SecurityGuard {
 
         // 🎯 假池與殭屍藍籌防禦 (由 ML 參數控制)
         if (type === 'NEWBORN') {
-            const deadPoolVolReq = mlParams?.NEWBORN?.[climate]?.deadPoolVolReq ?? (dbParams.min_vol_5m * 5); 
+            const deadPoolVolReq = parseFloat(targetParam?.dead_pool_vol_req ?? targetParam?.deadPoolVolReq ?? (dbParams?.min_vol_5m * 5 || 5000)); 
             if (marketData.liquidity > 100000 && marketData.volume5m < deadPoolVolReq) {
                 return { numeric_score: 0, isSafe: false, reason: `🛑 假池/貔貅攔截 (NEWBORN): 高流動但低交易`, marketData };
             }
@@ -264,7 +272,7 @@ class SecurityGuard {
             : `攔截得分: ${coreScore}/20 (未達物理安全底線), 缺陷: ${reasons.join(' | ')}`;
 
         // 回傳 0-20 分畀前線，準備同 ML 嘅 60 分合體
-        return { numeric_score: coreScore, isSafe, reason: finalReason, marketData, applied_ml_strategy_id: mlParams?.strategy_id || 0 };
+        return { numeric_score: coreScore, isSafe, reason: finalReason, marketData, applied_ml_strategy_id: targetParam?.id || 0 };
     }
 }
 
