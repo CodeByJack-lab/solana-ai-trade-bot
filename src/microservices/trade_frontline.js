@@ -1,7 +1,7 @@
 // src/microservices/trade_frontline.js
 // 📝 檔案功能用途：V10.22 【獵人中樞】微服務 (Microservice Core)
 // 🚀 核心升級：修復 securityGuard.calculateQuantScore 函數呼叫名稱錯誤。實裝「三權分立」計分法 (Quant20+ML65+LLM15)。
-// 🛡️ 終極修復：修正 LLM 誤判空白幣 Bug (正確傳遞富文本 marketData)，及修復 buyThreshold 陣列讀取問題。
+// 🛡️ 終極修復：修正 LLM 敘事評分永遠食「空白代幣 -5分」的 Bug，正確將 DexScreener 文本傳遞給 MISTRAL。
 
 require('dotenv').config();
 const express = require('express');
@@ -22,7 +22,7 @@ const { walletMonitorRouter } = require('../services/walletMonitor');
 const { keyRotator } = require('../services/keyRotator'); 
 const { cacheManager } = require('../services/cacheManager'); 
 
-// 🚀 引入維運中樞 (新增)
+// 🚀 引入維運中樞
 const { healthMonitor } = require('../services/healthMonitor');
 
 // ------------------------------------------------------------------
@@ -65,7 +65,6 @@ const BRAND_BLACKLIST = new Set([
 redisSub.subscribe('price_updates', 'trending_signal'); 
 redisSub.on('message', (channel, message) => {
     if (channel === 'price_updates') {
-        // 🚀 新增：記錄 Koyeb 心跳，證明 PriceBot 仲生存緊
         healthMonitor.recordHeartbeat('PriceBot_Koyeb');
         
         try {
@@ -102,7 +101,6 @@ watchdogSub.on('message', async (channel, message) => {
             });
             const dataPrompt = `${aiConfig.parsedPrompt}\n[Hard Data] CVD Slope: ${cvd.toFixed(0)}, VWAP Dev: ${vwap_dev.toFixed(2)}%, Volatility: ${volatility.toFixed(4)}`;
 
-            // 🚀 記錄 AI 請求開始時間 (計算 Latency)
             const aiStartTime = Date.now();
 
             const decision = await keyRotator.enqueueRequest('MISTRAL', async (apiKey) => {
@@ -115,7 +113,6 @@ watchdogSub.on('message', async (channel, message) => {
                 return JSON.parse(res.data.choices[0].message.content);
             }, 'POSITION_WATCHDOG');
 
-            // 🚀 記錄 AI 延遲
             healthMonitor.recordAiLatency(Date.now() - aiStartTime);
 
             console.log(`🤖 [AI Watchdog] $${symbol} | 判定: ${decision.action} | 理由: ${decision.thought_process}`);
@@ -269,7 +266,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         if (!secResult.isSafe) {
             console.log(`🛑 [Quant Reject] ${symbol} 未達基準: ${secResult.reason}`);
             
-            // 毒藥收集器：專門捕捉 Rug Pull / 貔貅陷阱 (寫入 DB 畀 ML 學習)
             const isRugTrap = marketData.l > 10000 && (
                 secResult.reason.includes('合約高危') || 
                 secResult.reason.includes('籌碼集中') || 
@@ -301,13 +297,11 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         console.log(`   - 🛡️ [Quant] 基礎物理審核通過，得分: ${quantScore}/20`);
 
         // 🧠 第二權：Python ML 大腦預測勝率 (滿分 65 分)
-        let mlScore = 32; // 保底 (約 50% 勝率)
+        let mlScore = 32; 
         let mlConfidenceMultiplier = 1.0; 
         
         try {
-            // 🚀 記錄 ML 推論開始時間
             const mlStartTime = Date.now();
-            // 這裡傳純數字 marketData 畀 Python 是正確的
             const res = await axios.post('http://127.0.0.1:8000/predict', { features: marketData, type: poolType }, { timeout: 2000 });
             healthMonitor.recordAiLatency(Date.now() - mlStartTime);
 
@@ -329,13 +323,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         try {
             console.log(`   - 🧠 [LLM Consensus] 發起 ${symbol} 的敘事潛力會議...`);
             
-            // 🚀 記錄 LLM 推論開始時間
             const llmStartTime = Date.now();
-            
-            // 🚨 終極修復 1：把帶有真實 Name 和 Description 的富文本數據 secResult.marketData 傳給 LLM，避免它當作空白騙局幣！
-            const richMarketData = secResult.marketData || { symbol, name: symbol, description: '' };
-            const llmResult = await consensusService.runMemeConsensus(mint, richMarketData, { poolType, climate: envState.climate });
-            
+            // 🚨 FIX: 將沒有敘事資料的 marketData，替換為擁有 DexScreener 完整描述的 secResult.marketData
+            const llmResult = await consensusService.runMemeConsensus(mint, secResult.marketData, { poolType, climate: envState.climate });
             healthMonitor.recordAiLatency(Date.now() - llmStartTime);
 
             llmScore = llmResult.narrative_score || 0;
@@ -347,20 +337,15 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         // 🚀 4. 全自動發射決策 
         const finalScore = quantScore + mlScore + llmScore;
         
-        let buyThreshold = 70; // 預設安全底線
+        let buyThreshold = 70; 
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
             if (mlParamsStr) {
                 const mlParams = JSON.parse(mlParamsStr);
                 const currentClimate = envState.climate || 'CHOPPY';
-                
-                // 🚨 終極修復 2：支援 Array 結構，精準抽出及格線，不再錯誤 fallback 去 70 分
                 const paramsArray = Array.isArray(mlParams) ? mlParams : (mlParams.data || []);
                 const targetParam = paramsArray.find(x => x.token_type === poolType && x.market_climate === currentClimate);
-                
-                if (targetParam && targetParam.buy_threshold) {
-                    buyThreshold = Number(targetParam.buy_threshold);
-                }
+                buyThreshold = targetParam?.buy_threshold ? Number(targetParam.buy_threshold) : 70;
             }
         } catch(e) {
             console.warn(`⚠️ [Frontline] 讀取動態及格線失敗，使用預設值 70`);
@@ -386,7 +371,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const finalTradeAmountSol = parseFloat((baseAmount * safeMultiplier).toFixed(3));
                 console.log(`💰 [Sizing] 基礎注碼: ${baseAmount} SOL, 乘數: x${safeMultiplier} -> 最終下單: ${finalTradeAmountSol} SOL`);
 
-                // 這裡傳回給 tradeService 的 marketData 保持為純數字結構，符合 pnl 計算需求
                 await executeBuy(
                     mint, symbol, poolType, finalScore, 
                     `🤖 三權決策 (Q:${quantScore} + M:${mlScore} + L:${llmScore}) | LLM: ${llmReason}`, 
@@ -396,11 +380,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
-            // 將邊緣幣放入 Shadow 追蹤
             if (finalScore >= (buyThreshold - 10)) {
                 const { data: config } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
                 if (config && config.trade_mode !== 'LIVE') {
-                     console.log(`👻 [Shadow] ${symbol} 分數邊緣 (${finalScore})，收入 Shadow 觀察池供 ML 學習。`);
                      await supabase.from('active_positions_shadow').insert({
                          mint_address: mint,
                          token_symbol: symbol,
@@ -422,7 +404,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
     } catch (err) {
         const symbol = symbol_cache.get(mint) || 'UNKNOWN';
         console.error(`❌ [Routing Error] 決策漏斗處理 ${symbol} (${mint}) 時發生崩潰:`, err.message);
-        if (err.stack) console.error(err.stack);
     }
 }
 
@@ -466,7 +447,6 @@ async function bootstrap() {
     });
     sourceAggregator.start();
     
-    // 🚀 新增：啟動時寫入 Database 報平安
     await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中');
 }
 
