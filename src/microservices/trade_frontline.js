@@ -1,7 +1,7 @@
 // src/microservices/trade_frontline.js
 // 📝 檔案功能用途：V10.22 【獵人中樞】微服務 (Microservice Core)
 // 🚀 核心升級：修復 securityGuard.calculateQuantScore 函數呼叫名稱錯誤。實裝「三權分立」計分法 (Quant20+ML65+LLM15)。
-// 🛡️ 終極修復：修正 LLM 敘事評分永遠食「空白代幣 -5分」的 Bug，正確將 DexScreener 文本傳遞給 MISTRAL。
+// 🛡️ 終極修復：修正 LLM 敘事評分永遠食「空白代幣 -5分」的 Bug，強制 LLM 根據代幣名稱評估 Meme 潛力。
 
 require('dotenv').config();
 const express = require('express');
@@ -324,8 +324,15 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             console.log(`   - 🧠 [LLM Consensus] 發起 ${symbol} 的敘事潛力會議...`);
             
             const llmStartTime = Date.now();
-            // 🚨 FIX: 將沒有敘事資料的 marketData，替換為擁有 DexScreener 完整描述的 secResult.marketData
-            const llmResult = await consensusService.runMemeConsensus(mint, secResult.marketData, { poolType, climate: envState.climate });
+            
+            // 🚨 終極修復：解決 99% 新幣無 Description 導致被 LLM 狂扣 5 分的 Bug
+            let llmTargetData = secResult.marketData || {};
+            if (!llmTargetData.description || llmTargetData.description.trim() === '') {
+                // 強制賦予預設敘事，逼使 LLM 分析名字與代號，而唔係直接判死刑
+                llmTargetData.description = `Newly launched community token. Ticker: $${llmTargetData.symbol}, Name: ${llmTargetData.name}. No official description provided yet. Please evaluate the viral/meme potential based solely on its ticker and name. Do NOT penalize for lacking description.`;
+            }
+
+            const llmResult = await consensusService.runMemeConsensus(mint, llmTargetData, { poolType, climate: envState.climate });
             healthMonitor.recordAiLatency(Date.now() - llmStartTime);
 
             llmScore = llmResult.narrative_score || 0;
