@@ -1,6 +1,6 @@
 # ml_engine/main.py
-# 📝 檔案功能用途：V10.20 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：實裝「智能安全枷鎖 (Clamp Bounds)」，根據真實勝率數據動態調節 ml_strategy_params，並寫入 Supabase，實現防暴走自動進化。
+# 📝 檔案功能用途：V10.22 【Python 雙塔融合智腦】 (Microservice Core)
+# 🚀 核心升級：實裝「EMA 記憶平滑進化」，Python 會讀取舊設定並結合今日數據進行融合，受限於動態安全邊界 (Safe Bounds)。
 
 import os
 import json
@@ -48,10 +48,10 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=background_scheduler, daemon=True).start()
     yield 
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.20", lifespan=lifespan)
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.22", lifespan=lifespan)
 
 # ------------------------------------------------------------------
-# 2. 即時推論端點 (勝率 + 大市加權 + 動態注碼乘數)
+# 2. 即時推論端點
 # ------------------------------------------------------------------
 class FeaturePayload(BaseModel):
     p: float = Field(..., ge=0.0)
@@ -72,9 +72,6 @@ class PredictResponse(BaseModel):
 
 @app.post("/predict", response_model=PredictResponse)
 async def predict_score(req: PredictRequest):
-    """
-    🧠 雙塔漏斗：結合「Random Forest 概率」與「大市氣候分數」，給出最終勝率與注碼乘數
-    """
     f = req.features
     if f.l <= 0 or f.v <= 0 or math.isnan(f.p) or math.isinf(f.p):
         return PredictResponse(score=0, win_probability=0.0, confidence_multiplier=1.0)
@@ -82,7 +79,6 @@ async def predict_score(req: PredictRequest):
     total_tx = f.b + f.s
     ofi = (f.b - f.s) / total_tx if total_tx > 0 else 0
 
-    # 🤖 塔 1：Scikit-Learn 隨機森林概率計算
     survival_prob = 0.5 
     if os.path.exists(MODEL_PATH):
         try:
@@ -92,7 +88,6 @@ async def predict_score(req: PredictRequest):
         except Exception:
             pass 
 
-    # 🌍 塔 2：大市氣候融合 (Macro Climate Integration)
     news_score = 0
     env_str = redis_client.get("global_env_state")
     if env_str:
@@ -106,6 +101,7 @@ async def predict_score(req: PredictRequest):
     survival_prob += macro_adjustment
     survival_prob = max(0.0, min(1.0, survival_prob)) 
 
+    # 🎯 整合總分 (滿分 65 分，四捨五入精準對齊三權分立)
     final_score = round(survival_prob * 65)
 
     multiplier = 1.0
@@ -119,7 +115,7 @@ async def predict_score(req: PredictRequest):
     return PredictResponse(score=final_score, win_probability=survival_prob, confidence_multiplier=multiplier)
 
 # ------------------------------------------------------------------
-# 3. 核心大數據引擎：EMA動態記憶、RF訓練 與 毒藥萃取
+# 3. 核心大數據引擎：EMA動態記憶進化
 # ------------------------------------------------------------------
 def fetch_trade_patterns_paginated(days_back: int = 14) -> pd.DataFrame:
     chunk_size = 1000
@@ -142,10 +138,8 @@ def fetch_trade_patterns_paginated(days_back: int = 14) -> pd.DataFrame:
 
 def extract_and_save_toxic_clusters(X: pd.DataFrame, y_toxic: pd.Series):
     if sum(y_toxic) < 5: return 
-    
     dt = DecisionTreeClassifier(max_depth=3, min_samples_leaf=3, random_state=42)
     dt.fit(X, y_toxic)
-    
     tree = dt.tree_
     features = X.columns
     toxic_rules = []
@@ -179,9 +173,10 @@ def extract_and_save_toxic_clusters(X: pd.DataFrame, y_toxic: pd.Series):
         supabase.table('ml_blacklist_rules').insert(insert_payload).execute()
         print(f"☠️ [ML Engine] 成功萃取並寫入 {len(toxic_rules)} 條必死毒藥組合至 DB！")
 
-def clamp(val, min_val, max_val):
-    """🛡️ 限制數值在安全區間內的輔助函數"""
-    return max(min_val, min(val, max_val))
+def evolve_param(old_val, target_val, alpha, min_bound, max_bound):
+    """🧠 EMA 平滑進化器：融合舊記憶與新現實，並約束在安全邊界內"""
+    blended = (old_val * (1.0 - alpha)) + (target_val * alpha)
+    return max(min_bound, min(blended, max_bound))
 
 def execute_evolution_pipeline():
     print(f"🚀 [ML Engine] 啟動大數據訓練管線 (觸發時間: {datetime.now(timezone.utc).isoformat()})...")
@@ -195,7 +190,7 @@ def execute_evolution_pipeline():
         
         df = fetch_trade_patterns_paginated(lookback_days)
         if df.empty or len(df) < 10:
-            print("⚠️ [ML Engine] 歷史樣本庫不足 (需至少 10 條)，中止訓練。請讓系統空轉收集數據。")
+            print("⚠️ [ML Engine] 歷史樣本庫不足 (需至少 10 條)，中止訓練。")
             return
 
         df['realized_pnl_pct'] = pd.to_numeric(df['realized_pnl_pct'], errors='coerce').fillna(0)
@@ -213,108 +208,93 @@ def execute_evolution_pipeline():
         winning_df = df[df['realized_pnl_pct'] > 0]
         losing_df = df[df['realized_pnl_pct'] < 0]
 
-        # 2. 計算 EMA SL/TP 基準
-        new_sl = max(-25.0, min(-10.0, float(np.average(losing_df['realized_pnl_pct'], weights=losing_df['w_time']) * 1.2))) if not losing_df.empty else -15.0
-        new_tp = max(15.0, min(40.0, float(np.average(winning_df['realized_pnl_pct'], weights=winning_df['w_time']) * 0.8))) if not winning_df.empty else 20.0
-        new_ofi = float(np.average(winning_df['entry_ofi'], weights=winning_df['w_time'])) if not winning_df.empty else 0.2
-        new_liq = float(np.average(winning_df['entry_liquidity_usd'], weights=winning_df['w_time'])) if not winning_df.empty else 5000.0
+        recent_win_rate = len(winning_df) / len(df) if len(df) > 0 else 0.5
 
-        old_model_str = redis_client.get("cache:dynamic_scoring_model")
-        if old_model_str:
+        # 2. 從 Redis 讀取舊有參數記憶 (Old Memory)
+        old_ml_str = redis_client.get("ml_strategy_params")
+        old_ml = json.loads(old_ml_str) if old_ml_str else {}
+        
+        def get_old_param(t_type, climate, key, default_val):
             try:
-                old = json.loads(old_model_str)
-                final_sl = (old.get("dynamic_sl", -15.0) * (1 - ema_alpha)) + (new_sl * ema_alpha)
-                final_tp = (old.get("dynamic_tp_trigger", 20.0) * (1 - ema_alpha)) + (new_tp * ema_alpha)
-                final_ofi = (old.get("avg_ofi", 0.2) * (1 - ema_alpha)) + (new_ofi * ema_alpha)
-                final_liq = (old.get("avg_entry_liq", 5000.0) * (1 - ema_alpha)) + (new_liq * ema_alpha)
+                return old_ml.get(t_type, {}).get(climate, {}).get(key, default_val)
             except:
-                final_sl, final_tp, final_ofi, final_liq = new_sl, new_tp, new_ofi, new_liq
-        else:
-            final_sl, final_tp, final_ofi, final_liq = new_sl, new_tp, new_ofi, new_liq
+                return default_val
 
-        # 🚀 3. 根據 Winning Data 動態生成策略邊界 (Data-Driven Parameters with Safe Bounds)
-        # 提取勝利組的第 15 百分位，作為底線依據
-        win_ofi_p15 = float(np.percentile(winning_df['entry_ofi'], 15)) if not winning_df.empty else -0.3
-        win_vol_p15 = float(np.percentile(winning_df['entry_volume_5m_usd'], 15)) if not winning_df.empty else 800.0
+        # 3. 根據大數據計算今日的理想目標值 (Target Reality)
+        win_ofi_p15 = float(np.percentile(winning_df['entry_ofi'], 15)) if not winning_df.empty else -0.2
+        win_vol_p15 = float(np.percentile(winning_df['entry_volume_5m_usd'], 15)) if not winning_df.empty else 1000.0
         
-        # 套用安全枷鎖
-        base_min_ofi = clamp(win_ofi_p15, -0.6, 0.2)
-        base_zombie = clamp(win_vol_p15 * 0.5, 300, 3000)
+        # 根據勝率決定及格線的趨勢：勝率高於 50% 可降及格線(進攻)，低於 50% 提高及格線(防守)
+        threshold_target_offset = -3 if recent_win_rate > 0.5 else 3
 
-        optimal_liq = max(2000.0, final_liq * 0.5) 
+        # 4. 🧠 EMA 平滑進化 (融合舊記憶與新目標)，並套用安全邊界 Range
+        # 參數: evolve_param(old_val, target_val, alpha, min_bound, max_bound)
         
-        ml_strategy_params = {
+        evolved_params = {
             "strategy_id": int(time.time()), 
             "NEWBORN": {
                 "RAGING_BULL": {
-                    "buyThreshold": 60, 
-                    "minOFI": round(clamp(base_min_ofi - 0.2, -0.6, -0.2), 2), 
-                    "minTxs5m": 3, 
-                    "minAvgTradeUsd": 5.0, 
-                    "maxTurnover5m": 2.5, 
-                    "zombieVolReq": round(clamp(base_zombie * 0.5, 200, 1000), 2)
+                    "buyThreshold": round(evolve_param(get_old_param('NEWBORN','RAGING_BULL','buyThreshold', 55), 55 + threshold_target_offset, ema_alpha, 50, 65)),
+                    "minOFI": round(evolve_param(get_old_param('NEWBORN','RAGING_BULL','minOFI', -0.4), win_ofi_p15 - 0.2, ema_alpha, -0.6, -0.2), 2),
+                    "minTxs5m": 5, "minAvgTradeUsd": 10.0, "maxTurnover5m": 2.5,
+                    "zombieVolReq": round(evolve_param(get_old_param('NEWBORN','RAGING_BULL','zombieVolReq', 800), win_vol_p15 * 0.8, ema_alpha, 500, 1500))
                 },
                 "CHOPPY": {
-                    "buyThreshold": 70, 
-                    "minOFI": round(clamp(base_min_ofi, -0.4, 0.0), 2), 
-                    "minTxs5m": 5, 
-                    "minAvgTradeUsd": 10.0, 
-                    "maxTurnover5m": 1.5, 
-                    "zombieVolReq": round(clamp(base_zombie, 500, 2000), 2)
+                    "buyThreshold": round(evolve_param(get_old_param('NEWBORN','CHOPPY','buyThreshold', 60), 60 + threshold_target_offset, ema_alpha, 55, 70)),
+                    "minOFI": round(evolve_param(get_old_param('NEWBORN','CHOPPY','minOFI', -0.2), win_ofi_p15, ema_alpha, -0.4, 0.0), 2),
+                    "minTxs5m": 8, "minAvgTradeUsd": 15.0, "maxTurnover5m": 1.5,
+                    "zombieVolReq": round(evolve_param(get_old_param('NEWBORN','CHOPPY','zombieVolReq', 1200), win_vol_p15, ema_alpha, 800, 2500))
                 },
                 "BEAR_PANIC": {
-                    "buyThreshold": 80, 
-                    "minOFI": round(clamp(base_min_ofi + 0.2, -0.1, 0.3), 2), 
-                    "minTxs5m": 8, 
-                    "minAvgTradeUsd": 20.0, 
-                    "maxTurnover5m": 0.8, 
-                    "zombieVolReq": round(clamp(base_zombie * 1.5, 1000, 5000), 2)
+                    "buyThreshold": round(evolve_param(get_old_param('NEWBORN','BEAR_PANIC','buyThreshold', 65), 65 + threshold_target_offset, ema_alpha, 60, 80)),
+                    "minOFI": round(evolve_param(get_old_param('NEWBORN','BEAR_PANIC','minOFI', 0.0), win_ofi_p15 + 0.2, ema_alpha, -0.1, 0.3), 2),
+                    "minTxs5m": 12, "minAvgTradeUsd": 20.0, "maxTurnover5m": 1.0,
+                    "zombieVolReq": round(evolve_param(get_old_param('NEWBORN','BEAR_PANIC','zombieVolReq', 2000), win_vol_p15 * 1.5, ema_alpha, 1500, 4000))
                 }
             },
             "TRENDING": {
                 "RAGING_BULL": {
-                    "buyThreshold": 65, 
-                    "minOFI": round(clamp(base_min_ofi - 0.2, -0.6, -0.2), 2), 
-                    "minTxs5m": 5, 
-                    "minAvgTradeUsd": 10.0, 
-                    "maxTurnover5m": 2.5, 
-                    "zombieVolReq": round(clamp(base_zombie, 500, 2000), 2)
+                    "buyThreshold": round(evolve_param(get_old_param('TRENDING','RAGING_BULL','buyThreshold', 55), 55 + threshold_target_offset, ema_alpha, 50, 65)),
+                    "minOFI": round(evolve_param(get_old_param('TRENDING','RAGING_BULL','minOFI', -0.3), win_ofi_p15 - 0.1, ema_alpha, -0.5, -0.1), 2),
+                    "minTxs5m": 8, "minAvgTradeUsd": 15.0, "maxTurnover5m": 2.0,
+                    "zombieVolReq": round(evolve_param(get_old_param('TRENDING','RAGING_BULL','zombieVolReq', 1500), win_vol_p15 * 1.2, ema_alpha, 1000, 3000))
                 },
                 "CHOPPY": {
-                    "buyThreshold": 75, 
-                    "minOFI": round(clamp(base_min_ofi, -0.4, 0.0), 2), 
-                    "minTxs5m": 8, 
-                    "minAvgTradeUsd": 25.0, 
-                    "maxTurnover5m": 1.5, 
-                    "zombieVolReq": round(clamp(base_zombie * 2, 1000, 4000), 2)
+                    "buyThreshold": round(evolve_param(get_old_param('TRENDING','CHOPPY','buyThreshold', 60), 60 + threshold_target_offset, ema_alpha, 55, 70)),
+                    "minOFI": round(evolve_param(get_old_param('TRENDING','CHOPPY','minOFI', -0.1), win_ofi_p15 + 0.1, ema_alpha, -0.3, 0.1), 2),
+                    "minTxs5m": 12, "minAvgTradeUsd": 25.0, "maxTurnover5m": 1.2,
+                    "zombieVolReq": round(evolve_param(get_old_param('TRENDING','CHOPPY','zombieVolReq', 3000), win_vol_p15 * 2.0, ema_alpha, 2000, 5000))
                 },
                 "BEAR_PANIC": {
-                    "buyThreshold": 85, 
-                    "minOFI": round(clamp(base_min_ofi + 0.2, 0.0, 0.4), 2), 
-                    "minTxs5m": 12, 
-                    "minAvgTradeUsd": 50.0, 
-                    "maxTurnover5m": 0.8, 
-                    "zombieVolReq": round(clamp(base_zombie * 3, 2000, 8000), 2)
+                    "buyThreshold": round(evolve_param(get_old_param('TRENDING','BEAR_PANIC','buyThreshold', 65), 65 + threshold_target_offset, ema_alpha, 60, 80)),
+                    "minOFI": round(evolve_param(get_old_param('TRENDING','BEAR_PANIC','minOFI', 0.1), win_ofi_p15 + 0.3, ema_alpha, 0.0, 0.4), 2),
+                    "minTxs5m": 15, "minAvgTradeUsd": 40.0, "maxTurnover5m": 0.8,
+                    "zombieVolReq": round(evolve_param(get_old_param('TRENDING','BEAR_PANIC','zombieVolReq', 5000), win_vol_p15 * 3.0, ema_alpha, 3000, 8000))
                 }
             }
         }
         
-        # 4. 寫入 Redis 及 Supabase (現在是自動產生 + 安全限制 + 自動更新)
+        # 5. 更新動態 SL/TP
+        new_sl = max(-25.0, min(-10.0, float(np.average(losing_df['realized_pnl_pct'], weights=losing_df['w_time']) * 1.2))) if not losing_df.empty else -15.0
+        new_tp = max(15.0, min(40.0, float(np.average(winning_df['realized_pnl_pct'], weights=winning_df['w_time']) * 0.8))) if not winning_df.empty else 20.0
+        
+        old_model_str = redis_client.get("cache:dynamic_scoring_model")
+        old_dynamic = json.loads(old_model_str) if old_model_str else {}
+        
+        final_sl = evolve_param(old_dynamic.get("dynamic_sl", -15.0), new_sl, ema_alpha, -25.0, -10.0)
+        final_tp = evolve_param(old_dynamic.get("dynamic_tp_trigger", 20.0), new_tp, ema_alpha, 15.0, 40.0)
+
+        # 6. 寫入 Redis 及 Supabase
         dynamic_model = {
-            "avg_ofi": final_ofi,
-            "avg_entry_liq": final_liq,
             "dynamic_sl": final_sl,
             "dynamic_tp_trigger": final_tp,
             "base_math_score": params.get('base_math_score', 50),
-            "ofi_bonus_score": params.get('ofi_bonus_score', 15),
-            "liq_bonus_score": params.get('liq_bonus_score', 10),
-            "volume_bonus_score": params.get('volume_bonus_score', 15),
-            "ml_strategy_params": ml_strategy_params 
+            "ml_strategy_params": evolved_params 
         }
         redis_client.set("cache:dynamic_scoring_model", json.dumps(dynamic_model))
-        redis_client.set("ml_strategy_params", json.dumps(ml_strategy_params))
+        redis_client.set("ml_strategy_params", json.dumps(evolved_params))
         
-        for t_type, climates in ml_strategy_params.items():
+        for t_type, climates in evolved_params.items():
             if t_type in ['NEWBORN', 'TRENDING']:
                 for cli, p in climates.items():
                     try:
@@ -335,9 +315,9 @@ def execute_evolution_pipeline():
             'trailing_tp_trigger': round(final_tp, 2) 
         }).in_('id', [2, 3]).execute()
 
-        print("🧠 [ML Engine] 已根據歷史勝率動態更新參數，並受安全邊界保護，成功同步至 DB！")
+        print(f"🧠 [ML Engine] 自動進化完成！近期勝率: {recent_win_rate*100:.1f}%。參數已受 EMA 與安全邊界約束。")
         
-        # 5. ML 訓練 (限制 n_jobs=1，防止 CPU 核爆)
+        # 7. ML 訓練 (限制 n_jobs=1)
         if len((df['realized_pnl_pct'] > 0).unique()) > 1:
             n_est = params.get('rf_n_estimators', 100)
             m_depth = params.get('rf_max_depth', 5)
@@ -350,7 +330,7 @@ def execute_evolution_pipeline():
         if len(y_toxic.unique()) > 1:
             extract_and_save_toxic_clusters(df[['entry_ofi', 'entry_liquidity_usd']], y_toxic)
 
-        print(f"✅ [Baseline Engine] 全管線更新完畢 (SL={final_sl:.2f}%, TP={final_tp:.2f}%)")
+        print(f"✅ [Baseline Engine] 全管線更新完畢")
 
     except Exception as e:
         print(f"❌ [Baseline Engine] 建模管線發生崩潰: {str(e)}")

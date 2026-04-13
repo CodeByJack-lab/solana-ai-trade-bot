@@ -1,6 +1,6 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V10.18 終極防彈版 AI 議事廳 (文科生敘事與防山寨中樞)。
-// 🚀 升級功能：剝奪 LLM 一票否決權及價格計算權，轉型為純粹的「敘事評分器 (-20 到 +20)」，專注於鑒定高智商山寨騙局與潛力邪教。
+// 📝 檔案功能用途：V10.21 終極防彈版 AI 議事廳 (文科生敘事與防山寨中樞)。
+// 🚀 升級功能：剝奪 LLM 一票否決權及價格計算權，轉型為純粹的「敘事評分器 (-15 到 +15)」。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -16,7 +16,6 @@ class ConsensusService {
         const isMeme = poolType === 'NEWBORN';
         const promptId = isMeme ? 'meme_scout' : 'trending_scout';
 
-        // 提取專供 LLM 鑒定山寨與敘事使用的文字數據
         const symbol = marketData.symbol || 'UNKNOWN';
         const name = marketData.name || 'UNKNOWN';
         const desc = marketData.description || 'No description';
@@ -26,7 +25,6 @@ class ConsensusService {
             return { narrative_score: 0, reason: "GROQ 未啟用，敘事+0" };
         }
 
-        // 保留給舊版 Prompt 模板可能需要的變數，避免報錯
         const buys = marketData.buys5m || 0;
         const sells = marketData.sells5m || 0;
         const totalTxs = buys + sells;
@@ -44,7 +42,7 @@ class ConsensusService {
             h1: marketData.h1 ? marketData.h1.toFixed(2) : 0 
         });
 
-        // 🚀 V10 核心升級：強制注入防山寨指令，限制 LLM 只能輸出加減分數
+        // 強制注入防山寨指令，限制 LLM 只能輸出加減分數 (-15 to +15)
         const formatInstruction = `\n\n[CRITICAL INSTRUCTION FOR V10 SYSTEM]
 You are NO LONGER making BUY or VETO decisions. Your ONLY job is to evaluate the narrative, detect cult potential, and heavily penalize fake/impersonation tokens.
 
@@ -55,21 +53,20 @@ Description: ${desc}
 
 You MUST output EXACTLY this JSON format (no extra text):
 {
-  "narrative_score": <integer from -20 to +20>,
+  "narrative_score": <integer from -15 to +15>,
   "reason": "<short explanation>"
 }
 
 Scoring Guide:
-+15 to +20: Top-tier narrative (e.g., AI Agent, Elon Musk latest trend), highly original, strong cult potential.
-+5 to +10: Good normal meme, clear concept, no red flags.
++10 to +15: Top-tier narrative (e.g., AI Agent, Elon Musk latest trend), highly original, strong cult potential.
++1 to +9: Good normal meme, clear concept, no red flags.
 0: Uncertain, lack of info, or neutral. If you are unsure if it's a scam, give 0.
--10 to -15: Emotional manipulation ("buy or stay poor", "guaranteed 100x"), low-effort copycat.
--20: FAKE / IMPERSONATION. If it attempts to mimic famous brands, celebrities, countries, or tickers but looks like a suspicious variation (e.g., "AppIe", "E1on", "OPENAI", "USAOIL"), apply MAXIMUM PENALTY!`;
+-5 to -10: Emotional manipulation ("buy or stay poor", "guaranteed 100x"), low-effort copycat.
+-15: FAKE / IMPERSONATION. If it attempts to mimic famous brands, celebrities, countries, or tickers but looks like a suspicious variation (e.g., "AppIe", "E1on", "OPENAI", "USAOIL"), apply MAXIMUM PENALTY!`;
 
         const prompt = aiConfig.parsedPrompt + formatInstruction;
 
         try {
-            // 🚀 指定 GROQ 並傳入 promptId 供 KeyRotator 識別
             const aiResult = await keyRotator.enqueueRequest('GROQ', async (apiKey) => {
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
                 const apiUrl = 'https://api.groq.com/openai/v1/chat/completions';
@@ -88,7 +85,7 @@ Scoring Guide:
 
                     const res = await axios.post(apiUrl, payload, {
                         headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' },
-                        timeout: 10000 // 縮短超時至 10 秒，避免阻塞漏斗
+                        timeout: 10000
                     });
 
                     const rawText = res.data.choices[0].message.content;
@@ -110,11 +107,11 @@ Scoring Guide:
 
             const aiSignature = aiResult.ai_signature || 'GROQ_UNKNOWN';
             
-            // 🧮 提取敘事分數，並強制限制在 -20 到 +20 之間，防止 LLM 亂畀分
+            // 🚨 FIX: 強制限制在 -15 到 +15 之間，配合三權分立！
             let nScore = 0;
             if (aiResult.narrative_score !== undefined && !isNaN(aiResult.narrative_score)) {
                 nScore = parseInt(aiResult.narrative_score);
-                nScore = Math.max(-15, Math.min(15, nScore)); // 絕對邊界防護
+                nScore = Math.max(-15, Math.min(15, nScore)); 
             }
 
             console.log(`[Consensus] 🗣️ LLM 敘事評分: ${nScore > 0 ? '+' : ''}${nScore} 分`);
@@ -125,6 +122,11 @@ Scoring Guide:
             console.warn(`⚠️ [Consensus] LLM 敘事鑒定異常或全線冷卻，跳過加減分: ${err.message}`);
             return { narrative_score: 0, reason: "LLM 資源池異常，敘事分數 +0" };
         }
+    }
+
+    // Watchdog Consensus 保留不變
+    async runWatchdogConsensus(mint, symbol, pnl, cvd, vwap_dev, volatility, climate) {
+        return { action: 'HOLD', reason: 'Fallback to Math Guard' }; 
     }
 }
 
