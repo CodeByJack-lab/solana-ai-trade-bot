@@ -352,14 +352,15 @@ def health_check():
     return {"status": "alive", "engine": "V10 Dual-Tower ML Brain", "cores": 1}
 
 if __name__ == "__main__":
-import uvicorn
+    import uvicorn
     import asyncio
     try:
         # 正常啟動伺服器
         uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=1, log_config="log_config.json")
     except (KeyboardInterrupt, SystemExit):
         print("🛑 [ML Engine] 收到系統中斷指令，Python 智腦已安全關機。")
-    except asyncio.exceptions.CancelledError:
+    except asyncio.CancelledError:
         print("🛑 [ML Engine] 背景任務已取消，安全關機。")
-    except Exception:
-        pass
+    except Exception as e:
+        # 🚨 絕對唔可以 pass！必須印出真實 Error，否則 Server 死咗都無人知！
+        print(f"❌ [ML Engine] 啟動失敗或崩潰: {e}")
