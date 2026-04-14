@@ -1,172 +1,80 @@
-// src/jobs/retrospectiveJob.js
-// 📝 檔案功能用途：V10 總指揮日會。專注每日覆盤並自動升級【前線買入 Scout】的劇本。
-// 🚀 升級功能：適配 Provider 專屬排隊引擎，強制呼叫 GEMINI 進行複雜邏輯運算。
-// 🛡️ 容錯升級：實裝 AI 總指揮三重 Model 陣列切換邏輯 (Graceful Fallback)，絕不斷線。
-// 🎯 動態更新：啟動時從 Supabase 讀取動態 Cron 排程時間。
+// src/services/consensusService.js
+// 📝 檔案功能用途：V10.23 純粹動態降級版 AI 議事廳
+// 🚀 核心升級：嚴格遵守 Zero-Config 原則，模型排序 100% 由 Supabase 決定，代碼僅負責偵測異常並觸發降級。
 
-const { supabase } = require('../config/supabase');
-const { keyRotator } = require('../services/keyRotator'); 
-const axios = require('axios'); 
-const cron = require('node-cron');
-const { getPortfolio } = require('../services/portfolioService');
-const { healthMonitor } = require('../services/healthMonitor');
-const { cacheManager } = require('../services/cacheManager'); 
-const { sendStrategyAlert } = require('../services/telegramService');
+const { keyRotator } = require('./keyRotator');
+const { cacheManager } = require('./cacheManager');
+const config = require('../config/config');
+const axios = require('axios');
 
-const retrospectiveJob = {
-    async runDailyBriefing() {
-        console.log('\n👑 [Retrospective AI] 啟動總指揮日會：同步 DB 劇本並進行敗局檢閱...');
-        healthMonitor.setStatus('Retrospective_AI', '🟢 正在結算與重構劇本');
+class ConsensusService {
+    
+    async runMemeConsensus(mint, marketData, options = {}) {
+        const poolType = options.poolType || 'TRENDING';
+        const promptId = poolType === 'NEWBORN' ? 'meme_scout' : 'trending_scout';
+        const symbol = marketData.symbol || 'UNKNOWN';
+        const name = marketData.name || 'UNKNOWN';
+
+        if (!config.aiKeys.GROQ || config.aiKeys.GROQ.length === 0) return { narrative_score: 0, reason: "GROQ 未啟用" };
 
         try {
-            const portfolio = getPortfolio();
-            const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
-            const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-
-            const { data: trades, error: tradesErr } = await supabase
-                .from(`trade_history_${tableSuffix}`)
-                .select('realized_pnl_pct, realized_pnl_sol, token_symbol, strategy_type, ai_factcheck_result')
-                .gte('created_at', oneDayAgo)
-                .in('action', ['SELL', 'SELL_HALF', 'LIQUIDATED']);
-                
-            if (tradesErr) throw tradesErr;
-
-            let winCount = 0, totalPnlSol = 0, losers = [];
-            if (trades && trades.length > 0) {
-                trades.forEach(t => {
-                    if (t.realized_pnl_pct > 0) winCount++;
-                    else if (t.realized_pnl_pct < 0) losers.push(t);
-                    totalPnlSol += (t.realized_pnl_sol || 0);
-                });
-            }
+            // 1. 從 Cache (Supabase 同步過來) 讀取動態設定
+            const promptConfig = cacheManager.getPromptConfig(promptId, { token_symbol: symbol, name: name });
+            const systemPrompt = promptConfig.parsedPrompt;
             
-            const totalTrades = trades?.length || 0;
-            const winRate = totalTrades > 0 ? ((winCount / totalTrades) * 100).toFixed(1) : '0.0';
+            // 🛡️ 嚴格依賴 DB 傳入的陣列，絕不 Hardcode 覆蓋 (除非 DB 崩潰才用墊底陣列)
+            const models = promptConfig.models && promptConfig.models.length > 0 
+                ? promptConfig.models 
+                : ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'];
 
-            losers.sort((a, b) => a.realized_pnl_pct - b.realized_pnl_pct);
-            const autopsyReport = losers.slice(0, 3).map(l => {
-                const safeReason = String(l.ai_factcheck_result || 'N/A').replace(/[\r\n"']/g, ' ').substring(0, 100);
-                return `-${l.token_symbol}: Loss ${l.realized_pnl_pct.toFixed(1)}% | Reason: ${safeReason}`;
-            }).join('; ') || "No losses yesterday.";
+            const aiResult = await keyRotator.runWithKey('GROQ', async (apiKey, retryCount, providerName) => {
+                // 根據失敗次數，順序抽取 Supabase 設定的 Model
+                const safeIndex = Math.min((retryCount || 0), models.length - 1);
+                const selectedModel = models[safeIndex];
 
-            const { data: config } = await supabase.from('system_config').select('latest_news_score').eq('id', 1).single();
-            
-            // V10: 移除對已刪除 table daily_audit_reports 的查詢
-            let safeMemory = "V10 ML Pipeline Active. Memory handled by Python Engine.";
-
-            // 🚀 核心升級：一次過讀取 3 個 Prompt 的所有欄位 (包含 model_main, backup 等)
-            const { data: promptsData } = await supabase.from('bot_prompts').select('*').in('prompt_id', ['meme_scout', 'trending_scout', 'master_retrospective']);
-            let currentMemeScout = "N/A";
-            let currentTrendingScout = "N/A";
-            let retroPromptRow = null;
-
-            if (promptsData) {
-                const ms = promptsData.find(p => p.prompt_id === 'meme_scout');
-                const ts = promptsData.find(p => p.prompt_id === 'trending_scout');
-                retroPromptRow = promptsData.find(p => p.prompt_id === 'master_retrospective');
-
-                if (ms) currentMemeScout = ms.content.replace(/[\r\n]/g, ' ');
-                if (ts) currentTrendingScout = ts.content.replace(/[\r\n]/g, ' ');
-            }
-
-            // 獲取 Prompt
-            let parsedPrompt = "";
-            let targetProvider = 'GEMINI';
-            
-            try {
-                const promptConfig = cacheManager.getPromptConfig('master_retrospective', {
-                    totalTrades, winRate, totalPnlSol: totalPnlSol.toFixed(4), newsScore: config?.latest_news_score || 50, 
-                    autopsyReport, lastAiMemory: safeMemory, 
-                    currentMemeScout, currentTrendingScout 
-                });
-                parsedPrompt = promptConfig?.parsedPrompt;
-                targetProvider = promptConfig?.provider || 'GEMINI';
-            } catch (e) {
-                console.warn("⚠️ [Retrospective AI] 無法從 Cache 獲取 Prompt，使用 Hardcode 備用劇本。");
-                parsedPrompt = `請根據以下勝率 ${winRate}% 和利潤 ${totalPnlSol.toFixed(4)} SOL，以及敗局：${autopsyReport}。給出簡短的 briefing_notes，並微調 new_meme_scout_prompt 和 new_trending_scout_prompt。請返回 JSON。`;
-            }
-
-            if (!parsedPrompt) throw new Error("無法生成 parsedPrompt");
-
-            // 🛡️ 提取動態降級模型
-            let retroModels = targetProvider === 'GEMINI' 
-                ? ['gemini-2.5-flash', 'gemma-3-27b-it', 'gemini-1.5-flash'] // 預設 GEMINI 防線
-                : ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768']; // 防範 Provider 改變
-
-            if (retroPromptRow) {
-                if (retroPromptRow.model_main) retroModels[0] = retroPromptRow.model_main;
-                if (retroPromptRow.model_backup_1) retroModels[1] = retroPromptRow.model_backup_1;
-                if (retroPromptRow.model_backup_2) retroModels[2] = retroPromptRow.model_backup_2;
-            }
-
-            // 🎯 核心修改：接收 retryCount，執行模型切換
-            const aiDecision = await keyRotator.enqueueRequest(targetProvider, async (apiKey, retryCount) => {
-                
-                const currentAttempt = retryCount || 0;
-                const safeIndex = Math.min(currentAttempt, retroModels.length - 1);
-                const modelToUse = retroModels[safeIndex];
-
-                if (currentAttempt > 0) {
-                    console.warn(`🔄 [Retrospective AI] 第 ${currentAttempt} 次重試，自動降級使用模型: ${modelToUse}`);
+                if (retryCount > 0) {
+                    console.warn(`🔄 [Consensus] 第 ${retryCount} 次重試，自動降級使用模型: ${selectedModel}`);
                 }
 
-                let apiUrl, payload, headers;
+                try {
+                    const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+                        model: selectedModel,
+                        messages: [{ role: "system", content: systemPrompt }],
+                        temperature: 0.3,
+                        max_tokens: 150,
+                        response_format: { type: "json_object" }
+                    }, {
+                        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+                        timeout: 5000 // 5秒超時
+                    });
 
-                if (targetProvider === 'GEMINI' || apiKey.startsWith('AIza')) {
-                    apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${apiKey}`;
-                    payload = { contents: [{ parts: [{ text: parsedPrompt }] }], generationConfig: { response_mime_type: "application/json" } };
-                    headers = { 'Content-Type': 'application/json' };
-                } else {
-                    const isGroq = apiKey.startsWith('gsk_');
-                    apiUrl = isGroq ? 'https://api.groq.com/openai/v1/chat/completions' : 'https://api.mistral.ai/v1/chat/completions';
-                    payload = { model: modelToUse, messages: [{ role: "user", content: parsedPrompt }], response_format: { type: "json_object" } };
-                    headers = { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+                    const content = response.data.choices[0]?.message?.content;
+                    
+                    // 🚨 核心防禦：如果 Model 回傳空字串 (免費版塞車常見)，當作失敗，拋給排隊系統換 Backup！
+                    if (!content || content.trim() === '') {
+                        console.warn(`⚠️ [Consensus] 模型 ${selectedModel} 回傳空內容，觸發降級切換...`);
+                        throw new Error('NO_CONTENT_FOUND');
+                    }
+
+                    const parsed = JSON.parse(content);
+                    parsed.ai_signature = `${providerName}_${selectedModel}`;
+                    return parsed;
+                } catch (e) {
+                    throw e; // 將 Error 掟返出去畀 keyRotator 處理 (加 retryCount)
                 }
+            }, promptId); 
 
-                const res = await axios.post(apiUrl, payload, { headers, timeout: 60000 });
-                const rawText = targetProvider === 'GEMINI' || apiKey.startsWith('AIza') ? res.data.candidates[0].content.parts[0].text : res.data.choices[0].message.content;
-                return JSON.parse(rawText);
-            });
+            let nScore = parseInt(aiResult.narrative_score);
+            nScore = isNaN(nScore) ? 0 : Math.max(-5, Math.min(10, nScore)); 
+            
+            console.log(`[Consensus] 🗣️ LLM 評分: ${nScore} 分 | 理由: ${aiResult.reason || '無解釋'}`);
+            return { narrative_score: nScore, reason: `[${aiResult.ai_signature}] ${aiResult.reason}` };
 
-            if (aiDecision && aiDecision.new_meme_scout_prompt && aiDecision.new_trending_scout_prompt) {
-                // 更新兩個 Scout 的劇本
-                await supabase.from('bot_prompts').upsert([
-                    { prompt_id: 'meme_scout', content: aiDecision.new_meme_scout_prompt, updated_at: new Date().toISOString() },
-                    { prompt_id: 'trending_scout', content: aiDecision.new_trending_scout_prompt, updated_at: new Date().toISOString() }
-                ], { onConflict: 'prompt_id' });
-
-                if (typeof sendStrategyAlert === 'function') {
-                    const pnlTag = totalPnlSol >= 0 ? `🟢 +${totalPnlSol.toFixed(4)}` : `🔴 ${totalPnlSol.toFixed(4)}`;
-                    const modeTag = portfolio.mode === 'LIVE' ? '🔴 [實盤]' : '🟢 [模擬]';
-                    let briefing = aiDecision.briefing_notes || '參數已更新';
-                    const reportMsg = `${modeTag} 📊 <b>每日戰報與戰術更新</b>\n\n📅 <b>過去 24 小時結算</b>\n🔄 總交易: ${totalTrades} 單\n🏆 勝率: ${winRate}%\n💰 淨利潤: ${pnlTag} SOL\n\n🤖 <b>AI 總指揮戰術調整</b>\n${briefing}`;
-                    sendStrategyAlert(reportMsg, true).catch(e => {});
-                }
-                healthMonitor.setStatus('Retrospective_AI', '🟢 結算完畢，Scout 劇本已熱更新');
-                console.log('✅ [Retrospective AI] 劇本進化成功！');
-            }
         } catch (err) {
-            console.error('❌ [Retrospective AI] 執行異常:', err.message);
-            healthMonitor.setStatus('Retrospective_AI', `🔴 執行異常: ${err.message}`);
-        }
-    },
-    // 🎯 動態排程啟動邏輯
-    async start() {
-        try {
-            const { data: config, error } = await supabase
-                .from('system_config')
-                .select('cron_retro')
-                .eq('id', 1)
-                .single();
-            
-            const cronTime = (config && config.cron_retro) ? config.cron_retro : '0 9 * * *';
-            
-            cron.schedule(cronTime, () => { this.runDailyBriefing(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
-            console.log(`🕒 [Retrospective AI] 總指揮日會已排程於 ${cronTime} (Asia/Hong_Kong) 執行`);
-        } catch (e) {
-            console.error('❌ [Retrospective AI] 讀取排程設定失敗，使用預設時間 09:00:', e.message);
-            cron.schedule('0 9 * * *', () => { this.runDailyBriefing(); }, { scheduled: true, timezone: "Asia/Hong_Kong" });
+            console.warn(`⚠️ [Consensus] 鑒定異常 (全線降級失敗): ${err.message}`);
+            return { narrative_score: 0, reason: "LLM 資源池全線異常" };
         }
     }
-};
-module.exports = { retrospectiveJob };
+}
+
+module.exports = { consensusService: new ConsensusService() };

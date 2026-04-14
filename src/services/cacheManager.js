@@ -1,5 +1,6 @@
 // src/services/cacheManager.js
 // 📝 檔案功能用途：V10 橋樑版全域大腦。不再連接 Supabase，只負責從 Redis 拉取 macro_sync_center 準備好的數據，供舊有服務同步讀取。
+// 🚀 核心更新：清理所有 V9 廢棄劇本與 POSITION_WATCHDOG，完美對齊 Supabase 數據庫的最新 Prompt 與三重降級 Model。
 
 const Redis = require('ioredis');
 const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
@@ -12,39 +13,27 @@ class CacheManager {
             prompts: new Map()
         };
         
-        // 🛡️ 核心後備底稿 (防止 Redis 未準備好時冷啟動報錯)
+        // 🛡️ 核心後備底稿 (防止 Redis 未準備好時冷啟動報錯，已與 DB 最新版本完美對齊)
         this.fallbackPrompts = {
-            'backtest_analyst': {
-                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
-                content: `You are the Chief Quant Analyst. Context: {{promptContext}}. [Task] Write a concise, professional 150-word report in simple English explaining why splitting these parameters (Trailing TP Trigger and Pullback) improves our win rate. [Rules] Output pure JSON: {"english_thought_process": "reasoning", "report": "final report in simple English"}`
-            },
-            'news_sentiment_analyst': {
-                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
-                content: `You are a top-tier Web3 market sentiment analyst. Determine macro sentiment score from -5 (fear) to 5 (greed). Titles: {{titles}} Output exact JSON format: {"score": <integer>}`
-            },
-            'CLIMATE_ADVISOR': {
-                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
-                content: `You are a top-tier Web3 Quant Strategist. Climate: {{climate}}. News: {{newsScore}}. [Task] Adjust trading parameters. Output JSON exactly like this: {"english_thought_process": "...", "trailing_trigger": <num 15 to 40>, "stop_loss": <num -25 to -10>, "max_tip_pct": <num 0.5 to 5.0>, "analysis": "<Concise English under 30 words>"}`
-            },
             'master_retrospective': {
-                provider: 'GEMINI', models: ['gemini-2.5-flash', 'gemma-3-27b-it', 'gemini-1.5-flash'],
-                content: `You are the HEAD OF TRADING. Update prompts based on yesterday's performance. Win Rate: {{winRate}}%. Autopsy: {{autopsyReport}}. Task: Output JSON with COMPLETELY REWRITTEN prompts. Format: {"new_trending_scout_prompt": "<string>", "new_meme_scout_prompt": "<string>", "briefing_notes": "<Cantonese summary>"}`
-            },
-            'POSITION_WATCHDOG': {
-                provider: 'MISTRAL', models: ['mistral-large-2512', 'mistral-small-2603', 'open-mistral-nemo'],
-                content: `You are an elite Crypto Watchdog. Token: {{token_symbol}}, Pnl: {{current_profit_pct}}%, MaxPnl: {{max_profit_pct}}%, Climate: {{market_climate}}. Output JSON: {"thought_process": "...", "action": "HOLD"|"SELL_HALF"|"SELL_ALL", "confidence": 0.9}`
+                provider: 'GEMINI', 
+                models: ['gemini-2.5-flash', 'gemma-3-27b-it', 'gemini-1.5-flash'],
+                content: `You are the HEAD OF TRADING. Update narrative prompts based on yesterday's performance. Win Rate: {{winRate}}%. Autopsy: {{autopsyReport}}. Trending Scout: "{{currentTrendingScout}}". Meme Scout: "{{currentMemeScout}}". Task: Output JSON with COMPLETELY REWRITTEN prompts. 🚨 CRITICAL RULE: You MUST instruct the scouts to output JSON containing exactly "narrative_score" (-5 to +10) and "reason". Give 0 for uncertain/no info, and -5 for obvious scams/blank tokens. Do NOT ask them to output PASS/VETO. You MUST retain ALL placeholders (e.g., {{token_symbol}}, {{name}}) in the new prompts! Format: {"new_trending_scout_prompt": "<string>", "new_meme_scout_prompt": "<string>", "briefing_notes": "<Cantonese summary>"}`
             },
             'meme_scout': {
-                provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
-                content: `You are a Ruthless Meme Coin Sniper. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Task] Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
+                provider: 'GROQ', 
+                models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+                content: `You are an elite Crypto Narrative Analyst. Your *only* mandate is to thoroughly assess the narrative and 'cult' potential of the given token. Analyze: Symbol: {{token_symbol}} Name: {{name}}. You *must* deliver your analysis in this precise JSON format: {"narrative_score": <integer from -5 to +10>, "reason": "<Concise English explanation>"}. Adhere to this scoring criteria: +8 to +10 for top-tier, original, and highly engaging meme narratives. +1 to +7 for a good, standard meme with decent community engagement. 0 for generic, uninspired, or insufficient community information, indicating a neutral or undefined narrative. -1 to -4 for low-effort, derivative copycat memes. -5 for blatant fakes, scams, or tokens that are completely blank/nameless and highly suspicious.`
             },
             'trending_scout': {
-                provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
-                content: `You are a Quant Order Flow Analyst. Target: {{token_symbol}}. Climate: {{climate}}. Base Score: {{baseScore}}/100. Data: Liq=\${{liquidity}}, Vol=\${{volume}}, OFI={{ofi}}, AvgTrade=\${{avg_trade}}, 1H={{h1}}%. [Task] Output JSON exactly: {"english_thought_process": "check", "decision": "PASS"|"VETO", "score": <int 60-100>, "reason": "<Concise Cantonese explanation>"}`
+                provider: 'GROQ', 
+                models: ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'],
+                content: `As an institutional Web3 Trend Analyst, your sole duty is to assess the long-term narrative sustainability of the token provided. Evaluate: Symbol: {{token_symbol}} Name: {{name}}. Your output MUST be EXACTLY this JSON format: {"narrative_score": <integer from -5 to +10>, "reason": "<Concise English explanation>"}. Use the following scoring guide: +8 to +10 for a proven, strong, and enduring narrative. +1 to +7 for a solid, established token with a clear but not exceptional narrative. 0 for neutral, boring, or insufficient information to make a clear judgment. -1 to -4 for a fading or weakening narrative. -5 for an obvious scam, a completely blank token, or highly suspicious activity.`
             },
-            'quant_consensus': {
-                provider: 'GROQ', models: ['llama-3.3-70b-versatile', 'llama3-8b-8192', 'mixtral-8x7b-32768'],
-                content: `You are a strict Quantitative AI Auditor. Evaluate asset {{symbol}}. Base Quant Score: {{baseScore}}/100. Output JSON: {"english_thought_process": "reasoning", "confidence": <float>, "adjustment": <integer -20 to +20>, "reason": "<Cantonese explanation>"}`
+            'news_sentiment_analyst': {
+                provider: 'MISTRAL', 
+                models: ['mistral-small-2603', 'ministral-8b-2512', 'open-mistral-nemo'],
+                content: `You are the Chief Macro Economist for a Solana High-Frequency Trading bot.\n\n[Hard Data]\n- BTC 24h Change: {{btc_change}}% (Vol: $\\{{btc_vol}}B)\n- SOL 24h Change: {{sol_change}}% (Vol: $\\{{sol_vol}}B)\n- Network Congestion (Jito Tip): {{jito_tip}} lamports\n- Bot Internal Win Rate (24h): {{winRate}}%\n\n[Latest Breaking News]\n{{titles}}\n\n[Task]\nBased on the data AND news context, is this a healthy correction, a normal chop, a raging bull, or a black swan?\nDecide the Climate: [BULL_FRENZY, CHOPPY, BEAR_PANIC]\nDetermine the News Sentiment Score: -5 (Extreme Fear) to 5 (Extreme Greed).\nOutput exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "<short cantonese explanation>"}`
             }
         };
         this.isLoaded = false;
