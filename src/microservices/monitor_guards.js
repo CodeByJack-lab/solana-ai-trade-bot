@@ -285,7 +285,7 @@ setInterval(() => {
 }, 60 * 1000); 
 
 // ------------------------------------------------------------------
-// 7. 主動清道夫 (Zombie Sweeper)
+// 7. 主動清道夫 (Zombie Sweeper) - 🚀 V10 動態對接 Supabase 時間軸
 // ------------------------------------------------------------------
 setInterval(async () => {
     if (!globalConfig.is_running) return;
@@ -294,6 +294,24 @@ setInterval(async () => {
         if (!portfolio || !portfolio.positions) return;
         const now = Date.now();
 
+        // 🎯 每次執行前，實時從 Supabase 讀取統帥部的時間限制
+        let maxAgeMeme = 15;
+        let maxAgeTrending = 120;
+        try {
+            const { data: dbConfig } = await supabase
+                .from('system_config')
+                .select('min_age_mins, max_age_mins')
+                .eq('id', 1)
+                .single();
+            if (dbConfig) {
+                // 利用 min_age_mins 作為 Meme 幣的極限時間，max_age_mins 作為 Trending 幣的極限時間
+                maxAgeMeme = dbConfig.min_age_mins || 15; 
+                maxAgeTrending = dbConfig.max_age_mins || 120; 
+            }
+        } catch (dbErr) {
+            console.warn("⚠️ [Zombie Sweeper] 無法讀取 DB 時間設定，使用預設容忍值。");
+        }
+
         for (const pos of portfolio.positions) {
             if (quarantine_lock.has(pos.mint_address)) continue;
             
@@ -301,7 +319,8 @@ setInterval(async () => {
             const currentPrice = pos.current_price_sol || pos.highest_price_sol || pos.entry_price_sol;
             const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
             
-            const timeStopLimit = pos.strategy_type?.includes('TRENDING') ? 120 : 15; 
+            // 🚀 核心修復：徹底放棄 Hardcode，改用 Database 動態參數
+            const timeStopLimit = pos.strategy_type?.includes('TRENDING') ? maxAgeTrending : maxAgeMeme; 
             
             if (ageMins >= timeStopLimit && pnlPct < 5.0) {
                 const lockKey = `sell_lock:${pos.mint_address}`;
@@ -317,7 +336,9 @@ setInterval(async () => {
                 }
             }
         }
-    } catch (e) {}
+    } catch (e) {
+        console.error("❌ [Zombie Sweeper] 執行異常:", e.message);
+    }
 }, 60 * 1000);
 
 // ------------------------------------------------------------------

@@ -37,7 +37,21 @@ let my_portfolio = {
     last_sync: null
 };
 
-let limitsCache = { maxMeme: 2, maxTrending: 3 };
+// 🚀 V10 動態持倉上限引擎 (每 30 秒自動從 DB 同步，即時生效)
+setInterval(async () => {
+    try {
+        const { data: dbConfig } = await supabase
+            .from('system_config')
+            .select('max_meme_positions, max_trending_positions')
+            .eq('id', 1)
+            .single();
+            
+        if (dbConfig) {
+            if (dbConfig.max_meme_positions !== null) limitsCache.maxMeme = dbConfig.max_meme_positions;
+            if (dbConfig.max_trending_positions !== null) limitsCache.maxTrending = dbConfig.max_trending_positions;
+        }
+    } catch (e) {}
+}, 30000);
 
 async function updateSystemStatus(msg) {
     try {

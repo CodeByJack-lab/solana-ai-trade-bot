@@ -49,15 +49,18 @@ const latest_market_data = new Map();
 const symbol_cache = new Map(); 
 let ml_compiled_rule_func = () => false; 
 
-// 🛡️ Layer 1：實體巨頭與大廠品牌黑名單
-const BRAND_BLACKLIST = new Set([
-    'OPENAI', 'CHATGPT', 'SORA', 'CLAUDE', 'GEMINI', 'NVIDIA', 'APPLE', 'META', 'GOOGLE', 'MICROSOFT', 'AMAZON', 'TSMC', 'AMD', 'INTEL',
-    'GROK', 'ELON', 'MUSK', 'TRUMP', 'BIDEN', 'OBAMA', 'PUTIN', 'ZELENSKY', 'TATE', 'MRBEAST',
-    'BLACKROCK', 'VANGUARD', 'FIDELITY', 'SEC', 'FED', 'JPMORGAN', 'OIL', 'PETROL', 'GAS', 'GOLD', 'SILVER',
-    'GTA', 'ROBLOX', 'RBX', 'NINTENDO', 'DISNEY', 'POKEMON',
-    'PEPE', 'DOGE', 'SHIB', 'MAGA', 'WIF', 'BOME', 'BONK', 'SLERF', 'POPCAT',
-    'BINANCE', 'COINBASE', 'KRAKEN', 'FTX', 'ALAMEDA', 'TETHER', 'CIRCLE', 'ZARA'
-]);
+// 🚀 V10 動態品牌防偽盾 (從 Redis 熱更新，100% 聽從 Supabase)
+let BRAND_BLACKLIST = new Set();
+async function syncBrandBlacklist() {
+    try {
+        const cachedStr = await redisClient.get('cache:brand_blacklist');
+        if (cachedStr) {
+            BRAND_BLACKLIST = new Set(JSON.parse(cachedStr));
+        }
+    } catch (e) {}
+}
+syncBrandBlacklist(); // 啟動時立刻拉取一次
+setInterval(syncBrandBlacklist, 30000); // 每 30 秒自動向 Redis 對齊
 
 // ------------------------------------------------------------------
 // 2. 時光倒流護盾 & 訊號接收
