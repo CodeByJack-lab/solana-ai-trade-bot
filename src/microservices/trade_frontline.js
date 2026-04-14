@@ -212,7 +212,7 @@ setInterval(async () => {
 function runLayer1PhysicalFilter(symbol) {
     if (!symbol) return false;
     const upperSymbol = symbol.toUpperCase();
-    if (/[^\x00-\x7F]/.test(upperSymbol)) return false;
+    if (/[^\x00-\x7F]/.test(upperSymbol) || /[^\x00-\x7F]/.test(upperName)) return false;
     if (BRAND_BLACKLIST.has(upperSymbol)) return false;
     return true;
 }
