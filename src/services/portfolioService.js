@@ -1,7 +1,7 @@
 // src/services/portfolioService.js
 // 📝 檔案功能用途：倉位與資產大管家。維護 RAM 中的持倉狀態，控制 Meme 與 Trending 雙軌額度。
 // 🚀 V10 實裝：真・鏈上同步心跳，確保實盤數據與 RPC 節點自動對齊。
-// 🛡️ 終極修復：加入跨進程記憶體同步，並實裝「防無限 Listener 護盾」杜絕 OOM。
+// 🛡️ 終極修復：加入跨進程記憶體同步，並實裝「防無限 Listener 護盾」杜絕 OOM，以及修復 limitsCache 未定義錯誤。
 
 const { supabase } = require('../config/supabase'); 
 const { connection } = require('../config/solana');
@@ -37,6 +37,12 @@ let my_portfolio = {
     last_sync: null
 };
 
+// 🚀 核心修復：宣告 limitsCache 變數並賦予預設值，防止拋出 is not defined 錯誤
+let limitsCache = {
+    maxMeme: 2,
+    maxTrending: 3
+};
+
 // 🚀 V10 動態持倉上限引擎 (每 30 秒自動從 DB 同步，即時生效)
 setInterval(async () => {
     try {
@@ -70,6 +76,8 @@ async function initPortfolio() {
         if (configErr) throw configErr;
 
         my_portfolio.mode = config ? (config.trade_mode || 'PAPER') : 'PAPER';
+        
+        // 賦予初始上限
         limitsCache.maxMeme = config?.max_meme_positions || 2;
         limitsCache.maxTrending = config?.max_trending_positions || 3;
 
