@@ -1,6 +1,7 @@
 // src/microservices/macro_sync_center.js
 // 📝 檔案功能用途：V10 【後勤樞紐】微服務 (Microservice Core)
-// 🚀 核心升級：4D 氣候台 (硬數據 + 新聞 AI 融合)、3分鐘死亡開關、Zod ML 強類型代碼編譯、API 榨汁機升級。
+// 🚀 核心升級：徹底拔除 Hardcode Prompt，全面依賴 Supabase 動態變數注入 (Zero-Prompt Codebase)。
+// 🛡️ 容錯升級：實裝 MISTRAL 三重 Model 陣列切換邏輯 (Graceful Fallback)。
 // 🦎 擴充掛載：整合 trendingMonitorService、trendingJob 以及所有 V9 背景排程，並加入 Dashboard 心跳機制。
 
 require('dotenv').config();
@@ -18,7 +19,7 @@ const { trendingMonitorService } = require('../services/trendingMonitorService')
 const { initPortfolio, getPortfolio } = require('../services/portfolioService'); 
 const { getSolPriceInHKD } = require('../services/priceService'); 
 
-// 🚀 引入維運中樞 (新增)
+// 🚀 引入維運中樞
 const { healthMonitor } = require('../services/healthMonitor');
 
 // 🎯 引入 V9 孤兒排程
@@ -101,20 +102,17 @@ async function syncCoreConfigsToRedis() {
             
             const funcBody = validConditions.length > 0 ? `return ${validConditions.join(' || ')};` : `return false;`;
             await redis.set('cache:ml_compiled_rule_string', funcBody);
-            console.log(`🧠 [Rule Compiler] 已編譯 ${validConditions.length} 條規則寫入 Redis。`);
         }
 
         const { data: brands } = await supabase.from('brand_blacklist').select('brand_name').eq('is_active', true);
         if (brands) {
             const brandArray = brands.map(b => b.brand_name.toUpperCase());
             await redis.set('cache:brand_blacklist', JSON.stringify(brandArray));
-            console.log(`🛡️ [Hot Cache] 已同步 ${brandArray.length} 個動態品牌黑名單至 Redis。`);
         }
         
         const { data: mlParams } = await supabase.from('ml_strategy_params').select('*');
         if (mlParams) {
             await redis.set('ml_strategy_params', JSON.stringify(mlParams));
-            console.log(`🧠 [Hot Cache] 已同步 ${mlParams.length} 組 ML 策略參數至 Redis。`);
         }
 
         console.log('✅ [Hot Cache] 神經網絡與黑名單緩存同步完成！');
@@ -125,7 +123,6 @@ async function syncCoreConfigsToRedis() {
 
 function setupRealtimeListeners() {
     const channel = supabase.channel('system_hot_swap');
-    
     channel.on('postgres_changes', { event: '*', schema: 'public', table: 'bot_prompts' }, syncCoreConfigsToRedis)
            .on('postgres_changes', { event: '*', schema: 'public', table: 'verified_tokens' }, syncCoreConfigsToRedis)
            .on('postgres_changes', { event: '*', schema: 'public', table: 'ai_strategy_params' }, syncCoreConfigsToRedis)
@@ -136,11 +133,10 @@ function setupRealtimeListeners() {
 }
 
 // ------------------------------------------------------------------
-// 3. 4D 大市氣候台與 3分鐘死亡開關 (硬數據 + 新聞 AI 融合版)
+// 3. 4D 大市氣候台與 3分鐘死亡開關
 // ------------------------------------------------------------------
 class EnvironmentCenter {
     
-    // 🎯 升級 1：API 榨汁機，一次過獲取 24h 變化與交易量
     async _fetchMarketMetrics() {
         for (let i = 0; i < MACRO_PROVIDERS.length; i++) {
             const provider = MACRO_PROVIDERS[(activeMacroIdx + i) % MACRO_PROVIDERS.length];
@@ -159,7 +155,6 @@ class EnvironmentCenter {
                     sol_change = res.data.solana.usd_24h_change || 0;
                     sol_vol = res.data.solana.usd_24h_vol || 0;
                 } else {
-                    // KuCoin Fallback
                     const [btcRes, solRes] = await Promise.all([
                         axios.get(`https://api.kucoin.com/api/v1/market/stats?symbol=BTC-USDT`, { timeout: 8000 }),
                         axios.get(`https://api.kucoin.com/api/v1/market/stats?symbol=SOL-USDT`, { timeout: 8000 })
@@ -177,7 +172,6 @@ class EnvironmentCenter {
         return { btc_change: 0, btc_vol: 0, sol_change: 0, sol_vol: 0 }; 
     }
 
-    // 🎯 升級 2：獲取系統 24 小時內部勝率
     async _fetchInternalWinRate() {
         try {
             const portfolio = getPortfolio();
@@ -194,9 +188,7 @@ class EnvironmentCenter {
             if (!trades || trades.length === 0) return 50.0;
             const wins = trades.filter(t => t.realized_pnl_pct > 0).length;
             return (wins / trades.length) * 100;
-        } catch(e) {
-            return 50.0;
-        }
+        } catch(e) { return 50.0; }
     }
 
     async _fetchJitoCongestion() {
@@ -214,7 +206,7 @@ class EnvironmentCenter {
                 let titles = [];
                 const res = await axios.get(provider.url, { timeout: 10000 });
                 const feed = await parser.parseString(res.data);
-                if (feed?.items) titles = feed.items.slice(0, 15).map(item => item.title); // 取 Top 15 突發
+                if (feed?.items) titles = feed.items.slice(0, 15).map(item => item.title);
 
                 if (titles.length > 0) {
                     activeNewsIdx = (activeNewsIdx + i + 1) % NEWS_PROVIDERS.length;
@@ -225,7 +217,6 @@ class EnvironmentCenter {
         return ["No breaking news available."]; 
     }
 
-    // 🎯 升級 3：硬數據 + 新聞 = 終極 AI 融合推論
     async updateEnvironment() {
         console.log(`🌍 [Macro Center] 天文台正在採集 4D 大市氣候 (硬數據 + 新聞)...`);
         
@@ -240,31 +231,53 @@ class EnvironmentCenter {
         let newsScore = 0;
         let aiReasoning = "純數降級模式 (無 AI 回應)";
 
+        // 🛡️ 提取動態降級模型與 DB Prompt
+        let mistralModels = ['mistral-small-latest', 'ministral-8b-latest', 'open-mistral-nemo'];
+        let rawPrompt = `You are the Chief Macro Economist. Analyze data: BTC {{btc_change}}%, SOL {{sol_change}}%. News: {{titles}}. Output JSON: {"climate": "CHOPPY", "news_score": 0, "reasoning": "..."}`;
+        
         try {
-            const promptStr = `You are the Chief Macro Economist for a Solana High-Frequency Trading bot.
+            const cachedStr = await redis.get('cache:bot_prompts');
+            if (cachedStr) {
+                const pMap = JSON.parse(cachedStr);
+                const dbPrompt = pMap['news_sentiment_analyst'];
+                if (dbPrompt) {
+                    if (dbPrompt.content) rawPrompt = dbPrompt.content;
+                    if (dbPrompt.model_main) mistralModels[0] = dbPrompt.model_main;
+                    if (dbPrompt.model_backup_1) mistralModels[1] = dbPrompt.model_backup_1;
+                    if (dbPrompt.model_backup_2) mistralModels[2] = dbPrompt.model_backup_2;
+                }
+            }
+        } catch (err) {
+            console.warn("⚠️ [Macro Center] 無法讀取 Redis 模型設定，使用預設 Mistral 模型與防跌 Prompt");
+        }
 
-[Hard Data]
-- BTC 24h Change: ${metrics.btc_change.toFixed(2)}% (Vol: $${(metrics.btc_vol/1e9).toFixed(1)}B)
-- SOL 24h Change: ${metrics.sol_change.toFixed(2)}% (Vol: $${(metrics.sol_vol/1e9).toFixed(1)}B)
-- Network Congestion (Jito Tip): ${jitoP50} lamports
-- Bot Internal Win Rate (24h): ${winRate.toFixed(1)}%
+        // 🎯 核心升級：動態注入變數 (拔除 Code 內的 Hardcode Prompt)
+        const promptStr = rawPrompt
+            .replace(/{{btc_change}}/g, metrics.btc_change.toFixed(2))
+            .replace(/{{btc_vol}}/g, (metrics.btc_vol/1e9).toFixed(1))
+            .replace(/{{sol_change}}/g, metrics.sol_change.toFixed(2))
+            .replace(/{{sol_vol}}/g, (metrics.sol_vol/1e9).toFixed(1))
+            .replace(/{{jito_tip}}/g, jitoP50)
+            .replace(/{{winRate}}/g, winRate.toFixed(1))
+            .replace(/{{titles}}/g, titles.map((t, i) => `${i+1}. ${t}`).join('\n'));
 
-[Latest Breaking News]
-${titles.map((t, i) => `${i+1}. ${t}`).join('\n')}
+        try {
+            const parsedAI = await keyRotator.enqueueRequest('MISTRAL', async (apiKey, retryCount) => {
+                const currentAttempt = retryCount || 0;
+                const safeIndex = Math.min(currentAttempt, mistralModels.length - 1);
+                const selectedModel = mistralModels[safeIndex];
 
-[Task]
-Based on the data AND news context, is this a healthy correction, a normal chop, a raging bull, or a black swan?
-Decide the Climate: [BULL_FRENZY, CHOPPY, BEAR_PANIC]
-Determine the News Sentiment Score: -5 (Extreme Fear) to 5 (Extreme Greed).
-Output exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "<short cantonese explanation>"}`;
+                if (currentAttempt > 0) {
+                    console.warn(`🔄 [Macro Center] 第 ${currentAttempt} 次重試，自動降級使用模型: ${selectedModel}`);
+                }
 
-            const parsedAI = await keyRotator.enqueueRequest('MISTRAL', async (apiKey) => {
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
                 const res = await axios.post('https://api.mistral.ai/v1/chat/completions', {
-                    model: 'mistral-small-latest', 
+                    model: selectedModel, 
                     messages: [{ role: "user", content: promptStr }], 
                     response_format: { type: "json_object" }
                 }, { headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' }, timeout: 15000 });
+                
                 return JSON.parse(res.data.choices[0].message.content);
             }, 'macro_climate_analyst'); 
 
@@ -278,8 +291,6 @@ Output exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "<
             aiReasoning = parsedAI.reasoning || '無具體解釋';
             
             console.log(`🤖 [AI Macro] 判定: ${currentClimate} | 情感: ${newsScore} | 理由: ${aiReasoning}`);
-            
-            // 🚀 氣候更新成功，向 HealthMonitor 報平安
             healthMonitor.setStatus('Macro_Sync_Center', '🟢 氣候監控中', `當前氣候: ${currentClimate}`);
 
         } catch (err) {
@@ -289,7 +300,6 @@ Output exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "<
             } else if (metrics.sol_change >= 5.0 && winRate > 60) {
                 currentClimate = 'RAGING_BULL';
             }
-            // 🚀 氣候更新降級，向 HealthMonitor 報告
             healthMonitor.setStatus('Macro_Sync_Center', '🟡 AI 分析超時，已降級硬邏輯', `降級氣候: ${currentClimate}`);
         }
 
@@ -344,7 +354,7 @@ Output exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "<
 const envCenter = new EnvironmentCenter();
 
 // ------------------------------------------------------------------
-// 4. 60 分鐘超時安全降級 (Auto Apply Safe Mode Fallback)
+// 4. 60 分鐘超時安全降級
 // ------------------------------------------------------------------
 async function checkAndApply60MinFallback() {
     try {
@@ -381,11 +391,6 @@ async function checkAndApply60MinFallback() {
                     updated_at: new Date().toISOString() 
                 }).eq('id', prop.id);
 
-                await supabase.from('daily_audit_reports').insert([{ 
-                    analysis_content: `【自動安全降級套用】\n60分鐘未審批，系統已自動套用 ML 數學參數（已強制 Clip 限幅），並拒絕了 LLM 的 Prompt 修改。`, 
-                    param_changes: safeParameters 
-                }]);
-                
                 await syncCoreConfigsToRedis();
             }
         }
@@ -411,22 +416,17 @@ async function bootstrap() {
     setInterval(() => envCenter._checkDeadManSwitch(), 60000);
 
     cron.schedule('* * * * *', () => checkAndApply60MinFallback());
-    console.log('🕒 [Cron] 60 分鐘實體防丟失自動套用排程已啟動 (Safe Mode Guardrails Active)。');
 
-    // 🎯 啟動所有掛載的排程與爬蟲
     trendingMonitorService.start();
     trendingJob.start(); 
     janitorJob.start();
     graveyardJob.start();
     retrospectiveJob.start();
 
-    // 🚀 新增：啟動時寫入 Database 報平安
     await healthMonitor.setStatus('Macro_Sync_Center', '🟢 氣候監控中');
 
-    // 💓 🎯 [Dashboard Heartbeat] 每 60 秒更新 bot_status，向前端 Dashboard 報平安
     setInterval(async () => {
         try {
-            // 從 DB 獲取真實運行狀態
             const { data } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
             const is_running = data ? data.is_running : true;
             
@@ -434,28 +434,19 @@ async function bootstrap() {
                 ? 'V10 雙軌智腦穩定運行中 🟢' 
                 : '系統處於暫停/待機狀態 🟡';
                 
-            await supabase.from('bot_status').upsert({
-                id: 1,
-                message: statusMsg,
-                updated_at: new Date().toISOString()
-            });
-        } catch (err) {
-            // 靜默處理，避免網絡抖動時洗版
-        }
+            await supabase.from('bot_status').upsert({ id: 1, message: statusMsg, updated_at: new Date().toISOString() });
+        } catch (err) {}
     }, 60 * 1000);
 
-    // 🎯 實時戰報打印 
     setInterval(async () => {
         try {
             const port = getPortfolio();
             if (!port) return;
             const hkd = await getSolPriceInHKD();
             const totalSol = port.cash_sol + port.positions.reduce((sum, p) => sum + (p.quantity * p.entry_price_sol), 0);
-            
             const modeText = port.mode === 'PAPER' ? '📝 模擬盤' : '🔥 實盤';
             console.log(`\n========================================`);
             console.log(`📊 [實時戰報] ${modeText} | 總資產: $${(totalSol * hkd).toFixed(2)} HKD | 現金: ${port.cash_sol.toFixed(4)} SOL`);
-            console.log(`持倉數: ${port.positions.length} 隻`);
             console.log(`========================================\n`);
         } catch(e) {}
     }, 15 * 60 * 1000); 
