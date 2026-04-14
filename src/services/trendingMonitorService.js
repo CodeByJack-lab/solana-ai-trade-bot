@@ -153,7 +153,7 @@ const trendingMonitorService = {
 
             const sym = (token_symbol || 'UNKNOWN').toUpperCase();
 
-            if (/[^\x00-\x7F]/.test(sym)) {
+            if (/[^\x00-\x7F]/.test(sym) || /[^\x00-\x7F]/.test(nameStr)) {
                 nonAsciiCount++;
                 continue; 
             }
