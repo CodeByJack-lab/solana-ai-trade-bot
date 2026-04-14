@@ -3,6 +3,7 @@
 // 🚀 核心升級：徹底拔除 Hardcode Prompt，全面依賴 Supabase 動態變數注入 (Zero-Prompt Codebase)。
 // 🛡️ 容錯升級：實裝 MISTRAL 三重 Model 陣列切換邏輯 (Graceful Fallback)。
 // 🦎 擴充掛載：整合 trendingMonitorService、trendingJob 以及所有 V9 背景排程，並加入 Dashboard 心跳機制。
+// 🧠 終極修復：完美對接 Prompt Templating，將 4D 數據精準注入 Supabase 劇本。
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
@@ -231,9 +232,11 @@ class EnvironmentCenter {
         let newsScore = 0;
         let aiReasoning = "純數降級模式 (無 AI 回應)";
 
-        // 🛡️ 提取動態降級模型與 DB Prompt
+        // 🛡️ 提取動態降級模型與 DB Prompt Template
         let mistralModels = ['mistral-small-latest', 'ministral-8b-latest', 'open-mistral-nemo'];
-        let rawPrompt = `You are the Chief Macro Economist. Analyze data: BTC {{btc_change}}%, SOL {{sol_change}}%. News: {{titles}}. Output JSON: {"climate": "CHOPPY", "news_score": 0, "reasoning": "..."}`;
+        
+        // 保底 Template (萬一 Redis/DB 死咗都有得救)
+        let rawPromptTemplate = `You are the Chief Macro Economist. Analyze data: BTC {{btc_change}}%, SOL {{sol_change}}%. News: {{titles}}. Output exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "..."}`;
         
         try {
             const cachedStr = await redis.get('cache:bot_prompts');
@@ -241,7 +244,7 @@ class EnvironmentCenter {
                 const pMap = JSON.parse(cachedStr);
                 const dbPrompt = pMap['news_sentiment_analyst'];
                 if (dbPrompt) {
-                    if (dbPrompt.content) rawPrompt = dbPrompt.content;
+                    if (dbPrompt.content) rawPromptTemplate = dbPrompt.content; // 讀取你完美嘅 {{placeholder}} 劇本
                     if (dbPrompt.model_main) mistralModels[0] = dbPrompt.model_main;
                     if (dbPrompt.model_backup_1) mistralModels[1] = dbPrompt.model_backup_1;
                     if (dbPrompt.model_backup_2) mistralModels[2] = dbPrompt.model_backup_2;
@@ -251,8 +254,8 @@ class EnvironmentCenter {
             console.warn("⚠️ [Macro Center] 無法讀取 Redis 模型設定，使用預設 Mistral 模型與防跌 Prompt");
         }
 
-        // 🎯 核心升級：動態注入變數 (拔除 Code 內的 Hardcode Prompt)
-        const promptStr = rawPrompt
+        // 🎯 核心注入 (Template Injection)：將 4D 數據完美填入你嘅 DB Prompt
+        const promptStr = rawPromptTemplate
             .replace(/{{btc_change}}/g, metrics.btc_change.toFixed(2))
             .replace(/{{btc_vol}}/g, (metrics.btc_vol/1e9).toFixed(1))
             .replace(/{{sol_change}}/g, metrics.sol_change.toFixed(2))
@@ -274,6 +277,7 @@ class EnvironmentCenter {
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
                 const res = await axios.post('https://api.mistral.ai/v1/chat/completions', {
                     model: selectedModel, 
+                    // 🧠 將注入好嘅完整 Prompt 當作單一指令交畀 Mistral
                     messages: [{ role: "user", content: promptStr }], 
                     response_format: { type: "json_object" }
                 }, { headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' }, timeout: 15000 });
