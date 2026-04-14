@@ -1,6 +1,6 @@
 // src/services/sourceAggregator.js
-// 📝 檔案功能用途：V10 多路冗餘數據源聚合器。三路 WebSocket 監聽 + LP Burn 訊號發射器。
-// 🚀 V10 升級：徹底剝離交易邏輯，專心做情報雷達，經 Redis 廣播越獄信號。
+// 📝 檔案功能用途：V10.3 多路冗餘數據源聚合器。三路 WebSocket 監聽 + LP Burn 訊號發射器。
+// 🚀 核心升級：徹底剝離 DexScreener 查價邏輯，發現新幣即秒速寫入 DB「初生保溫箱 (newborn_incubator)」，將查價責任交接給前線巡邏官。
 
 const WebSocket = require('ws');
 const axios = require('axios');
@@ -17,11 +17,8 @@ const INCINERATOR_ADDRESS = "1nc1nerator11111111111111111111111111111111";
 
 class SourceAggregator {
     constructor() {
-        this.mintBuffer = new Map(); 
+        // 🚀 V10.3: 移除了本機 mintBuffer，直接依賴 DB
         this.blacklist = ['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', '11111111111111111111111111111111', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'];
-        this.isProcessingBuffer = false;
-        
-        setInterval(() => this._processMintBuffer(), 15000);
     }
 
     sanitizeAddress(address) {
@@ -85,18 +82,35 @@ class SourceAggregator {
                     const accounts = txInfo?.data?.result?.transaction?.message?.accountKeys || [];
                     const potentialMints = accounts.map(a => a.pubkey).filter(k => !this.blacklist.includes(k) && k.length > 32);
 
-                    const now = Date.now();
                     for (const mint of potentialMints) {
                         const cleanMint = this.sanitizeAddress(mint);
-                        if (cleanMint && !this.mintBuffer.has(cleanMint)) {
-                            this.mintBuffer.set(cleanMint, now);
+                        if (cleanMint) {
+                            console.log(`🐣 [Aggregator] 發現新生命 (Mint: ${cleanMint})，直接送入初生保溫箱...`);
+                            
+                            // 🚀 核心升級：直接寫入專屬 table，不進行任何 API 請求
+                            supabase.from('newborn_incubator').upsert([
+                                { 
+                                    mint_address: cleanMint, 
+                                    token_symbol: 'UNKNOWN', // 尚未取得，交由後續巡邏官更新
+                                    token_name: 'UNKNOWN',
+                                    created_at: new Date().toISOString(),
+                                    status: 'INCUBATING'
+                                }
+                            ], { onConflict: 'mint_address' }).then(({ error }) => {
+                                if (error) console.error(`❌ [Aggregator] 存入保溫箱失敗:`, error.message);
+                            });
                         }
                     }
                 } 
                 // 🔥 攔截 2：捕捉到燒池 (LP Burn)！
                 else if (isBurn) {
-                    const nurseryCount = await redis.zcard('v9_nursery_queue');
-                    if (nurseryCount === 0) return;
+                    // 🚀 核心升級：從 Supabase 檢查是否有正在保溫的初生幣
+                    const { data: incubatingTokens } = await supabase
+                        .from('newborn_incubator')
+                        .select('mint_address')
+                        .eq('status', 'INCUBATING');
+
+                    if (!incubatingTokens || incubatingTokens.length === 0) return;
 
                     const txInfo = await axios.post(config.rpc.helius1.url || config.rpc.alchemy.url, {
                         jsonrpc: "2.0", id: 1, method: "getTransaction",
@@ -104,14 +118,14 @@ class SourceAggregator {
                     }).catch(() => null);
 
                     const accounts = txInfo?.data?.result?.transaction?.message?.accountKeys || [];
-                    const activeNurseryMints = await redis.zrange('v9_nursery_queue', 0, -1);
+                    const activeNurseryMints = incubatingTokens.map(t => t.mint_address);
 
                     for (const acc of accounts) {
                         if (activeNurseryMints.includes(acc.pubkey)) {
                             console.log(`\n🔥 [LP BURN DETECTED] 捕捉到莊家燒池訊號！廣播越獄信號: ${acc.pubkey}`);
                             await redis.set(`lp_burned:${acc.pubkey}`, 'TRUE', 'EX', 86400);
 
-                            // 🚀 V10 重構：僅廣播，由 trade_frontline 處理雙腦路由
+                            // 🚀 廣播越獄信號，由 trade_frontline 處理雙腦路由
                             await redis.publish('lp_burn_alerts', JSON.stringify({ mint: acc.pubkey }));
                             break;
                         }
@@ -131,68 +145,6 @@ class SourceAggregator {
             console.error(`❌ [WS-${name}] 錯誤: ${err.message}`);
             ws.close();
         });
-    }
-
-    async _processMintBuffer() {
-        if (this.isProcessingBuffer || this.mintBuffer.size === 0) return;
-        this.isProcessingBuffer = true;
-
-        const now = Date.now();
-        for (const [mint, timestamp] of this.mintBuffer.entries()) {
-            if (now - timestamp > 5 * 60 * 1000) {
-                this.mintBuffer.delete(mint);
-            }
-        }
-
-        const mintsToProcess = Array.from(this.mintBuffer.entries()).slice(0, 30);
-        mintsToProcess.forEach(([m, _]) => this.mintBuffer.delete(m));
-
-        if (mintsToProcess.length === 0) {
-            this.isProcessingBuffer = false;
-            return;
-        }
-
-        try {
-            const addresses = mintsToProcess.map(([m, _]) => m).join(',');
-            const url = `https://api.dexscreener.com/latest/dex/tokens/${addresses}`;
-            const res = await axios.get(url, { timeout: 5000 });
-
-            if (res.data && res.data.pairs) {
-                for (const pair of res.data.pairs) {
-                    if (pair.chainId !== 'solana') continue;
-                    const mint = pair.baseToken?.address;
-                    const liquidity = pair.liquidity?.usd || 0;
-                    const fdv = pair.fdv || 0;
-                    
-                    const isProcessed = await redis.set(`processed_mint:${mint}`, '1', 'EX', 86400, 'NX');
-                    if (!isProcessed) continue;
-
-                    let lpRatioPass = false;
-                    if (liquidity >= 5000) {
-                        if (fdv > 0) {
-                            const ratio = liquidity / fdv;
-                            if (ratio >= 0.05 && ratio <= 1.50) lpRatioPass = true;
-                        } else {
-                            lpRatioPass = true; 
-                        }
-                    }
-
-                    if (lpRatioPass) {
-                        console.log(`🎯 [Aggregator] 捕獲合格初生幣: ${pair.baseToken.symbol} (Liq: $${liquidity.toFixed(0)})，放入保溫池等待熟成...`);
-                        await redis.zadd('v9_nursery_queue', Date.now(), mint);
-                        await supabase.from('nursery_pool').upsert([{ mint_address: mint, created_at: new Date().toISOString() }]);
-                    }
-                }
-            }
-        } catch (err) {
-            const errMsg = err.response?.status === 429 ? '觸發 429 限制' : err.message;
-            console.warn(`⚠️ [Aggregator] 查價失敗 (${errMsg})，將 ${mintsToProcess.length} 隻幣退回緩衝池...`);
-            mintsToProcess.forEach(([m, ts]) => {
-                if (!this.mintBuffer.has(m)) this.mintBuffer.set(m, ts);
-            }); 
-        } finally {
-            this.isProcessingBuffer = false;
-        }
     }
 
     start() {

@@ -1,7 +1,7 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.22 【獵人中樞】微服務 (Microservice Core)
-// 🚀 核心升級：修復 securityGuard.calculateQuantScore 函數呼叫名稱錯誤。實裝「三權分立」計分法 (Quant20+ML65+LLM15)。
-// 🛡️ 終極修復：修正 LLM 敘事評分永遠食「空白代幣 -5分」的 Bug，強制 LLM 根據代幣名稱評估 Meme 潛力。
+// 📝 檔案功能用途：V10.23 【獵人中樞】微服務 (Microservice Core)
+// 🚀 核心升級：實裝「初生保溫箱」批次查價防 429 系統。全面棄用 Redis v9_nursery_queue，統一對接 Supabase DB。
+// 🛡️ 終極修復：擴展 marketData 以攜帶 full fields，完美對接 securityGuard O(1) 綠色通道防撞車。
 
 require('dotenv').config();
 const express = require('express');
@@ -59,8 +59,8 @@ async function syncBrandBlacklist() {
         }
     } catch (e) {}
 }
-syncBrandBlacklist(); // 啟動時立刻拉取一次
-setInterval(syncBrandBlacklist, 30000); // 每 30 秒自動向 Redis 對齊
+syncBrandBlacklist(); 
+setInterval(syncBrandBlacklist, 30000); 
 
 // ------------------------------------------------------------------
 // 2. 時光倒流護盾 & 訊號接收
@@ -84,7 +84,7 @@ redisSub.on('message', (channel, message) => {
         try {
             const { mint, symbol } = JSON.parse(message);
             symbol_cache.set(mint, symbol);
-            console.log(`\n🐺 [Frontline] 接收到 TRENDING 藍籌訊號: ${symbol}，送入三權決策漏斗！`);
+            console.log(`\n🐺 [Frontline] 接收到 TRENDING 熱門訊號: ${symbol}，送入三權決策漏斗！`);
             setImmediate(() => processAsymmetricRouting(mint, 'TRENDING'));
         } catch (e) {}
     }
@@ -218,7 +218,7 @@ function runLayer1PhysicalFilter(symbol) {
 }
 
 // ------------------------------------------------------------------
-// 5. Webhook 與保溫箱
+// 5. Webhook 與保溫箱 (V10.3 批次查價防 429)
 // ------------------------------------------------------------------
 app.post('/webhook/radar', (req, res) => {
     res.status(200).send('OK'); 
@@ -230,26 +230,126 @@ app.post('/webhook/radar', (req, res) => {
             if (!runLayer1PhysicalFilter(symbol)) return; 
             symbol_cache.set(payload.mint, symbol);
             
-            console.log(`\n🐺 [Frontline] 接收到 NEWBORN 藍籌訊號: ${symbol}，送入保溫箱！`);
-            await redisClient.zadd('v9_nursery_queue', Date.now(), payload.mint);
+            console.log(`\n🐺 [Frontline Webhook] 接收到 NEWBORN 訊號: ${symbol}，寫入 DB 保溫箱！`);
+            
+            await supabase.from('newborn_incubator').upsert([
+                { 
+                    mint_address: payload.mint, 
+                    token_symbol: symbol, 
+                    token_name: payload.name || 'UNKNOWN',
+                    created_at: new Date().toISOString(),
+                    status: 'INCUBATING'
+                }
+            ], { onConflict: 'mint_address' });
+
         } catch (e) {}
     });
 });
 
+// 🚀 V10.3 初生保溫箱批次巡邏官 (每 30 秒執行一次，儲滿 20 隻或最耐等 1 分鐘出車)
 setInterval(async () => {
     if (!globalConfig.is_running) return;
+
     try {
-        const now = Date.now();
-        const ripeTokens = await redisClient.zrangebyscore('v9_nursery_queue', 0, now - (5 * 60 * 1000));
-        if (ripeTokens.length > 0) {
-            await redisClient.zrem('v9_nursery_queue', ...ripeTokens);
-            for (const mint of ripeTokens) {
-                await processAsymmetricRouting(mint, 'NEWBORN');
-                await new Promise(r => setTimeout(r, 1000)); 
+        const fiveMinsAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+        
+        const { data: candidates, error } = await supabase
+            .from('newborn_incubator')
+            .select('*')
+            .eq('status', 'INCUBATING')
+            .lt('created_at', fiveMinsAgo)
+            .order('created_at', { ascending: true });
+
+        if (error || !candidates || candidates.length === 0) return;
+
+        const sixMinsAgoTs = Date.now() - 6 * 60 * 1000;
+        const oldestTokenTs = new Date(candidates[0].created_at).getTime();
+        const isTimeoutReached = oldestTokenTs <= sixMinsAgoTs;
+
+        let tokensToProcess = [];
+
+        if (candidates.length >= 20) {
+            if (isTimeoutReached) {
+                tokensToProcess = candidates;
+                console.log(`\n⏱️ [Incubator] 觸發 1 分鐘極限！共有 ${tokensToProcess.length} 隻幣強制批次查價...`);
+            } else {
+                const processCount = Math.floor(candidates.length / 20) * 20;
+                tokensToProcess = candidates.slice(0, processCount);
+                console.log(`\n⏱️ [Incubator] 儲夠 20 隻！提取 ${tokensToProcess.length} 隻開車查價 (剩餘 ${candidates.length - processCount} 隻繼續等)...`);
+            }
+        } else if (isTimeoutReached) {
+            tokensToProcess = candidates;
+            console.log(`\n⏱️ [Incubator] 未夠 20 隻，但最舊已等滿 1 分鐘！${tokensToProcess.length} 隻幣強制包車查價...`);
+        } else {
+            return;
+        }
+
+        const BATCH_SIZE = 20;
+        for (let i = 0; i < tokensToProcess.length; i += BATCH_SIZE) {
+            const batch = tokensToProcess.slice(i, i + BATCH_SIZE);
+            const mints = batch.map(c => c.mint_address).join(',');
+            
+            try {
+                const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mints}`, { timeout: 8000 });
+                const pairs = res.data?.pairs || [];
+                
+                const pairMap = new Map();
+                for (const p of pairs) {
+                    if (p.chainId === 'solana' && p.baseToken && p.baseToken.address) {
+                        const existing = pairMap.get(p.baseToken.address);
+                        if (!existing || (p.liquidity?.usd > existing.liquidity?.usd)) {
+                            pairMap.set(p.baseToken.address, p);
+                        }
+                    }
+                }
+
+                for (const token of batch) {
+                    const pair = pairMap.get(token.mint_address);
+                    
+                    if (!pair || !pair.priceUsd || (pair.liquidity?.usd < 5000)) {
+                        console.log(`💀 [Incubator] ${token.token_symbol || token.mint_address} 疑為 Rug Pull 或流動性不足 ($${pair?.liquidity?.usd || 0})，剔除。`);
+                        await supabase.from('newborn_incubator').update({ status: 'RUGGED' }).eq('mint_address', token.mint_address);
+                        continue;
+                    }
+
+                    // 🚀 核心修復：打包完整數據，供 securityGuard O(1) 取用防撞車
+                    const marketData = {
+                        p: parseFloat(pair.priceUsd),
+                        v: pair.volume?.m5 || 0,
+                        b: pair.txns?.m5?.buys || 0,
+                        s: pair.txns?.m5?.sells || 0,
+                        l: pair.liquidity?.usd || 0,
+                        ts: Date.now(),
+                        description: pair.info?.description || pair.baseToken?.name || '',
+                        symbol: pair.baseToken?.symbol || 'UNKNOWN',
+                        name: pair.baseToken?.name || 'UNKNOWN',
+                        fdv: pair.fdv || 0,
+                        h1: parseFloat(pair.priceChange?.h1) || 0,
+                        hasSocials: (pair.info?.socials?.length > 0 || pair.info?.websites?.length > 0)
+                    };
+
+                    latest_market_data.set(token.mint_address, marketData);
+                    symbol_cache.set(token.mint_address, pair.baseToken.symbol || token.token_symbol);
+
+                    await processAsymmetricRouting(token.mint_address, 'NEWBORN');
+
+                    await supabase.from('newborn_incubator').update({ status: 'PROCESSED' }).eq('mint_address', token.mint_address);
+                }
+
+            } catch (err) {
+                console.warn(`⚠️ [Incubator] 批次查價失敗:`, err.message);
+            }
+
+            if (i + BATCH_SIZE < tokensToProcess.length) {
+                console.log(`⏳ [Incubator] 等待 5 秒 Cooldown...`);
+                await new Promise(resolve => setTimeout(resolve, 5000));
             }
         }
-    } catch (e) {}
-}, 10000);
+
+    } catch (e) {
+        console.error("❌ [Incubator Critical] 巡邏官失職:", e.message);
+    }
+}, 30 * 1000);
 
 // ------------------------------------------------------------------
 // 6. 100% 全自動狙擊漏斗 (三權分立計分版)
@@ -264,8 +364,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const symbol = symbol_cache.get(mint) || 'UNKNOWN';
 
-        // 🛡️ 第一權：Quant 量化物理安檢 (滿分 20 分)
-        const secResult = await securityGuard.calculateQuantScore(mint, poolType);
+        // 🛡️ 核心修復：將前線 Batch 查回來的 marketData 餵給保安部，避免重複 Call DexScreener
+        const secResult = await securityGuard.calculateQuantScore(mint, poolType, marketData);
+        
         if (!secResult.isSafe) {
             console.log(`🛑 [Quant Reject] ${symbol} 未達基準: ${secResult.reason}`);
             
@@ -299,7 +400,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         const appliedMlStrategyId = secResult.applied_ml_strategy_id || 0;
         console.log(`   - 🛡️ [Quant] 基礎物理審核通過，得分: ${quantScore}/20`);
 
-        // 🧠 第二權：Python ML 大腦預測勝率 (滿分 65 分)
         let mlScore = 32; 
         let mlConfidenceMultiplier = 1.0; 
         
@@ -317,7 +417,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             console.warn(`   - ⚠️ [ML Brain] 離線或超時，無法獲取勝率預測 (給予預設 32 分)`);
         }
 
-        // 🗣️ 第三權：LLM 敘事與防山寨審批 (-5 分 到 +15 分)
         const envStateStr = await redisClient.get('global_env_state');
         const envState = envStateStr ? JSON.parse(envStateStr) : { climate: 'CHOPPY' };
         
@@ -328,10 +427,8 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             
             const llmStartTime = Date.now();
             
-            // 🚨 終極修復：解決 99% 新幣無 Description 導致被 LLM 狂扣 5 分的 Bug
             let llmTargetData = secResult.marketData || {};
             if (!llmTargetData.description || llmTargetData.description.trim() === '') {
-                // 強制賦予預設敘事，逼使 LLM 分析名字與代號，而唔係直接判死刑
                 llmTargetData.description = `Newly launched community token. Ticker: $${llmTargetData.symbol}, Name: ${llmTargetData.name}. No official description provided yet. Please evaluate the viral/meme potential based solely on its ticker and name. Do NOT penalize for lacking description.`;
             }
 
@@ -344,7 +441,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             console.warn(`   - ⚠️ [LLM Down] 敘事分析失敗，跳過 LLM 加減分。`);
         }
 
-        // 🚀 4. 全自動發射決策 
         const finalScore = quantScore + mlScore + llmScore;
         
         let buyThreshold = 70; 
@@ -418,22 +514,50 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 }
 
 // ------------------------------------------------------------------
-// 7. LP Burn 越獄接收器
+// 7. LP Burn 越獄接收器 (直接查詢 Supabase 保溫箱)
 // ------------------------------------------------------------------
 burnSub.subscribe('lp_burn_alerts');
 burnSub.on('message', async (channel, message) => {
     if (channel === 'lp_burn_alerts') {
         try {
             const { mint } = JSON.parse(message);
-            const marketData = latest_market_data.get(mint);
             const symbol = symbol_cache.get(mint) || 'UNKNOWN';
-            
-            if (marketData && marketData.l > 5000) {
-                const removed = await redisClient.zrem('v9_nursery_queue', mint);
-                if (removed) {
-                    console.log(`🔥 [Interrupt] 接收到 LP Burn 越獄訊號！立刻將 ${symbol} 押送至決策漏斗！`);
-                    setImmediate(() => processAsymmetricRouting(mint, 'NEWBORN'));
+
+            const { data: incubating } = await supabase
+                .from('newborn_incubator')
+                .select('mint_address')
+                .eq('mint_address', mint)
+                .eq('status', 'INCUBATING')
+                .single();
+
+            if (incubating) {
+                console.log(`🔥 [Interrupt] 接收到 LP Burn 越獄訊號！立刻將 ${symbol} 查價並押送至決策漏斗！`);
+
+                const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 4000 });
+                const pair = res.data?.pairs?.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
+
+                if (pair && pair.priceUsd && pair.liquidity?.usd >= 5000) {
+                    
+                    // 🚀 核心修復：打包完整數據供綠色通道使用
+                    const marketData = {
+                        p: parseFloat(pair.priceUsd), v: pair.volume?.m5 || 0,
+                        b: pair.txns?.m5?.buys || 0, s: pair.txns?.m5?.sells || 0,
+                        l: pair.liquidity?.usd || 0, ts: Date.now(), 
+                        description: pair.info?.description || pair.baseToken?.name || '',
+                        symbol: pair.baseToken?.symbol || 'UNKNOWN',
+                        name: pair.baseToken?.name || 'UNKNOWN',
+                        fdv: pair.fdv || 0,
+                        h1: parseFloat(pair.priceChange?.h1) || 0,
+                        hasSocials: (pair.info?.socials?.length > 0 || pair.info?.websites?.length > 0)
+                    };
+                    latest_market_data.set(mint, marketData);
+
+                    await processAsymmetricRouting(mint, 'NEWBORN');
+                } else {
+                    console.log(`💀 [Incubator Escape Failed] ${symbol} 雖燒池但流動性不足或無報價。`);
                 }
+                
+                await supabase.from('newborn_incubator').update({ status: 'ESCAPED' }).eq('mint_address', mint);
             }
         } catch (e) {}
     }
@@ -443,7 +567,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.22 (三權分立 AI 天網) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.23 (三權分立 AI 天網 + 批次查價防禦) 啟動中...");
     
     await initPortfolio();
     
@@ -457,7 +581,7 @@ async function bootstrap() {
     });
     sourceAggregator.start();
     
-    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中');
+    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中 (批次巡邏版)');
 }
 
 bootstrap();
