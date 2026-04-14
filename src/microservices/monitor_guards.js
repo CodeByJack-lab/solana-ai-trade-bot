@@ -2,6 +2,7 @@
 // 📝 檔案功能用途：V10.18 【護盤鐵衛】微服務 (Microservice Core)
 // 🚀 核心升級：O(1) 無迴圈運算、事件驅動觸發 AI Watchdog、完整繼承 V9 神風逃生艙與硬止損。
 // 🛡️ 終極修復：完美對接 Python 動態 SL/TP 參數；修復 DEFCON 逃生後的 Database 幽靈倉位卡死 Bug。
+// 🌪️ V10.24 新增：主動清道夫實裝「大市氣候動態縮放 (Dynamic Climate Scaling)」，牛市多耐心，熊市急斬倉。
 
 require('dotenv').config();
 const Redis = require('ioredis');
@@ -285,7 +286,7 @@ setInterval(() => {
 }, 60 * 1000); 
 
 // ------------------------------------------------------------------
-// 7. 主動清道夫 (Zombie Sweeper) - 🚀 V10 動態對接 Supabase 時間軸
+// 7. 主動清道夫 (Zombie Sweeper) - 🚀 V10.24 大市氣候動態縮放版
 // ------------------------------------------------------------------
 setInterval(async () => {
     if (!globalConfig.is_running) return;
@@ -294,9 +295,9 @@ setInterval(async () => {
         if (!portfolio || !portfolio.positions) return;
         const now = Date.now();
 
-        // 🎯 每次執行前，實時從 Supabase 讀取統帥部的時間限制
-        let maxAgeMeme = 15;
-        let maxAgeTrending = 120;
+        // 🎯 1. 讀取基礎設定
+        let baseMaxAgeMeme = 15;
+        let baseMaxAgeTrending = 120;
         try {
             const { data: dbConfig } = await supabase
                 .from('system_config')
@@ -304,14 +305,44 @@ setInterval(async () => {
                 .eq('id', 1)
                 .single();
             if (dbConfig) {
-                // 利用 min_age_mins 作為 Meme 幣的極限時間，max_age_mins 作為 Trending 幣的極限時間
-                maxAgeMeme = dbConfig.min_age_mins || 15; 
-                maxAgeTrending = dbConfig.max_age_mins || 120; 
+                baseMaxAgeMeme = dbConfig.min_age_mins || 15; 
+                baseMaxAgeTrending = dbConfig.max_age_mins || 120; 
             }
         } catch (dbErr) {
-            console.warn("⚠️ [Zombie Sweeper] 無法讀取 DB 時間設定，使用預設容忍值。");
+            console.warn("⚠️ [Zombie Sweeper] 無法讀取 DB 時間設定，使用預設值。");
         }
 
+        // 🧠 2. 獲取當前大市氣候 (本機已由定時器同步維護 localClimate)
+        const currentClimate = localClimate;
+
+        // ⚖️ 3. 定義「氣候乘數」與「容忍利潤線」
+        let timeMultiplier = 1.0;
+        let requiredPnlPct = 5.0;
+
+        switch (currentClimate) {
+            case 'RAGING_BULL':
+                timeMultiplier = 2.0;    // 畀多一倍時間洗盤
+                requiredPnlPct = 1.0;    // 只要唔蝕錢/微賺，就繼續 Hold
+                break;
+            case 'BULL_FRENZY':
+                timeMultiplier = 1.5;
+                requiredPnlPct = 2.0;
+                break;
+            case 'BEAR_PANIC':
+                timeMultiplier = 0.5;    // 死線減半！快刀斬亂麻
+                requiredPnlPct = 8.0;    // 如果咁惡劣都賺唔到 8%，即刻掟
+                break;
+            case 'CHOPPY':
+            default:
+                timeMultiplier = 1.0;
+                requiredPnlPct = 5.0;
+                break;
+        }
+
+        const dynamicAgeMeme = Math.floor(baseMaxAgeMeme * timeMultiplier);
+        const dynamicAgeTrending = Math.floor(baseMaxAgeTrending * timeMultiplier);
+
+        // 🧹 4. 執行清掃
         for (const pos of portfolio.positions) {
             if (quarantine_lock.has(pos.mint_address)) continue;
             
@@ -319,15 +350,16 @@ setInterval(async () => {
             const currentPrice = pos.current_price_sol || pos.highest_price_sol || pos.entry_price_sol;
             const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
             
-            // 🚀 核心修復：徹底放棄 Hardcode，改用 Database 動態參數
-            const timeStopLimit = pos.strategy_type?.includes('TRENDING') ? maxAgeTrending : maxAgeMeme; 
+            const timeStopLimit = pos.strategy_type?.includes('TRENDING') ? dynamicAgeTrending : dynamicAgeMeme; 
             
-            if (ageMins >= timeStopLimit && pnlPct < 5.0) {
+            if (ageMins >= timeStopLimit && pnlPct < requiredPnlPct) {
                 const lockKey = `sell_lock:${pos.mint_address}`;
                 const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                 if (acquired) {
-                    console.log(`🧹 [Zombie Sweeper] ${pos.token_symbol} 滯留過久 (${ageMins.toFixed(0)} mins 未達標)，無差別清倉！`);
-                    const sold = await runSellPipeline(pos, currentPrice, `⏱️ Time-Stop 觸發：超時未達獲利指標`, 1.0)
+                    console.log(`🧹 [Zombie Sweeper] ${pos.token_symbol} 滯留過久 (${ageMins.toFixed(0)} / ${timeStopLimit} mins 未達標 ${requiredPnlPct}%)，無差別清倉！`);
+                    console.log(`   ↳ [氣候因數] 當前氣候: ${currentClimate} | 時間乘數: x${timeMultiplier}`);
+                    
+                    const sold = await runSellPipeline(pos, currentPrice, `⏱️ Time-Stop (${currentClimate}): 超時 ${timeStopLimit}m 未達 ${requiredPnlPct}%`, 1.0)
                         .finally(() => redisClient.del(lockKey));
                     if (sold) {
                         guard_states.delete(pos.mint_address);
@@ -345,7 +377,7 @@ setInterval(async () => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10 (護盤鐵衛) 啟動中...");
+    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.24 (護盤鐵衛) 啟動中...");
     await initPortfolio();
     
     // 🚀 新增：啟動時寫入 Database 報平安
@@ -354,6 +386,7 @@ async function bootstrap() {
     console.log("   - O(1) Float64Array 數學引擎已就緒 (含 CVD 量價背離過濾與 Watchdog 廣播)。");
     console.log("   - 1 分鐘冷啟動靜默期與 Redis 併發平倉鎖已就緒。");
     console.log("   - 實體隔離逃生艙與 LIQUIDATE_ALL 全域強平通道已就緒。");
+    console.log("   - 大市氣候動態縮放 (Dynamic Climate Scaling) 掃地機制已就緒。");
 }
 
 bootstrap();

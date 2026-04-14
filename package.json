@@ -24,6 +24,7 @@
     "@solana/web3.js": "^1.98.4",
     "@supabase/supabase-js": "^2.99.1",
     "axios": "^1.13.6",
+    "bigint-buffer": "^1.1.5",
     "bignumber.js": "^10.0.2",
     "bs58": "^6.0.0",
     "cors": "^2.8.6",
