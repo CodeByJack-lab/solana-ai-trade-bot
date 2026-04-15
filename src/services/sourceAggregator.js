@@ -8,7 +8,7 @@ const axios = require('axios');
 const Redis = require('ioredis');
 const { supabase } = require('../config/supabase');
 const config = require('../config/config');
-const { connection } = require('../config/solana'); // 🚀 引入官方連線引擎
+const { connection } = require('../config/solana'); // 🚀 引入官方連線引擎，不再依賴 axios 估路徑
 
 const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 
@@ -19,7 +19,6 @@ const INCINERATOR_ADDRESS = "1nc1nerator11111111111111111111111111111111";
 
 class SourceAggregator {
     constructor() {
-        // V10: 移除了本機 mintBuffer，直接依賴 DB newborn_incubator
         this.blacklist = ['So11111111111111111111111111111111111111112', 'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v', '11111111111111111111111111111111', 'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB'];
     }
 
@@ -76,21 +75,20 @@ class SourceAggregator {
                     const isSeen = await redis.set(`seen_sig:${signature}`, '1', 'EX', 3600, 'NX');
                     if (!isSeen) return; 
 
-                    // 🚀 核心修復：直接使用 solana.js 提供的 connection，安全穩定
+                    // 🚀 核心修復：使用官方 connection 抓取 Transaction，穩陣防報錯
                     const txInfo = await connection.getTransaction(signature, { 
                         maxSupportedTransactionVersion: 0, 
                         commitment: "confirmed" 
                     }).catch(() => null);
 
                     const accounts = txInfo?.transaction?.message?.accountKeys || [];
-                    // 確保安全解析 Pubkey
                     const potentialMints = accounts.map(a => a.pubkey ? a.pubkey.toString() : a.toString())
                                                    .filter(k => k && !this.blacklist.includes(k) && k.length > 32);
 
                     for (const mint of potentialMints) {
                         const cleanMint = this.sanitizeAddress(mint);
                         if (cleanMint) {
-                            console.log(`🐣 [Aggregator] 發現新生命 (Mint: ${cleanMint})，直接送入初生保溫箱...`);
+                            console.log(`🐣 [Aggregator] 發現新生命 (Mint: ${cleanMint})，送入初生保溫箱 (等待 5 分鐘試煉)...`);
                             
                             const { error } = await supabase.from('newborn_incubator').upsert([
                                 { mint_address: cleanMint }
@@ -109,7 +107,6 @@ class SourceAggregator {
 
                     if (!incubatingTokens || incubatingTokens.length === 0) return;
 
-                    // 🚀 核心修復：直接使用 solana.js 提供的 connection
                     const txInfo = await connection.getTransaction(signature, { 
                         maxSupportedTransactionVersion: 0, 
                         commitment: "confirmed" 
