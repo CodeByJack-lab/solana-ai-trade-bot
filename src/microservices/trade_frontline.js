@@ -4,7 +4,7 @@
 // 🛡️ 終極修復：擴展 marketData 以攜帶 full fields，完美對接 securityGuard O(1) 綠色通道防撞車。
 // 🧠 動態及格：完美對接 ML Engine 每日進化之 `ml_strategy_params`，從 Redis 陣列精準抓取大市專屬門檻。
 // ⏱️ 保溫修復：拔除 5 分鐘時光陷阱，改為滿 20 隻或最舊等滿 1 分鐘即發車。
-// 👻 影子修復：精準設定 50-55 分為 Shadow 區間，並修正 DB Schema 欄位不匹配導致寫入失敗之 Bug。
+// 👻 影子修復：動態設定 50 至 (及格線-1) 為 Shadow 區間，最大化收集邊緣數據供 ML 訓練。
 
 require('dotenv').config();
 const express = require('express');
@@ -437,6 +437,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const finalScore = quantScore + mlScore + llmScore;
         
+        // ---------------------------------------------------------
+        // 🚀 動態獲取最新及格線
+        // ---------------------------------------------------------
         let buyThreshold = 70; 
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
@@ -483,9 +486,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
-            // 🎯 核心修復：精準定義 50-55 分為 Shadow 區間，並修正 Insert 欄位不匹配 Bug
-            if (finalScore >= 50 && finalScore <= 55) {
-                console.log(`👻 [Shadow Route] ${symbol} 落入 50-55 分區間，建立影子倉位 (供 ML 訓練用)。`);
+            // 🎯 核心修復：動態定義 50 至 (及格線-1) 為 Shadow 區間，最大化吸收 ML 訓練數據
+            if (finalScore >= 50 && finalScore < buyThreshold) {
+                console.log(`👻 [Shadow Route] ${symbol} 落入 50-${buyThreshold - 1} 分區間，建立影子倉位 (供 ML 訓練用)。`);
                 
                 const { error: shadowErr } = await supabase.from('active_positions_shadow').insert({
                     mint_address: mint,
@@ -565,7 +568,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (三權分立 + 50-55分精準 Shadow 版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (三權分立 + 動態 Shadow 區間版) 啟動中...");
     
     await initPortfolio();
     
@@ -579,7 +582,7 @@ async function bootstrap() {
     });
     sourceAggregator.start();
     
-    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中');
+    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中 (養蠱試煉版)');
 }
 
 bootstrap();
