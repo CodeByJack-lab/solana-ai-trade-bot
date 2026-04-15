@@ -3,27 +3,27 @@
 // 🚀 核心升級：實裝「初生保溫箱」批次查價防 429 系統。全面棄用 Redis v9_nursery_queue，統一對接 Supabase DB。
 // 🛡️ 終極修復：擴展 marketData 以攜帶 full fields，完美對接 securityGuard O(1) 綠色通道防撞車。
 // 🧠 動態及格：完美對接 ML Engine 每日進化之 `ml_strategy_params`，從 Redis 陣列精準抓取大市專屬門檻。
+// ⏱️ 保溫修復：拔除 5 分鐘時光陷阱，改為滿 20 隻或最舊等滿 1 分鐘即發車。
+// 👻 影子修復：精準設定 50-55 分為 Shadow 區間，並修正 DB Schema 欄位不匹配導致寫入失敗之 Bug。
 
 require('dotenv').config();
 const express = require('express');
 const Redis = require('ioredis');
 const crypto = require('crypto');
-const axios = require('axios'); 
+const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js'); 
 
 // 載入 V10 底層模組
-const { getPortfolio, initPortfolio, canBuyMeme, canBuyTrending } = require('../services/portfolioService'); 
+const { getPortfolio, initPortfolio, canBuyMeme, canBuyTrending } = require('../services/portfolioService');
 const { securityGuard } = require('../services/securityGuard'); 
 const { consensusService } = require('../services/consensusService'); 
-const { executeBuy, runSellPipeline } = require('../services/tradeService'); 
+const { executeBuy, runSellPipeline } = require('../services/tradeService');
 const { sendTelegramAlert, processTelegramCallback } = require('../services/telegramService'); 
 const { getJupiterFinalQuote } = require('../services/tradeService');
-const { sourceAggregator } = require('../services/sourceAggregator'); 
+const { sourceAggregator } = require('../services/sourceAggregator');
 const { walletMonitorRouter } = require('../services/walletMonitor'); 
 const { keyRotator } = require('../services/keyRotator'); 
-const { cacheManager } = require('../services/cacheManager'); 
-
-// 🚀 引入維運中樞
+const { cacheManager } = require('../services/cacheManager');
 const { healthMonitor } = require('../services/healthMonitor');
 
 // ------------------------------------------------------------------
@@ -31,7 +31,6 @@ const { healthMonitor } = require('../services/healthMonitor');
 // ------------------------------------------------------------------
 const app = express();
 app.use(express.json());
-
 app.use('/', walletMonitorRouter);
 
 const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
@@ -48,9 +47,9 @@ let globalConfig = { is_running: true };
 const last_valid_ts = new Map();
 const latest_market_data = new Map();
 const symbol_cache = new Map(); 
-let ml_compiled_rule_func = () => false; 
+let ml_compiled_rule_func = () => false;
 
-// 🚀 V10 動態品牌防偽盾 (從 Redis 熱更新，100% 聽從 Supabase)
+// 🚀 V10 動態品牌防偽盾
 let BRAND_BLACKLIST = new Set();
 async function syncBrandBlacklist() {
     try {
@@ -70,7 +69,6 @@ redisSub.subscribe('price_updates', 'trending_signal');
 redisSub.on('message', (channel, message) => {
     if (channel === 'price_updates') {
         healthMonitor.recordHeartbeat('PriceBot_Koyeb');
-        
         try {
             const payload = JSON.parse(message);
             for (const [mint, data] of Object.entries(payload)) {
@@ -91,7 +89,7 @@ redisSub.on('message', (channel, message) => {
     }
 });
 
-// 🤖 接收 monitor_guards 的 AI 體檢請求 (Event-Driven Watchdog)
+// 🤖 接收 monitor_guards 的 AI 體檢請求
 watchdogSub.subscribe('watchdog_alerts');
 watchdogSub.on('message', async (channel, message) => {
     if (channel === 'watchdog_alerts') {
@@ -118,7 +116,6 @@ watchdogSub.on('message', async (channel, message) => {
             }, 'POSITION_WATCHDOG');
 
             healthMonitor.recordAiLatency(Date.now() - aiStartTime);
-
             console.log(`🤖 [AI Watchdog] $${symbol} | 判定: ${decision.action} | 理由: ${decision.thought_process}`);
 
             if (decision.action === 'SELL_HALF' || decision.action === 'SELL_ALL') {
@@ -183,7 +180,6 @@ setInterval(async () => {
 
     if (deadMints.length > 0) {
         console.warn(`🚨 [DEFCON 6] Koyeb 查價中斷！有 ${deadMints.length} 隻持倉幣超過 6 秒無報價，啟動 Jupiter 救援！`);
-        
         try {
             const jupMints = [...deadMints, 'So11111111111111111111111111111111111111112'];
             const res = await axios.get(`https://api.jup.ag/price/v3?ids=${jupMints.join(',')}`, { timeout: 3000 });
@@ -203,7 +199,6 @@ setInterval(async () => {
             if (Object.keys(fallbackPayload).length > 0) {
                 await redisClient.publish('price_updates', JSON.stringify(fallbackPayload));
             }
-            
         } catch (err) {
             console.error(`❌ [Jupiter Rescue] 救援失敗: ${err.message}`);
         }
@@ -252,7 +247,6 @@ setInterval(async () => {
     if (!globalConfig.is_running) return;
 
     try {
-        // 🎯 完美保留：只有在保溫箱「存活超過 5 分鐘」的幣才配被審查！
         const fiveMinsAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
         
         const { data: candidates, error } = await supabase
@@ -308,14 +302,12 @@ setInterval(async () => {
                 for (const token of batch) {
                     const pair = pairMap.get(token.mint_address);
                     
-                    // 🛡️ 垃圾過濾：捱唔過 5 分鐘、被抽乾流動性嘅幣，喺度就會被踢走！
                     if (!pair || !pair.priceUsd || (pair.liquidity?.usd < 5000)) {
                         console.log(`💀 [Incubator] ${token.token_symbol || token.mint_address} 試煉失敗！流動性不足 ($${pair?.liquidity?.usd || 0})，判定為 Rug/垃圾幣，剔除。`);
                         await supabase.from('newborn_incubator').update({ status: 'RUGGED' }).eq('mint_address', token.mint_address);
                         continue;
                     }
 
-                    // 🚀 核心修復：打包完整數據，供 securityGuard O(1) 取用防撞車
                     const marketData = {
                         p: parseFloat(pair.priceUsd),
                         v: pair.volume?.m5 || 0,
@@ -445,9 +437,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const finalScore = quantScore + mlScore + llmScore;
         
-        // ---------------------------------------------------------
-        // 🚀 動態獲取最新及格線 (確保正確解析 Redis Array)
-        // ---------------------------------------------------------
         let buyThreshold = 70; 
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
@@ -494,23 +483,25 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
-            if (finalScore >= (buyThreshold - 10)) {
-                const { data: config } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
-                if (config && config.trade_mode !== 'LIVE') {
-                     await supabase.from('active_positions_shadow').insert({
-                         mint_address: mint,
-                         token_symbol: symbol,
-                         entry_price_sol: marketData.p,
-                         highest_price_sol: marketData.p,
-                         quantity: 1,
-                         strategy_type: poolType + '_SHADOW',
-                         ai_reason: llmReason,
-                         ai_score: finalScore,
-                         entry_liquidity_usd: marketData.l,
-                         entry_volume_5m_usd: marketData.v,
-                         entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
-                         market_climate: envState.climate
-                     });
+            // 🎯 核心修復：精準定義 50-55 分為 Shadow 區間，並修正 Insert 欄位不匹配 Bug
+            if (finalScore >= 50 && finalScore <= 55) {
+                console.log(`👻 [Shadow Route] ${symbol} 落入 50-55 分區間，建立影子倉位 (供 ML 訓練用)。`);
+                
+                const { error: shadowErr } = await supabase.from('active_positions_shadow').insert({
+                    mint_address: mint,
+                    token_symbol: symbol,
+                    strategy_type: poolType + '_SHADOW',
+                    entry_price_sol: marketData.p,
+                    ai_score: finalScore,
+                    ai_reason: llmReason,
+                    entry_liquidity_usd: marketData.l,
+                    entry_volume_5m_usd: marketData.v,
+                    entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
+                    market_climate: envState.climate
+                });
+
+                if (shadowErr) {
+                    console.error(`❌ [Shadow Error] 寫入 active_positions_shadow 失敗:`, shadowErr.message);
                 }
             }
         }
@@ -574,7 +565,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (三權分立 + 5分鐘養蠱試煉版) 啟立中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (三權分立 + 50-55分精準 Shadow 版) 啟動中...");
     
     await initPortfolio();
     
@@ -588,7 +579,7 @@ async function bootstrap() {
     });
     sourceAggregator.start();
     
-    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中 (養蠱試煉版)');
+    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中');
 }
 
 bootstrap();
