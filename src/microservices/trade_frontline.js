@@ -5,6 +5,7 @@
 // 🧠 動態及格：完美對接 ML Engine 每日進化之 `ml_strategy_params`，從 Redis 陣列精準抓取大市專屬門檻。
 // ⏱️ 保溫修復：拔除 5 分鐘時光陷阱，改為滿 20 隻或最舊等滿 1 分鐘即發車。
 // 👻 影子修復：動態設定 50 至 (及格線-1) 為 Shadow 區間，最大化收集邊緣數據供 ML 訓練。
+// 🛑 防禦升級：攔截已持有倉位，踢出 trending_pool；加入 Shadow 表防重覆寫入機制。
 
 require('dotenv').config();
 const express = require('express');
@@ -354,10 +355,24 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         if (poolType === 'NEWBORN' && !canBuyMeme()) return;
         if (poolType === 'TRENDING' && !canBuyTrending()) return;
 
+        const symbol = symbol_cache.get(mint) || 'UNKNOWN';
+
+        // 🛑 核心防禦：檢查 RAM 倉位，避免對已持有的代幣重複買入及消耗 API 費用
+        const portfolio = getPortfolio();
+        const isHolding = portfolio.positions && portfolio.positions.some(p => p.mint_address === mint);
+        
+        if (isHolding) {
+            console.log(`⚠️ [Frontline] 發現已持有倉位 $${symbol}，停止重複掃描/買入。`);
+            if (poolType === 'TRENDING') {
+                // 如果是 TRENDING 掃到的舊幣，順手將其從 DB 踢出，保持池子乾淨
+                await supabase.from('trending_pool').delete().eq('mint_address', mint);
+                console.log(`🗑️ [Frontline] 已將 $${symbol} 從 trending_pool 中剔除。`);
+            }
+            return;
+        }
+
         const marketData = latest_market_data.get(mint); 
         if (!marketData || marketData.v === 0) return;
-
-        const symbol = symbol_cache.get(mint) || 'UNKNOWN';
 
         const secResult = await securityGuard.calculateQuantScore(mint, poolType, marketData);
         
@@ -486,25 +501,37 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
-            // 🎯 核心修復：動態定義 50 至 (及格線-1) 為 Shadow 區間，最大化吸收 ML 訓練數據
+            // 🎯 核心防禦與修復：動態定義 50 至 (及格線-1) 為 Shadow 區間
             if (finalScore >= 50 && finalScore < buyThreshold) {
-                console.log(`👻 [Shadow Route] ${symbol} 落入 50-${buyThreshold - 1} 分區間，建立影子倉位 (供 ML 訓練用)。`);
                 
-                const { error: shadowErr } = await supabase.from('active_positions_shadow').insert({
-                    mint_address: mint,
-                    token_symbol: symbol,
-                    strategy_type: poolType + '_SHADOW',
-                    entry_price_sol: marketData.p,
-                    ai_score: finalScore,
-                    ai_reason: llmReason,
-                    entry_liquidity_usd: marketData.l,
-                    entry_volume_5m_usd: marketData.v,
-                    entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
-                    market_climate: envState.climate
-                });
+                // 🛑 防重覆寫入：先檢查 Shadow 表是否已存在該幣
+                const { data: existingShadow, error: checkErr } = await supabase
+                    .from('active_positions_shadow')
+                    .select('id')
+                    .eq('mint_address', mint)
+                    .limit(1);
 
-                if (shadowErr) {
-                    console.error(`❌ [Shadow Error] 寫入 active_positions_shadow 失敗:`, shadowErr.message);
+                if (existingShadow && existingShadow.length > 0) {
+                    console.log(`👻 [Shadow Route] ${symbol} 已存在於影子倉位，跳過重複寫入。`);
+                } else {
+                    console.log(`👻 [Shadow Route] ${symbol} 落入 50-${buyThreshold - 1} 分區間，建立影子倉位 (供 ML 訓練用)。`);
+                    
+                    const { error: shadowErr } = await supabase.from('active_positions_shadow').insert({
+                        mint_address: mint,
+                        token_symbol: symbol,
+                        strategy_type: poolType + '_SHADOW',
+                        entry_price_sol: marketData.p,
+                        ai_score: finalScore,
+                        ai_reason: llmReason,
+                        entry_liquidity_usd: marketData.l,
+                        entry_volume_5m_usd: marketData.v,
+                        entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
+                        market_climate: envState.climate
+                    });
+
+                    if (shadowErr) {
+                        console.error(`❌ [Shadow Error] 寫入 active_positions_shadow 失敗:`, shadowErr.message);
+                    }
                 }
             }
         }
@@ -568,7 +595,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (三權分立 + 動態 Shadow 區間版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (防重覆建倉 + 動態 Shadow 區間版) 啟動中...");
     
     await initPortfolio();
     
