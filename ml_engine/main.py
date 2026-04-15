@@ -1,7 +1,9 @@
 # ml_engine/main.py
-# 📝 檔案功能用途：V10.23 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：配合 V10.23 三權分立架構，ML 權重滿分上調至 70 分。
+# 📝 檔案功能用途：V10.25 【Python 雙塔融合智腦】 (Microservice Core)
+# 🚀 核心升級：配合 V10.25 三權分立架構，ML 權重滿分上調至 70 分。
 # 🛡️ 數據防護：加入 np.inf 洗刷機制，絕對防止 Random Forest 被 Infinity 搞崩潰。
+# 🧊 破冰升級：加入 Ice-Breaker 機制，防止 0 交易勝率導致門檻錯誤收緊的死循環。
+# 🧠 全權接管：拆除所有物理參數 Hardcode，從 Redis Array 讀取舊值並進行動態 EMA 進化。
 
 import os
 import json
@@ -49,7 +51,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=background_scheduler, daemon=True).start()
     yield 
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.23", lifespan=lifespan)
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.25", lifespan=lifespan)
 
 # ------------------------------------------------------------------
 # 2. 即時推論端點
@@ -102,7 +104,7 @@ async def predict_score(req: PredictRequest):
     survival_prob += macro_adjustment
     survival_prob = max(0.0, min(1.0, survival_prob)) 
 
-    # 🚀 V10.23 核心升級：將滿分由 65 提升至 70
+    # 權重上調至 70 分滿分
     final_score = round(survival_prob * 70)
 
     multiplier = 1.0
@@ -192,13 +194,11 @@ def execute_evolution_pipeline():
             print("⚠️ [ML Engine] 歷史樣本庫不足 (需至少 10 條)，中止訓練。請讓系統空轉收集數據。")
             return
 
-        # 🚨 PREVENT INFINITY BUG: 強制洗刷 DataFrame，消滅所有 Infinity 數據
         df['realized_pnl_pct'] = pd.to_numeric(df['realized_pnl_pct'], errors='coerce').fillna(0)
         df['entry_ofi'] = pd.to_numeric(df['entry_ofi'], errors='coerce').fillna(0)
         df['entry_liquidity_usd'] = pd.to_numeric(df['entry_liquidity_usd'], errors='coerce').fillna(0)
         df['entry_volume_5m_usd'] = pd.to_numeric(df.get('entry_volume_5m_usd', df.get('entry_volume_5m', 0)), errors='coerce').fillna(0)
         
-        # 核心淨化：將所有 numpy infinity 替換為 0
         df.replace([np.inf, -np.inf], 0, inplace=True)
         
         now_utc = pd.Timestamp.utcnow()
@@ -211,65 +211,74 @@ def execute_evolution_pipeline():
         winning_df = df[df['realized_pnl_pct'] > 0]
         losing_df = df[df['realized_pnl_pct'] < 0]
 
-        recent_win_rate = len(winning_df) / len(df) if len(df) > 0 else 0.5
+        total_trades_count = len(df)
+        recent_win_rate = len(winning_df) / total_trades_count if total_trades_count > 0 else 0.0
 
+        # 🎯 核心修復：正確讀取 Node.js 寫入的 JSON Array
         old_ml_str = redis_client.get("ml_strategy_params")
-        old_ml = json.loads(old_ml_str) if old_ml_str else {}
+        old_params_list = json.loads(old_ml_str) if old_ml_str else []
         
-        def get_old_param(t_type, climate, key, default_val):
-            try:
-                return old_ml.get(t_type, {}).get(climate, {}).get(key, default_val)
-            except:
-                return default_val
+        # 動態查找函數：完全放棄 Hardcode，以 DB 數據為準
+        def find_old(t_type, climate, key, fallback):
+            for item in old_params_list:
+                if item.get('token_type') == t_type and item.get('market_climate') == climate:
+                    # 對應 JSON 鍵值
+                    db_key = key.replace('Threshold', 'buy_threshold')\
+                                .replace('OFI', 'min_ofi')\
+                                .replace('Txs5m', 'min_txs_5m')\
+                                .replace('AvgTradeUsd', 'min_avg_trade_usd')\
+                                .replace('Turnover5m', 'max_turnover_5m')\
+                                .replace('VolReq', 'zombie_vol_req')
+                    return float(item.get(db_key, fallback))
+            return fallback
 
         win_ofi_p15 = float(np.percentile(winning_df['entry_ofi'], 15)) if not winning_df.empty else -0.2
         win_vol_p15 = float(np.percentile(winning_df['entry_volume_5m_usd'], 15)) if not winning_df.empty else 1000.0
         
-        threshold_target_offset = -3 if recent_win_rate > 0.5 else 3
+        # 🧊 核心破冰邏輯 (Ice-Breaker)
+        if total_trades_count == 0:
+            print("⚠️ [ML Engine] 過去無交易紀錄。啟動破冰機制：微調放寬買入標準...")
+            threshold_target_offset = -2  
+        elif total_trades_count > 0 and total_trades_count < 5:
+            print("⚠️ [ML Engine] 樣本數太少 (小於 5 筆)，不作激進調整，保持原狀。")
+            threshold_target_offset = 0   
+        else:
+            if recent_win_rate > 0.6:     
+                threshold_target_offset = -1  
+            elif recent_win_rate < 0.4:   
+                threshold_target_offset = 2   
+            else:
+                threshold_target_offset = 0   
         
-        evolved_params = {
-            "strategy_id": int(time.time()), 
-            "NEWBORN": {
-                "RAGING_BULL": {
-                    "buyThreshold": round(evolve_param(get_old_param('NEWBORN','RAGING_BULL','buyThreshold', 55), 55 + threshold_target_offset, ema_alpha, 50, 65)),
-                    "minOFI": round(evolve_param(get_old_param('NEWBORN','RAGING_BULL','minOFI', -0.4), win_ofi_p15 - 0.2, ema_alpha, -0.6, -0.2), 2),
-                    "minTxs5m": 5, "minAvgTradeUsd": 10.0, "maxTurnover5m": 2.5,
-                    "zombieVolReq": round(evolve_param(get_old_param('NEWBORN','RAGING_BULL','zombieVolReq', 800), win_vol_p15 * 0.8, ema_alpha, 500, 1500))
-                },
-                "CHOPPY": {
-                    "buyThreshold": round(evolve_param(get_old_param('NEWBORN','CHOPPY','buyThreshold', 60), 60 + threshold_target_offset, ema_alpha, 55, 70)),
-                    "minOFI": round(evolve_param(get_old_param('NEWBORN','CHOPPY','minOFI', -0.2), win_ofi_p15, ema_alpha, -0.4, 0.0), 2),
-                    "minTxs5m": 8, "minAvgTradeUsd": 15.0, "maxTurnover5m": 1.5,
-                    "zombieVolReq": round(evolve_param(get_old_param('NEWBORN','CHOPPY','zombieVolReq', 1200), win_vol_p15, ema_alpha, 800, 2500))
-                },
-                "BEAR_PANIC": {
-                    "buyThreshold": round(evolve_param(get_old_param('NEWBORN','BEAR_PANIC','buyThreshold', 65), 65 + threshold_target_offset, ema_alpha, 60, 80)),
-                    "minOFI": round(evolve_param(get_old_param('NEWBORN','BEAR_PANIC','minOFI', 0.0), win_ofi_p15 + 0.2, ema_alpha, -0.1, 0.3), 2),
-                    "minTxs5m": 12, "minAvgTradeUsd": 20.0, "maxTurnover5m": 1.0,
-                    "zombieVolReq": round(evolve_param(get_old_param('NEWBORN','BEAR_PANIC','zombieVolReq', 2000), win_vol_p15 * 1.5, ema_alpha, 1500, 4000))
-                }
-            },
-            "TRENDING": {
-                "RAGING_BULL": {
-                    "buyThreshold": round(evolve_param(get_old_param('TRENDING','RAGING_BULL','buyThreshold', 55), 55 + threshold_target_offset, ema_alpha, 50, 65)),
-                    "minOFI": round(evolve_param(get_old_param('TRENDING','RAGING_BULL','minOFI', -0.3), win_ofi_p15 - 0.1, ema_alpha, -0.5, -0.1), 2),
-                    "minTxs5m": 8, "minAvgTradeUsd": 15.0, "maxTurnover5m": 2.0,
-                    "zombieVolReq": round(evolve_param(get_old_param('TRENDING','RAGING_BULL','zombieVolReq', 1500), win_vol_p15 * 1.2, ema_alpha, 1000, 3000))
-                },
-                "CHOPPY": {
-                    "buyThreshold": round(evolve_param(get_old_param('TRENDING','CHOPPY','buyThreshold', 60), 60 + threshold_target_offset, ema_alpha, 55, 70)),
-                    "minOFI": round(evolve_param(get_old_param('TRENDING','CHOPPY','minOFI', -0.1), win_ofi_p15 + 0.1, ema_alpha, -0.3, 0.1), 2),
-                    "minTxs5m": 12, "minAvgTradeUsd": 25.0, "maxTurnover5m": 1.2,
-                    "zombieVolReq": round(evolve_param(get_old_param('TRENDING','CHOPPY','zombieVolReq', 3000), win_vol_p15 * 2.0, ema_alpha, 2000, 5000))
-                },
-                "BEAR_PANIC": {
-                    "buyThreshold": round(evolve_param(get_old_param('TRENDING','BEAR_PANIC','buyThreshold', 65), 65 + threshold_target_offset, ema_alpha, 60, 80)),
-                    "minOFI": round(evolve_param(get_old_param('TRENDING','BEAR_PANIC','minOFI', 0.1), win_ofi_p15 + 0.3, ema_alpha, 0.0, 0.4), 2),
-                    "minTxs5m": 15, "minAvgTradeUsd": 40.0, "maxTurnover5m": 0.8,
-                    "zombieVolReq": round(evolve_param(get_old_param('TRENDING','BEAR_PANIC','zombieVolReq', 5000), win_vol_p15 * 3.0, ema_alpha, 3000, 8000))
-                }
-            }
-        }
+        climates = ["BULL_FRENZY", "CHOPPY", "BEAR_PANIC"]
+        types = ["NEWBORN", "TRENDING"]
+        evolved_params_to_db = []
+
+        for t in types:
+            for c in climates:
+                # 讀取舊數值
+                o_thresh = find_old(t, c, 'Threshold', 60)
+                o_ofi = find_old(t, c, 'OFI', -0.2)
+                o_txs = find_old(t, c, 'Txs5m', 8)
+                o_avg = find_old(t, c, 'AvgTradeUsd', 15.0)
+                o_turn = find_old(t, c, 'Turnover5m', 1.5)
+                o_zomb = find_old(t, c, 'VolReq', 1200)
+
+                # 動態進化 (僅進化 Threshold, OFI, ZombieVol, 物理參數如 Txs 完全交由 Supabase 控制)
+                n_thresh = round(evolve_param(o_thresh, o_thresh + threshold_target_offset, ema_alpha, 50, 75))
+                n_ofi = round(evolve_param(o_ofi, win_ofi_p15, ema_alpha, -0.6, 0.4), 2)
+                n_zomb = round(evolve_param(o_zomb, win_vol_p15, ema_alpha, 500, 8000))
+
+                evolved_params_to_db.append({
+                    "token_type": t,
+                    "market_climate": c,
+                    "buy_threshold": n_thresh,
+                    "min_ofi": n_ofi,
+                    "min_txs_5m": o_txs,         # 保留手動設定
+                    "min_avg_trade_usd": o_avg,  # 保留手動設定
+                    "max_turnover_5m": o_turn,   # 保留手動設定
+                    "zombie_vol_req": n_zomb
+                })
         
         new_sl = max(-25.0, min(-10.0, float(np.average(losing_df['realized_pnl_pct'], weights=losing_df['w_time']) * 1.2))) if not losing_df.empty else -15.0
         new_tp = max(15.0, min(40.0, float(np.average(winning_df['realized_pnl_pct'], weights=winning_df['w_time']) * 0.8))) if not winning_df.empty else 20.0
@@ -283,31 +292,28 @@ def execute_evolution_pipeline():
         dynamic_model = {
             "dynamic_sl": final_sl,
             "dynamic_tp_trigger": final_tp,
-            "base_math_score": params.get('base_math_score', 50),
-            "ml_strategy_params": evolved_params 
+            "base_math_score": params.get('base_math_score', 50)
         }
         redis_client.set("cache:dynamic_scoring_model", json.dumps(dynamic_model))
-        redis_client.set("ml_strategy_params", json.dumps(evolved_params))
         
-        for t_type, climates in evolved_params.items():
-            if t_type in ['NEWBORN', 'TRENDING']:
-                for cli, p in climates.items():
-                    try:
-                        supabase.table('ml_strategy_params').update({
-                            'buy_threshold': p['buyThreshold'],
-                            'min_ofi': p['minOFI'],
-                            'min_txs_5m': p['minTxs5m'],
-                            'min_avg_trade_usd': p['minAvgTradeUsd'],
-                            'max_turnover_5m': p['maxTurnover5m'],
-                            'zombie_vol_req': p['zombieVolReq'],
-                            'stop_loss_pct': round(final_sl, 2),
-                            'trailing_tp_trigger': round(final_tp, 2),
-                            'updated_at': datetime.now(timezone.utc).isoformat()
-                        }).eq('token_type', t_type).eq('market_climate', cli).execute()
-                    except Exception as e:
-                        print(f"⚠️ [ML Engine] 更新 DB 失敗 ({t_type}-{cli}): {e}")
+        # 將進化結果全權寫入 Supabase (不覆蓋手動物理參數)
+        for p in evolved_params_to_db:
+            try:
+                supabase.table('ml_strategy_params').update({
+                    'buy_threshold': p['buy_threshold'],
+                    'min_ofi': p['min_ofi'],
+                    'min_txs_5m': p['min_txs_5m'],
+                    'min_avg_trade_usd': p['min_avg_trade_usd'],
+                    'max_turnover_5m': p['max_turnover_5m'],
+                    'zombie_vol_req': p['zombie_vol_req'],
+                    'stop_loss_pct': round(final_sl, 2),
+                    'trailing_tp_trigger': round(final_tp, 2),
+                    'updated_at': datetime.now(timezone.utc).isoformat()
+                }).eq('token_type', p['token_type']).eq('market_climate', p['market_climate']).execute()
+            except Exception as e:
+                print(f"⚠️ [ML Engine] 更新 DB 失敗 ({p['token_type']}-{p['market_climate']}): {e}")
 
-        print(f"🧠 [ML Engine] 自動進化完成！近期勝率: {recent_win_rate*100:.1f}%。參數已受 EMA 與安全邊界約束。")
+        print(f"🧠 [ML Engine] 自動進化完成！近期勝率: {recent_win_rate*100:.1f}%。目標偏移量: {threshold_target_offset}")
         
         if len((df['realized_pnl_pct'] > 0).unique()) > 1:
             n_est = int(params.get('rf_n_estimators', 100))
@@ -363,5 +369,4 @@ if __name__ == "__main__":
     except asyncio.CancelledError:
         print("🛑 [ML Engine] 背景任務已取消，安全關機。")
     except Exception as e:
-        # 🚨 絕對唔可以 pass！必須印出真實 Error，否則 Server 死咗都無人知！
         print(f"❌ [ML Engine] 啟動失敗或崩潰: {e}")

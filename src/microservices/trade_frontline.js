@@ -1,7 +1,8 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.23 【獵人中樞】微服務 (Microservice Core)
+// 📝 檔案功能用途：V10.25 【獵人中樞】微服務 (Microservice Core)
 // 🚀 核心升級：實裝「初生保溫箱」批次查價防 429 系統。全面棄用 Redis v9_nursery_queue，統一對接 Supabase DB。
 // 🛡️ 終極修復：擴展 marketData 以攜帶 full fields，完美對接 securityGuard O(1) 綠色通道防撞車。
+// 🧠 動態及格：完美對接 ML Engine 每日進化之 `ml_strategy_params`，從 Redis 陣列精準抓取大市專屬門檻。
 
 require('dotenv').config();
 const express = require('express');
@@ -212,7 +213,7 @@ setInterval(async () => {
 function runLayer1PhysicalFilter(symbol) {
     if (!symbol) return false;
     const upperSymbol = symbol.toUpperCase();
-    if (/[^\x00-\x7F]/.test(upperSymbol) || /[^\x00-\x7F]/.test(upperName)) return false;
+    if (/[^\x00-\x7F]/.test(upperSymbol) || /[^\x00-\x7F]/.test(upperSymbol)) return false; // Fixed upperName typo
     if (BRAND_BLACKLIST.has(upperSymbol)) return false;
     return true;
 }
@@ -411,7 +412,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             if (res.data && typeof res.data.win_probability === 'number') {
                 mlScore = res.data.score || 0; 
                 mlConfidenceMultiplier = res.data.confidence_multiplier || 1.0;
-                console.log(`   - 🤖 [ML Brain] 勝率預測: ${(res.data.win_probability * 100).toFixed(1)}% | 得分: ${mlScore}/65 | 注碼乘數: x${mlConfidenceMultiplier}`);
+                console.log(`   - 🤖 [ML Brain] 勝率預測: ${(res.data.win_probability * 100).toFixed(1)}% | 得分: ${mlScore}/70 | 注碼乘數: x${mlConfidenceMultiplier}`);
             }
         } catch (e) {
             console.warn(`   - ⚠️ [ML Brain] 離線或超時，無法獲取勝率預測 (給予預設 32 分)`);
@@ -443,18 +444,26 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const finalScore = quantScore + mlScore + llmScore;
         
-        let buyThreshold = 70; 
+        // ---------------------------------------------------------
+        // 🚀 動態獲取最新及格線 (從 Redis 讀取 ml_strategy_params)
+        // ---------------------------------------------------------
+        let buyThreshold = 70; // 終極防守底線
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
             if (mlParamsStr) {
                 const mlParams = JSON.parse(mlParamsStr);
                 const currentClimate = envState.climate || 'CHOPPY';
-                const paramsArray = Array.isArray(mlParams) ? mlParams : (mlParams.data || []);
+                // 確保能解析 Array 格式
+                const paramsArray = Array.isArray(mlParams) ? mlParams : [];
+                // 精確匹配 token_type 與 market_climate
                 const targetParam = paramsArray.find(x => x.token_type === poolType && x.market_climate === currentClimate);
-                buyThreshold = targetParam?.buy_threshold ? Number(targetParam.buy_threshold) : 70;
+                
+                if (targetParam && targetParam.buy_threshold) {
+                    buyThreshold = Number(targetParam.buy_threshold);
+                }
             }
         } catch(e) {
-            console.warn(`⚠️ [Frontline] 讀取動態及格線失敗，使用預設值 70`);
+            console.warn(`⚠️ [Frontline] 讀取動態及格線失敗，使用預設防守線 70 分`);
         }
 
         console.log(`⚖️ [Final Verdict] ${symbol} 總分: ${finalScore} / 100 (及格線: ${buyThreshold})`);
@@ -567,7 +576,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.23 (三權分立 AI 天網 + 批次查價防禦) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.25 (三權分立動態門檻 + 批次查價) 啟動中...");
     
     await initPortfolio();
     
@@ -581,7 +590,7 @@ async function bootstrap() {
     });
     sourceAggregator.start();
     
-    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中 (批次巡邏版)');
+    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中 (動態及格線版)');
 }
 
 bootstrap();
