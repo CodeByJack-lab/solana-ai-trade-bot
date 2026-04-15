@@ -1,13 +1,14 @@
 // src/services/sourceAggregator.js
 // 📝 檔案功能用途：V10 多路冗餘數據源聚合器。三路 WebSocket 監聽 + LP Burn 訊號發射器。
 // 🚀 V10 升級：徹底剝離交易邏輯，專心做情報雷達，經 Redis 廣播越獄信號。
-// 🚀 V10.3 修正：完美對接 newborn_incubator 資料表，並解決 ESLint 嚴格警告。
+// 🚀 V10.3 修正：完美對接 newborn_incubator 資料表，並改用官方 connection 解決 RPC 抓取失敗問題。
 
 const WebSocket = require('ws');
 const axios = require('axios');
 const Redis = require('ioredis');
 const { supabase } = require('../config/supabase');
 const config = require('../config/config');
+const { connection } = require('../config/solana'); // 🚀 引入官方連線引擎
 
 const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 
@@ -75,24 +76,22 @@ class SourceAggregator {
                     const isSeen = await redis.set(`seen_sig:${signature}`, '1', 'EX', 3600, 'NX');
                     if (!isSeen) return; 
 
-                    // 🛡️ 防崩潰：加入 ?. 避免 config.rpc 不存在時報錯
-                    const rpcUrl = config.rpc?.helius1?.url || config.rpc?.alchemy?.url;
-                    if (!rpcUrl) return;
-
-                    const txInfo = await axios.post(rpcUrl, {
-                        jsonrpc: "2.0", id: 1, method: "getTransaction",
-                        params: [signature, { maxSupportedTransactionVersion: 0, encoding: "jsonParsed" }]
+                    // 🚀 核心修復：直接使用 solana.js 提供的 connection，安全穩定
+                    const txInfo = await connection.getTransaction(signature, { 
+                        maxSupportedTransactionVersion: 0, 
+                        commitment: "confirmed" 
                     }).catch(() => null);
 
-                    const accounts = txInfo?.data?.result?.transaction?.message?.accountKeys || [];
-                    const potentialMints = accounts.map(a => a.pubkey).filter(k => k && !this.blacklist.includes(k) && k.length > 32);
+                    const accounts = txInfo?.transaction?.message?.accountKeys || [];
+                    // 確保安全解析 Pubkey
+                    const potentialMints = accounts.map(a => a.pubkey ? a.pubkey.toString() : a.toString())
+                                                   .filter(k => k && !this.blacklist.includes(k) && k.length > 32);
 
                     for (const mint of potentialMints) {
                         const cleanMint = this.sanitizeAddress(mint);
                         if (cleanMint) {
                             console.log(`🐣 [Aggregator] 發現新生命 (Mint: ${cleanMint})，直接送入初生保溫箱...`);
                             
-                            // 🚀 核心修復：加入 await 防止 Floating Promise 警告
                             const { error } = await supabase.from('newborn_incubator').upsert([
                                 { mint_address: cleanMint }
                             ], { onConflict: 'mint_address' });
@@ -110,29 +109,27 @@ class SourceAggregator {
 
                     if (!incubatingTokens || incubatingTokens.length === 0) return;
 
-                    const rpcUrl = config.rpc?.helius1?.url || config.rpc?.alchemy?.url;
-                    if (!rpcUrl) return;
-
-                    const txInfo = await axios.post(rpcUrl, {
-                        jsonrpc: "2.0", id: 1, method: "getTransaction",
-                        params: [signature, { maxSupportedTransactionVersion: 0, encoding: "jsonParsed" }]
+                    // 🚀 核心修復：直接使用 solana.js 提供的 connection
+                    const txInfo = await connection.getTransaction(signature, { 
+                        maxSupportedTransactionVersion: 0, 
+                        commitment: "confirmed" 
                     }).catch(() => null);
 
-                    const accounts = txInfo?.data?.result?.transaction?.message?.accountKeys || [];
+                    const accounts = txInfo?.transaction?.message?.accountKeys || [];
                     const activeNurseryMints = incubatingTokens.map(t => t.mint_address);
 
-                    for (const acc of accounts) {
-                        if (acc.pubkey && activeNurseryMints.includes(acc.pubkey)) {
-                            console.log(`\n🔥 [LP BURN DETECTED] 捕捉到莊家燒池訊號！廣播越獄信號: ${acc.pubkey}`);
-                            await redis.set(`lp_burned:${acc.pubkey}`, 'TRUE', 'EX', 86400);
+                    for (const accObj of accounts) {
+                        const acc = accObj.pubkey ? accObj.pubkey.toString() : accObj.toString();
+                        if (acc && activeNurseryMints.includes(acc)) {
+                            console.log(`\n🔥 [LP BURN DETECTED] 捕捉到莊家燒池訊號！廣播越獄信號: ${acc}`);
+                            await redis.set(`lp_burned:${acc}`, 'TRUE', 'EX', 86400);
 
-                            await redis.publish('lp_burn_alerts', JSON.stringify({ mint: acc.pubkey }));
+                            await redis.publish('lp_burn_alerts', JSON.stringify({ mint: acc }));
                             break;
                         }
                     }
                 }
             } catch (err) {
-                // 🛡️ 修復 Empty Catch Block 警告
                 // 靜默處理 JSON 解析或連線異常，防止 Spam Log
             }
         });
