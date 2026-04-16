@@ -1,9 +1,8 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.29 【獵人中樞】微服務 (Microservice Core)
-// 🚀 核心升級：實裝「單幣撤池防禦 (Rugpull Shield) V2」，改為 3 次 Strike 判刑，每次強制 30 秒 Jupiter API 查價冷卻，完美保護 API Rate Limit。
-// 🛡️ 終極修復：擴展 marketData 以攜帶 full fields，完美對接 securityGuard O(1) 綠色通道防撞車。
-// 🧠 動態及格：完美對接 ML Engine 每日進化之 `ml_strategy_params`，從 Redis 陣列精準抓取大市專屬門檻。
-// 🔄 記憶體同步：裝載 Supabase Realtime 監聽器，Dashboard 重置時自動秒殺 RAM 幽靈記憶。
+// 📝 檔案功能用途：V10.30 【獵人中樞】微服務 (Microservice Core)
+// 🚀 核心升級：實裝「單幣撤池防禦 (Rugpull Shield) V3」，救援 API 全面轉用 DexScreener，完美解決 Jupiter 查不到初生 Meme 導致誤判平倉的致命 Bug！
+// 🛡️ 防禦機制：最多 3 次 Strike 判刑，每次強制 30 秒 DexScreener 查價冷卻，完美保護 API Rate Limit 及防止冤枉好幣。
+// ⚠️ 注意：此處 DexScreener 僅作「價格與流動性監視」，實際買賣上鏈 (executeBuy / runSellPipeline) 依然 100% 透過 Jupiter API 處理滑點與路由。
 
 require('dotenv').config();
 const express = require('express');
@@ -18,7 +17,6 @@ const { securityGuard } = require('../services/securityGuard');
 const { consensusService } = require('../services/consensusService'); 
 const { executeBuy, runSellPipeline } = require('../services/tradeService');
 const { sendTelegramAlert, processTelegramCallback } = require('../services/telegramService'); 
-const { getJupiterFinalQuote } = require('../services/tradeService');
 const { sourceAggregator } = require('../services/sourceAggregator');
 const { walletMonitorRouter } = require('../services/walletMonitor'); 
 const { keyRotator } = require('../services/keyRotator'); 
@@ -155,10 +153,10 @@ setInterval(() => {
 }, 60 * 1000); 
 
 // ------------------------------------------------------------------
-// 4. DEFCON 6 秒接管 (單幣撤池防禦 + Jupiter API 30秒冷卻版)
+// 4. DEFCON 6 秒接管 (單幣撤池防禦 + DexScreener 30秒冷卻版)
 // ------------------------------------------------------------------
 const token_strike_count = new Map(); // 記錄每個幣的查價失敗次數 (最高 3 次)
-const token_last_jup_check_ts = new Map(); // 🚀 記錄上次透過 Jupiter 查價的時間戳 (30秒 CD)
+const token_last_dex_check_ts = new Map(); // 🚀 記錄上次透過 DexScreener 查價的時間戳 (30秒 CD)
 
 setInterval(async () => {
     if (!globalConfig.is_running) return;
@@ -175,68 +173,89 @@ setInterval(async () => {
         const lastTs = last_valid_ts.get(mint) || 0;
         // 如果超過 6 秒沒有 WebSocket 報價
         if (now - lastTs > 6000) { 
-            // 🚀 檢查是否已經過了 30 秒的 Jupiter API 查價冷卻期
-            const lastJupCheck = token_last_jup_check_ts.get(mint) || 0;
-            if (now - lastJupCheck >= 30000) {
+            // 🚀 檢查是否已經過了 30 秒的 DexScreener 查價冷卻期
+            const lastDexCheck = token_last_dex_check_ts.get(mint) || 0;
+            if (now - lastDexCheck >= 30000) {
                 deadMints.push(mint);
             }
         } else {
             // 報價健康，重置死亡計數與冷卻紀錄
             token_strike_count.delete(mint);
-            token_last_jup_check_ts.delete(mint);
+            token_last_dex_check_ts.delete(mint);
         }
     }
 
     if (deadMints.length > 0) {
         if (deadMints.length === activeMints.length && activeMints.length > 1) {
-            console.warn(`🚨 [DEFCON 6] 全線斷線！準備進行 Jupiter 救援查價... (冷卻期: 30s)`);
+            console.warn(`🚨 [DEFCON 6] 全線斷線！準備進行 DexScreener 救援查價... (冷卻期: 30s)`);
         } else {
-            console.warn(`⚠️ [Price Warning] 發現 ${deadMints.length} 隻持倉幣超時無報價，啟動 Jupiter 獨立監視 (冷卻期: 30s)...`);
+            console.warn(`⚠️ [Price Warning] 發現 ${deadMints.length} 隻持倉幣超時無報價，啟動 DexScreener 獨立監視 (冷卻期: 30s)...`);
         }
 
         try {
+            // 🚀 霸佔 DexScreener API 資源，警告 Shadow 讓路 10 秒
+            await redisClient.set('DEXSCREENER_LOCK', 'MAIN_BOT', 'EX', 10);
+
             // 🚀 立刻更新這些死幣的「最後查價時間」，進入 30 秒 CD（就算 API 429 Error 都要等 30 秒先可以再 Call！）
             for (const m of deadMints) {
-                token_last_jup_check_ts.set(m, now);
+                token_last_dex_check_ts.set(m, now);
             }
 
-            const jupMints = [...deadMints, 'So11111111111111111111111111111111111111112'];
-            const res = await axios.get(`https://api.jup.ag/price/v3?ids=${jupMints.join(',')}`, { timeout: 3000 });
+            // 🚀 改用 DexScreener 查價 (支援初生 Meme，最多 30 隻幣)
+            const mintsStr = deadMints.slice(0, 30).join(',');
+            const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mintsStr}`, { timeout: 5000 });
+            const pairs = res.data?.pairs || [];
             
-            const solUsd = parseFloat(res.data?.data?.['So11111111111111111111111111111111111111112']?.price || '1');
+            const priceMap = new Map();
+            pairs.forEach(p => {
+                if (p.chainId === 'solana') {
+                    const mint = p.baseToken.address;
+                    const liq = p.liquidity?.usd || 0;
+                    const existing = priceMap.get(mint);
+                    // 找出流動性最高的池
+                    if (!existing || liq > existing.liq) {
+                        priceMap.set(mint, { price: parseFloat(p.priceNative || '0'), liq: liq });
+                    }
+                }
+            });
+
             const fallbackPayload = {};
             const ts = Date.now();
             
             for (const m of deadMints) {
-                if (res.data?.data?.[m]?.price) {
-                    // Jupiter 救援成功，當作收到一次報價，取消 Strike
-                    fallbackPayload[m] = { p: parseFloat(res.data.data[m].price) / solUsd, v: 0, b: 0, s: 0, l: 0, ts: ts };
+                const dexData = priceMap.get(m);
+                
+                // 🚀 判斷標準：有價錢，且流動性 > 1000 USD 先當作活著
+                if (dexData && dexData.price > 0 && dexData.liq > 1000) {
+                    // DexScreener 救援成功，當作收到一次報價，取消 Strike
+                    fallbackPayload[m] = { p: dexData.price, v: 0, b: 0, s: 0, l: dexData.liq, ts: ts };
                     last_valid_ts.set(m, ts); 
                     latest_market_data.set(m, fallbackPayload[m]);
-                    token_strike_count.delete(m);
+                    token_strike_count.delete(m); 
                 } else {
-                    // 🚀 Jupiter 救援也查無此幣 (極可能是 Rugpull / 撤池)
+                    // 🚀 DexScreener 救援也查無此幣或池乾了 (極可能是 Rugpull / 撤池)
                     const strikes = (token_strike_count.get(m) || 0) + 1;
                     token_strike_count.set(m, strikes);
                     
                     const sym = symbol_cache.get(m) || 'UNKNOWN';
-                    console.log(`💀 [Rugpull Check] 幣種 ${sym} 第 ${strikes}/3 次 Jupiter 查價失敗... (下次查價需等 30 秒)`);
+                    console.log(`💀 [Rugpull Check] 幣種 ${sym} 第 ${strikes}/3 次 DexScreener 查價失敗或池已乾... (下次查價需等 30 秒)`);
 
                     if (strikes >= 3) {
-                        console.error(`💥 [RUGPULL DETECTED] ${sym} 連續 3 次 (跨越 90 秒) 完全失去報價，判定為已撤池！執行緊急清倉！`);
+                        console.error(`💥 [RUGPULL DETECTED] ${sym} 連續 3 次 (跨越 90 秒) 失去報價或流動性歸零，判定為已撤池！執行緊急清倉！`);
                         
                         const pos = portfolio.positions.find(p => p.mint_address === m);
                         if (pos) {
                             const lockKey = `sell_lock:${m}`;
                             const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
                             if (acquired) {
-                                await runSellPipeline(pos, 0.000000001, `🚨 徹底失去報價 (連續3次 API 查價失敗)，判定為 Rugpull 撤池`, 1.0)
+                                // ⚠️ 這裡呼叫 runSellPipeline，裡面依然會使用 Jupiter 去嘗試 Swap（雖然可能失敗轉 fallbackEscape）
+                                await runSellPipeline(pos, 0.000000001, `🚨 徹底失去報價 (連續3次 DexScreener 查價失敗)，判定為 Rugpull 撤池`, 1.0)
                                     .finally(() => redisClient.del(lockKey));
                             }
                         }
                         // 移除計數與冷卻避免死 Loop
                         token_strike_count.delete(m);
-                        token_last_jup_check_ts.delete(m);
+                        token_last_dex_check_ts.delete(m);
                     }
                 }
             }
@@ -245,9 +264,9 @@ setInterval(async () => {
                 await redisClient.publish('price_updates', JSON.stringify(fallbackPayload));
             }
         } catch (err) {
-            // 如果 Jupiter Timeout 或者 429 塞車，我哋唔會增加 Strike (避免冤枉好幣)，
+            // 如果 DexScreener Timeout 或者 429 塞車，我哋唔會增加 Strike (避免冤枉好幣)，
             // 但因為上面已經 Set 咗 CD，系統會乖乖地等 30 秒先會再 Call！
-            console.error(`❌ [Jupiter Rescue] 救援 API 連線異常: ${err.message}`);
+            console.error(`❌ [DexScreener Rescue] 救援 API 連線異常: ${err.message}`);
         }
     }
 }, 4000); 
@@ -670,7 +689,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.29 (單幣撤池防禦 Rugpull Shield V2 版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.30 (DexScreener 防撤池精準救援版) 啟動中...");
     
     await initPortfolio();
 
