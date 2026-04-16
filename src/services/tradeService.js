@@ -1,19 +1,17 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10.28 交易執行大腦 (Microservice Core)
-// 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！
-// 🛡️ 數據防護：加入 Infinity PnL 阻截機制。
-// 🧠 權限解放：徹底拔除多餘的 isShadow 判斷，100% 無條件服從 trade_frontline 的開火指令。
-// 📊 Schema 同步：已擴容 active_positions 表，全面寫入環境氣候與量價數據。
-// 💬 TG 廣播：完美還原舊版經典 Telegram 買入/平倉通知格式。
+// 📝 檔案功能及用途：V10.35 交易執行大腦 (終極修復 Decimals 錯位與 PnL 幻象版)
+// 🚀 核心升級：動態向鏈上查詢 Token Decimals，徹底修復 9-decimals 幣種導致的 +99900% PnL 幻象及 0.1% 賣出殘留問題。
+// 🛡️ 數據防護：實施「結算與廣播的一票否決權」，交易未上鏈絕不結算，杜絕 TG 轟炸。
+// 🧠 記憶體同步：實裝「秒速 RAM 清除」機制，斬斷 Zombie Sweeper 的無限鞭屍循環。
+// 📊 ML 對接：全面寫入 applied_ml_strategy_id 供 Python 進行回測。
 
 require('dotenv').config();
 const axios = require('axios');
 const Redis = require('ioredis');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
-// 🚀 FIX 1: 引入 PublicKey, connection 和 updateCache 用於解決小數點錯位與記憶體幽靈
-const { PublicKey } = require('@solana/web3.js');
-const { connection } = require('../config/solana');
+const { PublicKey } = require('@solana/web3.js'); 
+const { connection } = require('../config/solana'); 
 const { getPortfolio, updateCache } = require('./portfolioService');
 const { sendTelegramAlert } = require('./telegramService');
 const { fallbackEscapeService } = require('./fallbackEscapeService');
@@ -27,19 +25,17 @@ const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL ||
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-// 🚀 FIX 2: 加入 knownDecimals 參數，動態查詢 Token 真實小數點
 async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyType = 'NEWBORN', knownDecimals = null) {
     try {
         const inputMint = isBuy ? SOL_MINT : mint;
         const outputMint = isBuy ? mint : SOL_MINT;
         
-        // 🚀 FIX: 動態獲取真實小數點，防止 9-decimals 幣種利潤爆表 (+99900%)
         let tokenDecimals = knownDecimals;
         if (tokenDecimals === null) {
             try {
                 const mintInfo = await connection.getParsedAccountInfo(new PublicKey(mint));
                 tokenDecimals = mintInfo.value?.data?.parsed?.info?.decimals;
-                if (tokenDecimals === undefined) tokenDecimals = 6;
+                if (tokenDecimals === undefined) tokenDecimals = 6; 
             } catch(e) {
                 tokenDecimals = 6;
             }
@@ -59,7 +55,7 @@ async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyTy
         const res = await axios.get(url, { timeout: 3000 });
         if (res.data && res.data.outAmount) {
             const outLamports = parseFloat(res.data.outAmount);
-            // 🚀 FIX: 使用真實小數點換算價格
+            
             const outAmountUi = outLamports / Math.pow(10, outputDecimals);
             const inAmountUi = amount; 
             
@@ -70,7 +66,7 @@ async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyTy
             return {
                 quoteResponse: res.data,
                 pricePerToken: pricePerToken,
-                decimals: tokenDecimals // 🚀 FIX: 傳回真實小數點給寫入資料庫用
+                decimals: tokenDecimals 
             };
         }
         return null;
@@ -99,10 +95,10 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         }
 
         const entryPrice = quote.pricePerToken;
-        const actualDecimals = quote.decimals || 6; // 🚀 FIX: 取得真實小數點
+        const actualDecimals = quote.decimals || 6;
         
         if (isNaN(entryPrice) || entryPrice <= 0 || !isFinite(entryPrice)) {
-            console.error(`💀 [Trade Service] 致命計算錯誤：${symbol} 入場價為 Infinity 或 0。拒絕執行！`);
+            console.error(`💀 [Trade Service] 致命計算錯誤：${symbol} 入場價異常。拒絕執行！`);
             return false;
         }
 
@@ -121,7 +117,6 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             }
         }
 
-        // 🚀 全數據寫入！已擴容 DB 完美對接 (原汁原味排版保留)
         const positionData = {
             mint_address: mint,
             token_symbol: symbol,
@@ -129,18 +124,18 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             entry_price_sol: entryPrice,
             highest_price_sol: entryPrice,
             quantity: (finalTradeAmountSol / entryPrice),
-            token_decimals: actualDecimals, // 🚀 FIX: 將真實小數點寫入 active_positions 表
+            token_decimals: actualDecimals, 
             ai_score: aiScore,
             ai_reason: reason,
             buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER',
             market_climate: envState.climate || 'UNKNOWN',
             entry_liquidity_usd: marketData.l || 0,
             entry_volume_5m_usd: marketData.v || 0,
-            entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0
+            entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
+            applied_ml_strategy_id: appliedMlStrategyId // 🚀 寫入活躍倉位
         };
 
         const tableName = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
-        
         const { error: insertErr } = await supabase.from(tableName).insert([positionData]);
         
         if (insertErr) {
@@ -148,16 +143,14 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             return false; 
         }
         
-        console.log(`⚔️ [Main Route] ${symbol} 已建立 ${mode} 倉位！`);
+        console.log(`⚔️ [Main Route] ${symbol} 已建立 ${mode} 倉位 (Decimals: ${actualDecimals})！`);
         
         const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
-        await supabase.from(historyTable).insert([{
+        const { error: historyErr } = await supabase.from(historyTable).insert([{
             token_mint: mint,
             token_symbol: symbol,
             action: 'BUY',
             strategy_type: strategyVersion,
-            strategy_version: strategyVersion,
-            ai_used: true,
             ai_score: aiScore,
             review_history: reason,
             price_sol: entryPrice,
@@ -170,20 +163,20 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             entry_liquidity_usd: marketData.l || 0,
             entry_volume_5m_usd: marketData.v || 0,
             entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
-            applied_ml_strategy_id: appliedMlStrategyId, 
+            applied_ml_strategy_id: appliedMlStrategyId, // 🚀 寫入歷史記錄
             ml_confidence_multiplier: safeMultiplier     
         }]);
 
+        if (historyErr) {
+            console.error(`❌ [Main Route] 寫入 ${historyTable} 失敗:`, historyErr.message);
+        }
+
         if (typeof sendTelegramAlert === 'function') {
-            // 🎯 還原舊版經典 Telegram 格式
             const modeText = mode === 'LIVE' ? '[實盤]' : '[模擬]';
             const catText = strategyVersion.includes('TRENDING') ? '🔥 TRENDING' : '🐣 NEWBORN';
-            
             const msg = `🟢 ${modeText} ✅ 買入成功\n🏷️ 類別: ${catText}\n🪙 代幣: $${symbol}\n💰 投入: ${finalTradeAmountSol} SOL\n🔗 TX: <code>${txid}</code>\n🧠 理由: ${reason}`;
-            
             await sendTelegramAlert(msg);
         }
-        
         return true;
     } catch (err) {
         console.error(`❌ [Trade Service] 買入執行失敗:`, err.message);
@@ -199,7 +192,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
     try {
         const sellQuantity = position.quantity * fraction;
-        const tokenDecimals = position.token_decimals || 6; // 🚀 FIX: 讀取真實 decimals 避免只賣 0.1%
+        const tokenDecimals = position.token_decimals || 6; 
 
         const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || position.strategy_type || 'v10', tokenDecimals);
 
@@ -212,7 +205,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         if (mode === 'LIVE') {
             if (quoteData && quoteData.quoteResponse) {
                 const txPromise = executeLiveSwapUAT(quoteData.quoteResponse, 'SELL', reason);
-                // 🚀 FIX: 設定 15 秒超時
                 const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TX_TIMEOUT')), 15000));
 
                 try {
@@ -234,33 +226,24 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                     txid = escapeResult.txid;
                     success = true;
                     console.log(`🎉 [Sell Pipeline] 逃生艙發射成功！TX: ${txid}`);
-                } else {
-                    console.error("❌ 常規賣出與神風逃生艙均告失敗");
                 }
             }
         } else {
-            success = true;
+            success = true; 
         }
 
-        // 🚀 FIX: 一票否決！如果實盤交易失敗，絕對不能清除 DB 和廣播，防止 TG 轟炸
         if (mode === 'LIVE' && !success) {
             console.warn(`⚠️ [Sell Pipeline] $${position.token_symbol} 賣出未能成功上鏈，終止結算流程以防重覆轟炸。`);
-            return false;
+            return false; 
         }
 
         const entryPrice = position.entry_price_sol || 0;
-        let realizedPnlPct = 0;
-        if (entryPrice > 0) {
-            realizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
-        }
-        
-        const isShadow = position.strategy_type?.includes('SHADOW') || position.strategy_version?.includes('shadow') || false; 
+        const realizedPnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
+        const isShadow = position.strategy_type?.includes('SHADOW') || false; 
 
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
         if (fraction === 1.0) {
             for (const table of activeTables) await supabase.from(table).delete().eq('mint_address', mint);
-            
-            // 🚀 FIX: 樂觀更新，立即將持倉從本地 RAM 抹除，防止 60 秒後 ZombieSweeper 無限鞭屍
             updateCache('SELL', sellQuantity * currentPrice, position); 
         } else {
             const table = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
@@ -268,8 +251,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                 quantity: position.quantity - sellQuantity,
                 strategy_type: position.strategy_type + '_HALF_SOLD'
             }).eq('mint_address', mint);
-            
-            // 同步更新 RAM
+
             const port = getPortfolio();
             if (port && port.positions) {
                 const pIndex = port.positions.findIndex(p => p.mint_address === mint);
@@ -286,29 +268,28 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         const climate = climateStr ? JSON.parse(climateStr).climate : 'UNKNOWN';
 
         await supabase.from('trade_patterns').insert([{
-            mint_address: mint,
+            mint_address: mint, 
             is_shadow: isShadow,
             strategy_version: position.strategy_type || 'v10_default',
-            entry_ofi: position.entry_ofi || 0,
+            entry_ofi: position.entry_ofi || 0, 
             entry_liquidity_usd: position.entry_liquidity_usd || 0,
             max_vwap_deviation: position.max_vwap_dev || 0, 
             final_cvd_slope: position.final_cvd_slope || 0,
-            realized_pnl_pct: realizedPnlPct,
+            realized_pnl_pct: realizedPnlPct, 
             market_climate: climate,
-            entry_price_sol: entryPrice,
+            entry_price_sol: entryPrice, 
             entry_volume_5m: position.entry_volume_5m_usd || 0,
-            token_symbol: position.token_symbol || 'UNKNOWN'
+            token_symbol: position.token_symbol || 'UNKNOWN',
+            applied_ml_strategy_id: position.applied_ml_strategy_id // 🚀 寫入回測數據庫
         }]);
 
         if (!isShadow) {
             const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
-            await supabase.from(historyTable).insert([{
+            const { error: historyErr } = await supabase.from(historyTable).insert([{
                 token_mint: mint,
                 token_symbol: position.token_symbol,
                 action: fraction === 1.0 ? 'SELL' : 'SELL_HALF',
                 strategy_type: position.strategy_type,
-                strategy_version: position.strategy_type || 'v10_default',
-                ai_used: true,
                 price_sol: currentPrice,
                 quantity: sellQuantity,
                 total_value_sol: sellQuantity * currentPrice,
@@ -316,7 +297,12 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                 realized_pnl_sol: (currentPrice - entryPrice) * sellQuantity,
                 txid: txid,
                 market_climate: climate,
+                applied_ml_strategy_id: position.applied_ml_strategy_id // 🚀 寫入歷史記錄
             }]);
+
+            if (historyErr) {
+                console.error(`❌ [Sell Pipeline] 寫入 ${historyTable} 失敗:`, historyErr.message);
+            }
 
             if (typeof sendTelegramAlert === 'function') {
                 const icon = realizedPnlPct > 0 ? '🟢' : '🔴';
@@ -325,18 +311,13 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             }
         }
 
-        console.log(`✅ [Sell Pipeline] ${position.token_symbol} 平倉與歸檔完成！`);
+        console.log(`✅ [Sell Pipeline] ${position.token_symbol} 歸檔完畢。`);
         return true;
 
     } catch (err) {
-        console.error(`❌ [Sell Pipeline] 平倉異常:`, err.message);
-        // 🚀 FIX: 已經移除 await redis.del(lockKey); 讓鎖自然過期防止重試轟炸
+        console.error(`❌ [Sell Pipeline] 崩潰:`, err.message);
         return false;
     }
 }
 
-module.exports = {
-    getJupiterFinalQuote,
-    executeBuy,
-    runSellPipeline
-};
+module.exports = { getJupiterFinalQuote, executeBuy, runSellPipeline };

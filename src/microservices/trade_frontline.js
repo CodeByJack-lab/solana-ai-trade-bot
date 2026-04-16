@@ -2,7 +2,7 @@
 // 📝 檔案功能用途：V10.25 【獵人中樞】微服務 (Microservice Core)
 // 🚀 核心升級：實裝「初生保溫箱」批次查價防 429 系統。全面棄用 Redis v9_nursery_queue，統一對接 Supabase DB。
 // 🛡️ 終極修復：擴展 marketData 以攜帶 full fields，完美對接 securityGuard O(1) 綠色通道防撞車。
-// 🧠 動態及格：完美對接 ML Engine 每日進化之 `ml_strategy_params`，從 Redis 陣列精準抓取大市專屬門檻。
+// 🧠 動態及格：完美對接 ML Engine 每日進化之 `ml_strategy_params`，從 Redis 精準抓取大市專屬門檻及 ID。
 // ⏱️ 保溫修復：拔除 5 分鐘時光陷阱，改為滿 20 隻或最舊等滿 1 分鐘即發車。
 // 👻 影子修復：動態設定 50 至 (及格線-1) 為 Shadow 區間，最大化收集邊緣數據供 ML 訓練。
 // 🛑 防禦升級：攔截已持有倉位，踢出 trending_pool；加入 Shadow 表防重覆寫入機制。
@@ -458,6 +458,8 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         const finalScore = quantScore + mlScore + llmScore;
         
         let buyThreshold = 70; 
+        let activeStrategyId = appliedMlStrategyId || 0; // 🚀 預備裝載策略 ID
+
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
             if (mlParamsStr) {
@@ -466,8 +468,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const paramsArray = Array.isArray(mlParams) ? mlParams : (mlParams.data || []);
                 
                 const targetParam = paramsArray.find(x => x.token_type === poolType && x.market_climate === currentClimate);
-                if (targetParam && targetParam.buy_threshold) {
-                    buyThreshold = Number(targetParam.buy_threshold);
+                if (targetParam) {
+                    if (targetParam.buy_threshold) buyThreshold = Number(targetParam.buy_threshold);
+                    if (targetParam.id) activeStrategyId = targetParam.id; // 🚀 抄低當前觸發嘅 Strategy ID
                 }
             }
         } catch(e) {
@@ -530,10 +533,11 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const finalTradeAmountSol = parseFloat((baseAmount * safeMultiplier).toFixed(3));
                 console.log(`💰 [Sizing] 基礎注碼: ${baseAmount} SOL, 乘數: x${safeMultiplier} -> 最終下單: ${finalTradeAmountSol} SOL`);
 
+                // 🚀 將 activeStrategyId 傳遞畀 tradeService
                 const success = await executeBuy(
                     mint, symbol, poolType, finalScore, 
                     `🤖 三權決策 (Q:${quantScore} + M:${mlScore} + L:${llmScore}) | LLM: ${llmReason}`, 
-                    finalTradeAmountSol, marketData, envState, appliedMlStrategyId, safeMultiplier
+                    finalTradeAmountSol, marketData, envState, activeStrategyId, safeMultiplier
                 );
 
                 if (success) {
@@ -548,7 +552,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             
             if (finalScore >= 50 && finalScore < buyThreshold) {
                 
-                const MAX_SHADOW_CAPACITY = 50; // 容量防爆：上限 50 隻
+                const MAX_SHADOW_CAPACITY = 50; 
                 const { count: shadowCount, error: shadowCountErr } = await supabase
                     .from('active_positions_shadow')
                     .select('*', { count: 'exact', head: true });
@@ -566,7 +570,8 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                             entry_price_sol: marketData.p, ai_score: finalScore, ai_reason: llmReason,
                             entry_liquidity_usd: marketData.l, entry_volume_5m_usd: marketData.v,
                             entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
-                            market_climate: envState.climate
+                            market_climate: envState.climate,
+                            applied_ml_strategy_id: activeStrategyId // 🚀 寫入影子倉位
                         });
                     }
                 }
@@ -599,7 +604,6 @@ burnSub.on('message', async (channel, message) => {
             if (incubating) {
                 console.log(`🔥 [Interrupt] 接收到 LP Burn 越獄訊號！立刻將 ${symbol} 查價並押送至決策漏斗！`);
 
-                // 👑 API 霸體：Main Bot 霸佔 DexScreener 資源，警告 Shadow 讓路 10 秒
                 await redisClient.set('DEXSCREENER_LOCK', 'MAIN_BOT', 'EX', 10);
 
                 const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 4000 });
