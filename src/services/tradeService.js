@@ -1,7 +1,8 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10.22 交易執行大腦 (Microservice Core)
+// 📝 檔案功能及用途：V10.28 交易執行大腦 (Microservice Core)
 // 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！動態感應 Dashboard 的 LIVE/PAPER 模式。
 // 🛡️ 數據防護：加入 Infinity PnL 阻截機制，防止 entry_price 為 0 時搞冧 ML 大腦。
+// 🧠 權限解放：徹底拔除多餘的 isShadow 及閾值判斷，100% 無條件服從 trade_frontline 的開火指令。
 
 require('dotenv').config();
 const axios = require('axios');
@@ -58,21 +59,16 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
     try {
         console.log(`🛒 [Trade Service] 準備買入 ${symbol} (${mint}) | 分數: ${aiScore} | 注碼: ${finalTradeAmountSol} SOL`);
 
+        // 1. 取得最新系統設定 (判斷 LIVE 還是 PAPER)
         const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
         const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
 
-        let buyThreshold = 70;
-        try {
-            const mlParamsStr = await redis.get('ml_strategy_params');
-            if (mlParamsStr) {
-                const mlParams = JSON.parse(mlParamsStr);
-                const currentClimate = envState.climate || 'CHOPPY';
-                const poolType = strategyVersion.includes('NEWBORN') ? 'NEWBORN' : 'TRENDING';
-                buyThreshold = mlParams?.[poolType]?.[currentClimate]?.buyThreshold || 70;
-            }
-        } catch(e) {}
-        const isShadow = aiScore < buyThreshold; 
+        if (mode === 'SHUTDOWN') {
+            console.log(`⏸️ [Trade Service] 系統處於休眠狀態，拒絕下單。`);
+            return false;
+        }
 
+        // 2. 獲取報價
         const quote = await getJupiterFinalQuote(mint, true, finalTradeAmountSol, 500, strategyVersion);
         if (!quote || !quote.quoteResponse) {
             console.log(`⚠️ [Trade Service] 無法獲取 ${symbol} 的 Jupiter 買入報價，放棄交易。`);
@@ -80,9 +76,19 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         }
 
         const entryPrice = quote.pricePerToken;
-        let txid = `BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`; 
+        
+        if (isNaN(entryPrice) || entryPrice <= 0 || !isFinite(entryPrice)) {
+            console.error(`💀 [Trade Service] 致命計算錯誤：${symbol} 入場價為 Infinity 或 0。拒絕執行！`);
+            return false;
+        }
 
-        if (!isShadow && mode === 'LIVE') {
+        let txid = `PAPER_BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`; 
+
+        // ============================================================================
+        // 🚀 核心修復：拔除 isShadow 判斷。只要 trade_frontline 叫得 executeBuy，就一定係及格嘅實盤/模擬盤！
+        // ============================================================================
+
+        if (mode === 'LIVE') {
             console.log(`⚡ [Live Engine] 觸發實盤買入: ${symbol}`);
             const buyResult = await executeLiveSwapUAT(quote.quoteResponse, 'BUY', reason);
             
@@ -95,53 +101,55 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             }
         }
 
+        // 統一下單寫入資料
         const positionData = {
             mint_address: mint,
             token_symbol: symbol,
-            strategy_version: strategyVersion,
+            strategy_type: strategyVersion, // 使用 strategy_type 與 frontline 統一
             entry_price_sol: entryPrice,
             highest_price_sol: entryPrice,
             quantity: (finalTradeAmountSol / entryPrice),
             ai_score: aiScore,
             ai_reason: reason,
+            market_climate: envState.climate || 'UNKNOWN',
+            entry_liquidity_usd: marketData.l || 0,
+            entry_volume_5m_usd: marketData.v || 0,
+            entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
             buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER',
         };
 
-        if (isShadow) {
-            await supabase.from('active_positions_shadow').insert([positionData]);
-            console.log(`👻 [Shadow Route] ${symbol} 已建立影子倉位 (供 ML 訓練用)。`);
-        } else {
-            const tableName = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
-            await supabase.from(tableName).insert([positionData]);
-            console.log(`⚔️ [Main Route] ${symbol} 已建立 ${mode} 倉位！`);
-            
-            const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
-            await supabase.from(historyTable).insert([{
-                token_mint: mint,
-                token_symbol: symbol,
-                action: 'BUY',
-                strategy_type: strategyVersion,
-                strategy_version: strategyVersion,
-                ai_used: true,
-                ai_score: aiScore,
-                review_history: reason,
-                price_sol: entryPrice,
-                quantity: (finalTradeAmountSol / entryPrice),
-                total_value_sol: finalTradeAmountSol,
-                realized_pnl_pct: 0,
-                realized_pnl_sol: 0,
-                txid: txid, 
-                market_climate: envState.climate || 'UNKNOWN',
-                entry_liquidity_usd: marketData.l || 0,
-                entry_volume_5m_usd: marketData.v || 0,
-                applied_ml_strategy_id: appliedMlStrategyId, 
-                ml_confidence_multiplier: safeMultiplier     
-            }]);
+        const tableName = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
+        await supabase.from(tableName).insert([positionData]);
+        console.log(`⚔️ [Main Route] ${symbol} 已建立 ${mode} 倉位！`);
+        
+        const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
+        await supabase.from(historyTable).insert([{
+            token_mint: mint,
+            token_symbol: symbol,
+            action: 'BUY',
+            strategy_type: strategyVersion,
+            strategy_version: strategyVersion,
+            ai_used: true,
+            ai_score: aiScore,
+            review_history: reason,
+            price_sol: entryPrice,
+            quantity: (finalTradeAmountSol / entryPrice),
+            total_value_sol: finalTradeAmountSol,
+            realized_pnl_pct: 0,
+            realized_pnl_sol: 0,
+            txid: txid, 
+            market_climate: envState.climate || 'UNKNOWN',
+            entry_liquidity_usd: marketData.l || 0,
+            entry_volume_5m_usd: marketData.v || 0,
+            entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
+            applied_ml_strategy_id: appliedMlStrategyId, 
+            ml_confidence_multiplier: safeMultiplier     
+        }]);
 
-            if (typeof sendTelegramAlert === 'function') {
-                await sendTelegramAlert(`🟢 <b>買入建倉</b>\n幣種: <b>${symbol}</b>\n模式: ${mode}\n策略: ${strategyVersion} (ID: ${appliedMlStrategyId})\n分數: ${aiScore}\n注碼: ${finalTradeAmountSol} SOL (${safeMultiplier}x)\n買入價: ${entryPrice.toFixed(8)} SOL\nTX: <code>${txid}</code>`);
-            }
+        if (typeof sendTelegramAlert === 'function') {
+            await sendTelegramAlert(`🟢 <b>買入建倉</b>\n幣種: <b>${symbol}</b>\n模式: ${mode}\n策略: ${strategyVersion} (ID: ${appliedMlStrategyId})\n分數: ${aiScore}\n注碼: ${finalTradeAmountSol} SOL (${safeMultiplier}x)\n買入價: ${entryPrice.toFixed(8)} SOL\nTX: <code>${txid}</code>`);
         }
+        
         return true;
     } catch (err) {
         console.error(`❌ [Trade Service] 買入執行失敗:`, err.message);
@@ -157,86 +165,96 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
     try {
         const sellQuantity = position.quantity * fraction;
-        const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || 'v10');
+        const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || position.strategy_type || 'v10');
 
-        let txid = null;
+        let txid = `PAPER_SELL_${Date.now()}`;
         let success = false;
 
-        if (quoteData && quoteData.quoteResponse) {
-            const txPromise = executeLiveSwapUAT(quoteData.quoteResponse, 'SELL', reason);
-            const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TX_TIMEOUT')), 10000));
+        const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
+        const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
 
-            try {
-                const result = await Promise.race([txPromise, timeoutPromise]);
-                if (result && result.success) {
-                    txid = result.txid;
-                    success = true;
+        if (mode === 'LIVE') {
+            if (quoteData && quoteData.quoteResponse) {
+                const txPromise = executeLiveSwapUAT(quoteData.quoteResponse, 'SELL', reason);
+                const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TX_TIMEOUT')), 10000));
+
+                try {
+                    const result = await Promise.race([txPromise, timeoutPromise]);
+                    if (result && result.success) {
+                        txid = result.txid;
+                        success = true;
+                    }
+                } catch (e) {
+                    console.warn(`⏳ [Trade Service] 常規賣出超時或失敗: ${e.message}`);
                 }
-            } catch (e) {
-                console.warn(`⏳ [Trade Service] 常規賣出超時或失敗: ${e.message}`);
+            }
+
+            if (!success) {
+                console.log(`🚨 [Sell Pipeline] 常規賣出失敗，啟動神風逃生艙！`);
+                const escapeResult = await fallbackEscapeService.executeEscape(position, sellQuantity);
+                
+                if (escapeResult && escapeResult.success) {
+                    txid = escapeResult.txid;
+                    success = true;
+                    console.log(`🎉 [Sell Pipeline] 逃生艙發射成功！TX: ${txid}`);
+                } else {
+                    throw new Error("常規賣出與神風逃生艙均告失敗");
+                }
             }
         } else {
-            console.warn(`⚠️ [Trade Service] 無法獲取 Jupiter 賣出報價！`);
+            // Paper Mode 自動成功
+            success = true;
         }
 
-        if (!success) {
-            console.log(`🚨 [Sell Pipeline] 常規賣出失敗，啟動神風逃生艙！`);
-            const escapeResult = await fallbackEscapeService.executeEscape(position, sellQuantity);
-            
-            if (escapeResult && escapeResult.success) {
-                txid = escapeResult.txid;
-                success = true;
-                console.log(`🎉 [Sell Pipeline] 逃生艙發射成功！TX: ${txid}`);
-            } else {
-                throw new Error("常規賣出與神風逃生艙均告失敗");
-            }
-        }
-
-        // 🚨 PREVENT INFINITY BUG: 確保 entryPrice 大於 0
+        // 🚨 PREVENT INFINITY BUG
         const entryPrice = position.entry_price_sol || 0;
         let realizedPnlPct = 0;
         if (entryPrice > 0) {
             realizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
         } else {
-            console.warn(`⚠️ [Sell Pipeline] 警告: ${position.token_symbol} 入場價為 0，已強制將 PnL% 歸零以防 ML 大腦崩潰！`);
+            console.warn(`⚠️ [Sell Pipeline] 警告: ${position.token_symbol} 入場價為 0，已強制將 PnL% 歸零！`);
         }
         
-        const isShadow = position.strategy_version?.includes('shadow') || false; 
+        const isShadow = position.strategy_type?.includes('SHADOW') || position.strategy_version?.includes('shadow') || false; 
 
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
-        for (const table of activeTables) {
-            await supabase.from(table).delete().eq('mint_address', mint);
+        if (fraction === 1.0) {
+            for (const table of activeTables) await supabase.from(table).delete().eq('mint_address', mint);
+        } else {
+            const table = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
+            await supabase.from(table).update({
+                quantity: position.quantity - sellQuantity,
+                strategy_type: position.strategy_type + '_HALF_SOLD'
+            }).eq('mint_address', mint);
         }
 
         const climateStr = await redis.get('global_env_state');
         const climate = climateStr ? JSON.parse(climateStr).climate : 'UNKNOWN';
 
+        // Shadow 結算或真實結算都要寫入 ML 訓練集
         await supabase.from('trade_patterns').insert([{
             mint_address: mint,
             is_shadow: isShadow,
-            strategy_version: position.strategy_version || 'v10_default',
+            strategy_version: position.strategy_type || 'v10_default',
             entry_ofi: position.entry_ofi || 0,
             entry_liquidity_usd: position.entry_liquidity_usd || 0,
             max_vwap_deviation: position.max_vwap_dev || 0, 
             final_cvd_slope: position.final_cvd_slope || 0,
             realized_pnl_pct: realizedPnlPct,
             market_climate: climate,
-            entry_price_sol: entryPrice, // 補回紀錄供參考
+            entry_price_sol: entryPrice,
             entry_volume_5m: position.entry_volume_5m_usd || 0,
             token_symbol: position.token_symbol || 'UNKNOWN'
         }]);
 
         if (!isShadow) {
-            const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
-            const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
-
             const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
             await supabase.from(historyTable).insert([{
                 token_mint: mint,
                 token_symbol: position.token_symbol,
                 action: fraction === 1.0 ? 'SELL' : 'SELL_HALF',
                 strategy_type: position.strategy_type,
-                strategy_version: position.strategy_version || 'v10_default',
+                strategy_version: position.strategy_type || 'v10_default',
                 ai_used: true,
                 price_sol: currentPrice,
                 quantity: sellQuantity,
