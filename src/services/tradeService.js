@@ -1,16 +1,20 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10.30 交易執行大腦 (Microservice Core)
+// 📝 檔案功能及用途：V10.28 交易執行大腦 (Microservice Core)
 // 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！
-// 🛡️ 數據防護：加入 Infinity PnL 阻截機制與一票否決結算防禦 (修復 Telegram 轟炸)。
-// 🧠 記憶體同步：實裝「秒速 RAM 清除」機制，杜絕模擬盤因 DB 延遲導致的無限鞭屍賣出。
+// 🛡️ 數據防護：加入 Infinity PnL 阻截機制。
+// 🧠 權限解放：徹底拔除多餘的 isShadow 判斷，100% 無條件服從 trade_frontline 的開火指令。
 // 📊 Schema 同步：已擴容 active_positions 表，全面寫入環境氣候與量價數據。
+// 💬 TG 廣播：完美還原舊版經典 Telegram 買入/平倉通知格式。
 
 require('dotenv').config();
 const axios = require('axios');
 const Redis = require('ioredis');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
-const { getPortfolio, updateCache } = require('./portfolioService'); // 🚀 FIX: 引入 updateCache
+// 🚀 FIX 1: 引入 PublicKey, connection 和 updateCache 用於解決小數點錯位與記憶體幽靈
+const { PublicKey } = require('@solana/web3.js');
+const { connection } = require('../config/solana');
+const { getPortfolio, updateCache } = require('./portfolioService');
 const { sendTelegramAlert } = require('./telegramService');
 const { fallbackEscapeService } = require('./fallbackEscapeService');
 const { executeLiveSwapUAT } = require('./liveTradeService');
@@ -23,13 +27,28 @@ const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL ||
 
 const SOL_MINT = "So11111111111111111111111111111111111111112";
 
-async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyType = 'NEWBORN') {
+// 🚀 FIX 2: 加入 knownDecimals 參數，動態查詢 Token 真實小數點
+async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyType = 'NEWBORN', knownDecimals = null) {
     try {
         const inputMint = isBuy ? SOL_MINT : mint;
         const outputMint = isBuy ? mint : SOL_MINT;
         
-        const decimals = isBuy ? 9 : 6;
-        const amountRaw = Math.floor(amount * Math.pow(10, decimals));
+        // 🚀 FIX: 動態獲取真實小數點，防止 9-decimals 幣種利潤爆表 (+99900%)
+        let tokenDecimals = knownDecimals;
+        if (tokenDecimals === null) {
+            try {
+                const mintInfo = await connection.getParsedAccountInfo(new PublicKey(mint));
+                tokenDecimals = mintInfo.value?.data?.parsed?.info?.decimals;
+                if (tokenDecimals === undefined) tokenDecimals = 6;
+            } catch(e) {
+                tokenDecimals = 6;
+            }
+        }
+
+        const inputDecimals = isBuy ? 9 : tokenDecimals;
+        const outputDecimals = isBuy ? tokenDecimals : 9;
+
+        const amountRaw = Math.floor(amount * Math.pow(10, inputDecimals));
 
         let url = `https://api.jup.ag/swap/v1/quote?inputMint=${inputMint}&outputMint=${outputMint}&amount=${amountRaw}&slippageBps=${slippageBps}`;
         
@@ -40,13 +59,18 @@ async function getJupiterFinalQuote(mint, isBuy, amount, slippageBps, strategyTy
         const res = await axios.get(url, { timeout: 3000 });
         if (res.data && res.data.outAmount) {
             const outLamports = parseFloat(res.data.outAmount);
+            // 🚀 FIX: 使用真實小數點換算價格
+            const outAmountUi = outLamports / Math.pow(10, outputDecimals);
+            const inAmountUi = amount; 
+            
             const pricePerToken = isBuy 
-                ? amount / (outLamports / 1e6) 
-                : (outLamports / 1e9) / amount;
+                ? inAmountUi / outAmountUi
+                : outAmountUi / inAmountUi;
 
             return {
                 quoteResponse: res.data,
-                pricePerToken: pricePerToken
+                pricePerToken: pricePerToken,
+                decimals: tokenDecimals // 🚀 FIX: 傳回真實小數點給寫入資料庫用
             };
         }
         return null;
@@ -75,6 +99,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         }
 
         const entryPrice = quote.pricePerToken;
+        const actualDecimals = quote.decimals || 6; // 🚀 FIX: 取得真實小數點
         
         if (isNaN(entryPrice) || entryPrice <= 0 || !isFinite(entryPrice)) {
             console.error(`💀 [Trade Service] 致命計算錯誤：${symbol} 入場價為 Infinity 或 0。拒絕執行！`);
@@ -96,7 +121,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             }
         }
 
-        // 🚀 全數據寫入！已擴容 DB 完美對接
+        // 🚀 全數據寫入！已擴容 DB 完美對接 (原汁原味排版保留)
         const positionData = {
             mint_address: mint,
             token_symbol: symbol,
@@ -104,6 +129,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             entry_price_sol: entryPrice,
             highest_price_sol: entryPrice,
             quantity: (finalTradeAmountSol / entryPrice),
+            token_decimals: actualDecimals, // 🚀 FIX: 將真實小數點寫入 active_positions 表
             ai_score: aiScore,
             ai_reason: reason,
             buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER',
@@ -149,6 +175,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         }]);
 
         if (typeof sendTelegramAlert === 'function') {
+            // 🎯 還原舊版經典 Telegram 格式
             const modeText = mode === 'LIVE' ? '[實盤]' : '[模擬]';
             const catText = strategyVersion.includes('TRENDING') ? '🔥 TRENDING' : '🐣 NEWBORN';
             
@@ -172,7 +199,9 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
     try {
         const sellQuantity = position.quantity * fraction;
-        const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || position.strategy_type || 'v10');
+        const tokenDecimals = position.token_decimals || 6; // 🚀 FIX: 讀取真實 decimals 避免只賣 0.1%
+
+        const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || position.strategy_type || 'v10', tokenDecimals);
 
         let txid = `SELL_${Date.now()}`;
         let success = false;
@@ -183,6 +212,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         if (mode === 'LIVE') {
             if (quoteData && quoteData.quoteResponse) {
                 const txPromise = executeLiveSwapUAT(quoteData.quoteResponse, 'SELL', reason);
+                // 🚀 FIX: 設定 15 秒超時
                 const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TX_TIMEOUT')), 15000));
 
                 try {
@@ -209,11 +239,10 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                 }
             }
         } else {
-            // 📝 模擬盤直接當成功
             success = true;
         }
 
-        // 🛑 一票否決防禦：如果真實交易未上鏈，終止流程防轟炸
+        // 🚀 FIX: 一票否決！如果實盤交易失敗，絕對不能清除 DB 和廣播，防止 TG 轟炸
         if (mode === 'LIVE' && !success) {
             console.warn(`⚠️ [Sell Pipeline] $${position.token_symbol} 賣出未能成功上鏈，終止結算流程以防重覆轟炸。`);
             return false;
@@ -227,23 +256,20 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         
         const isShadow = position.strategy_type?.includes('SHADOW') || position.strategy_version?.includes('shadow') || false; 
 
-        // 🗑️ 清除或更新資料庫倉位
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
         if (fraction === 1.0) {
-            for (const table of activeTables) {
-                await supabase.from(table).delete().eq('mint_address', mint);
-            }
+            for (const table of activeTables) await supabase.from(table).delete().eq('mint_address', mint);
             
-            // 🚀 終極修復：立即從本地 RAM 中移除該倉位，徹底斬斷 Zombie Sweeper 的無限鞭屍循環！
-            updateCache('SELL', sellQuantity * currentPrice, position);
+            // 🚀 FIX: 樂觀更新，立即將持倉從本地 RAM 抹除，防止 60 秒後 ZombieSweeper 無限鞭屍
+            updateCache('SELL', sellQuantity * currentPrice, position); 
         } else {
             const table = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
             await supabase.from(table).update({
                 quantity: position.quantity - sellQuantity,
                 strategy_type: position.strategy_type + '_HALF_SOLD'
             }).eq('mint_address', mint);
-
-            // 🚀 終極修復：同步更新 RAM 內的倉位數量
+            
+            // 同步更新 RAM
             const port = getPortfolio();
             if (port && port.positions) {
                 const pIndex = port.positions.findIndex(p => p.mint_address === mint);
@@ -304,7 +330,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
     } catch (err) {
         console.error(`❌ [Sell Pipeline] 平倉異常:`, err.message);
-        // 保留 Redis Lock 讓其自然過期 45 秒，避免狂炸重試
+        // 🚀 FIX: 已經移除 await redis.del(lockKey); 讓鎖自然過期防止重試轟炸
         return false;
     }
 }
