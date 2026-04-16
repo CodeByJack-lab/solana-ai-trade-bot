@@ -1,8 +1,10 @@
 // src/services/tradeService.js
 // 📝 檔案功能及用途：V10.28 交易執行大腦 (Microservice Core)
-// 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！動態感應 Dashboard 的 LIVE/PAPER 模式。
-// 🛡️ 數據防護：加入 Infinity PnL 阻截機制，防止 entry_price 為 0 時搞冧 ML 大腦。
-// 🧠 權限解放：徹底拔除多餘的 isShadow 及閾值判斷，100% 無條件服從 trade_frontline 的開火指令。
+// 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！
+// 🛡️ 數據防護：加入 Infinity PnL 阻截機制。
+// 🧠 權限解放：徹底拔除多餘的 isShadow 判斷，100% 無條件服從 trade_frontline 的開火指令。
+// 📊 Schema 同步：已擴容 active_positions 表，全面寫入環境氣候與量價數據。
+// 💬 TG 廣播：完美還原舊版經典 Telegram 買入/平倉通知格式。
 
 require('dotenv').config();
 const axios = require('axios');
@@ -59,7 +61,6 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
     try {
         console.log(`🛒 [Trade Service] 準備買入 ${symbol} (${mint}) | 分數: ${aiScore} | 注碼: ${finalTradeAmountSol} SOL`);
 
-        // 1. 取得最新系統設定 (判斷 LIVE 還是 PAPER)
         const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
         const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
 
@@ -68,7 +69,6 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             return false;
         }
 
-        // 2. 獲取報價
         const quote = await getJupiterFinalQuote(mint, true, finalTradeAmountSol, 500, strategyVersion);
         if (!quote || !quote.quoteResponse) {
             console.log(`⚠️ [Trade Service] 無法獲取 ${symbol} 的 Jupiter 買入報價，放棄交易。`);
@@ -82,11 +82,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             return false;
         }
 
-        let txid = `PAPER_BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`; 
-
-        // ============================================================================
-        // 🚀 核心修復：拔除 isShadow 判斷。只要 trade_frontline 叫得 executeBuy，就一定係及格嘅實盤/模擬盤！
-        // ============================================================================
+        let txid = `BUY_${crypto.randomBytes(3).toString('hex').toUpperCase()}`; 
 
         if (mode === 'LIVE') {
             console.log(`⚡ [Live Engine] 觸發實盤買入: ${symbol}`);
@@ -101,25 +97,32 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             }
         }
 
-        // 統一下單寫入資料
+        // 🚀 全數據寫入！已擴容 DB 完美對接
         const positionData = {
             mint_address: mint,
             token_symbol: symbol,
-            strategy_type: strategyVersion, // 使用 strategy_type 與 frontline 統一
+            strategy_type: strategyVersion,
             entry_price_sol: entryPrice,
             highest_price_sol: entryPrice,
             quantity: (finalTradeAmountSol / entryPrice),
             ai_score: aiScore,
             ai_reason: reason,
+            buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER',
             market_climate: envState.climate || 'UNKNOWN',
             entry_liquidity_usd: marketData.l || 0,
             entry_volume_5m_usd: marketData.v || 0,
-            entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
-            buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER',
+            entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0
         };
 
         const tableName = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
-        await supabase.from(tableName).insert([positionData]);
+        
+        const { error: insertErr } = await supabase.from(tableName).insert([positionData]);
+        
+        if (insertErr) {
+            console.error(`❌ [Main Route] 寫入 ${tableName} 失敗:`, insertErr.message);
+            return false; 
+        }
+        
         console.log(`⚔️ [Main Route] ${symbol} 已建立 ${mode} 倉位！`);
         
         const historyTable = mode === 'LIVE' ? 'trade_history_live' : 'trade_history_paper';
@@ -147,7 +150,13 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         }]);
 
         if (typeof sendTelegramAlert === 'function') {
-            await sendTelegramAlert(`🟢 <b>買入建倉</b>\n幣種: <b>${symbol}</b>\n模式: ${mode}\n策略: ${strategyVersion} (ID: ${appliedMlStrategyId})\n分數: ${aiScore}\n注碼: ${finalTradeAmountSol} SOL (${safeMultiplier}x)\n買入價: ${entryPrice.toFixed(8)} SOL\nTX: <code>${txid}</code>`);
+            // 🎯 還原舊版經典 Telegram 格式
+            const modeText = mode === 'LIVE' ? '[實盤]' : '[模擬]';
+            const catText = strategyVersion.includes('TRENDING') ? '🔥 TRENDING' : '🐣 NEWBORN';
+            
+            const msg = `🟢 ${modeText} ✅ 買入成功\n🏷️ 類別: ${catText}\n🪙 代幣: $${symbol}\n💰 投入: ${finalTradeAmountSol} SOL\n🔗 TX: <code>${txid}</code>\n🧠 理由: ${reason}`;
+            
+            await sendTelegramAlert(msg);
         }
         
         return true;
@@ -167,7 +176,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         const sellQuantity = position.quantity * fraction;
         const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || position.strategy_type || 'v10');
 
-        let txid = `PAPER_SELL_${Date.now()}`;
+        let txid = `SELL_${Date.now()}`;
         let success = false;
 
         const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
@@ -202,17 +211,13 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                 }
             }
         } else {
-            // Paper Mode 自動成功
             success = true;
         }
 
-        // 🚨 PREVENT INFINITY BUG
         const entryPrice = position.entry_price_sol || 0;
         let realizedPnlPct = 0;
         if (entryPrice > 0) {
             realizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
-        } else {
-            console.warn(`⚠️ [Sell Pipeline] 警告: ${position.token_symbol} 入場價為 0，已強制將 PnL% 歸零！`);
         }
         
         const isShadow = position.strategy_type?.includes('SHADOW') || position.strategy_version?.includes('shadow') || false; 
@@ -231,7 +236,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         const climateStr = await redis.get('global_env_state');
         const climate = climateStr ? JSON.parse(climateStr).climate : 'UNKNOWN';
 
-        // Shadow 結算或真實結算都要寫入 ML 訓練集
         await supabase.from('trade_patterns').insert([{
             mint_address: mint,
             is_shadow: isShadow,
@@ -267,7 +271,8 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
             if (typeof sendTelegramAlert === 'function') {
                 const icon = realizedPnlPct > 0 ? '🟢' : '🔴';
-                await sendTelegramAlert(`${icon} <b>平倉結算</b>\n幣種: <b>${position.token_symbol}</b>\n模式: ${mode}\n原因: ${reason}\n利潤: ${realizedPnlPct.toFixed(2)}%\nTX: <code>${txid}</code>`);
+                const modeText = mode === 'LIVE' ? '[實盤]' : '[模擬]';
+                await sendTelegramAlert(`${icon} ${modeText} <b>平倉結算</b>\n幣種: <b>${position.token_symbol}</b>\n原因: ${reason}\n利潤: ${realizedPnlPct.toFixed(2)}%\nTX: <code>${txid}</code>`);
             }
         }
 
