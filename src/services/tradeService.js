@@ -1,7 +1,7 @@
 // src/services/tradeService.js
 // 📝 檔案功能及用途：V10.28 交易執行大腦 (Microservice Core)
 // 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！
-// 🛡️ 數據防護：加入 Infinity PnL 阻截機制。
+// 🛡️ 數據防護：加入 Infinity PnL 阻截機制與一票否決結算防禦 (修復 Telegram 轟炸)。
 // 🧠 權限解放：徹底拔除多餘的 isShadow 判斷，100% 無條件服從 trade_frontline 的開火指令。
 // 📊 Schema 同步：已擴容 active_positions 表，全面寫入環境氣候與量價數據。
 // 💬 TG 廣播：完美還原舊版經典 Telegram 買入/平倉通知格式。
@@ -185,7 +185,8 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         if (mode === 'LIVE') {
             if (quoteData && quoteData.quoteResponse) {
                 const txPromise = executeLiveSwapUAT(quoteData.quoteResponse, 'SELL', reason);
-                const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TX_TIMEOUT')), 10000));
+                // 🚀 修復 1：延長等待時間至 15 秒，給予 Jito 充分確認時間
+                const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TX_TIMEOUT')), 15000));
 
                 try {
                     const result = await Promise.race([txPromise, timeoutPromise]);
@@ -207,11 +208,17 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                     success = true;
                     console.log(`🎉 [Sell Pipeline] 逃生艙發射成功！TX: ${txid}`);
                 } else {
-                    throw new Error("常規賣出與神風逃生艙均告失敗");
+                    console.error("❌ 常規賣出與神風逃生艙均告失敗");
                 }
             }
         } else {
             success = true;
+        }
+
+        // 🚀 修復 2：一票否決防禦！如果 LIVE 模式下交易最終失敗，絕對不准刪除 DB 和發送 Telegram！
+        if (mode === 'LIVE' && !success) {
+            console.warn(`⚠️ [Sell Pipeline] $${position.token_symbol} 賣出未能成功上鏈，終止結算流程以防重覆轟炸。`);
+            return false;
         }
 
         const entryPrice = position.entry_price_sol || 0;
@@ -281,7 +288,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
     } catch (err) {
         console.error(`❌ [Sell Pipeline] 平倉異常:`, err.message);
-        await redis.del(lockKey);
+        // 🚀 修復 3：移除 await redis.del(lockKey); 讓鎖自然過期 45 秒，避免狂炸重試
         return false;
     }
 }

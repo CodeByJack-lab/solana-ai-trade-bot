@@ -182,7 +182,7 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
                 await pollSignatureStatus(txid, 5000); 
                 console.log(`🎉 [Live Trade] ${action} 交易已在鏈上確認！`);
                 
-                // 🚀 關鍵同步：交易確認後立即校準真倉餘額
+                // 🚀 修復 4：交易確認後立即校準真倉餘額
                 syncLiveBalanceToDB(); 
                 
                 healthMonitor.setStatus('Live_Engine', `🟢 交易確認成功`); 
@@ -197,7 +197,7 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
                 const fastestSig = await broadcastWithPromiseAny(serializedSwapTx);
                 await pollSignatureStatus(fastestSig, 15000);
                 
-                // 🚀 絕命廣播成功後也進行同步
+                // 🚀 修復 4：絕命廣播成功後也進行同步
                 syncLiveBalanceToDB(); 
                 
                 return { success: true, txid: fastestSig };
