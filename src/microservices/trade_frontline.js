@@ -7,6 +7,7 @@
 // 👻 影子修復：動態設定 50 至 (及格線-1) 為 Shadow 區間，最大化收集邊緣數據供 ML 訓練。
 // 🛑 防禦升級：攔截已持有倉位，踢出 trending_pool；加入 Shadow 表防重覆寫入機制。
 // 🚦 併發防爆：加入開火前 DB 實時點算及 Redis In-flight 鎖，徹底解決異步併發導致無視倉位上限的問題。
+// 👑 API 霸體：每次 Call DexScreener 前設定 Redis DEXSCREENER_LOCK，迫使 Shadow 任務讓路 10 秒。
 
 require('dotenv').config();
 const express = require('express');
@@ -284,6 +285,10 @@ setInterval(async () => {
 
         const BATCH_SIZE = 20;
         for (let i = 0; i < tokensToProcess.length; i += BATCH_SIZE) {
+            
+            // 👑 API 霸體：Main Bot 霸佔 DexScreener 資源，警告 Shadow 讓路 10 秒
+            await redisClient.set('DEXSCREENER_LOCK', 'MAIN_BOT', 'EX', 10);
+
             const batch = tokensToProcess.slice(i, i + BATCH_SIZE);
             const mints = batch.map(c => c.mint_address).join(',');
             
@@ -510,7 +515,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             const lockKey = `buy_lock:${mint}`;
             const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 10, 'NX');
             if (acquired) {
-                // 利用 Redis In-flight 鎖，防止同 1 秒內有幾隻幣一齊衝過 DB 檢查
                 const inflightKey = `inflight_buy_${poolType}_${currentMode}`;
                 const inflightCount = await redisClient.incr(inflightKey);
                 await redisClient.expire(inflightKey, 10); 
@@ -532,7 +536,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                     finalTradeAmountSol, marketData, envState, appliedMlStrategyId, safeMultiplier
                 );
 
-                // 買入成功後，即時手動 Update 內存，防止下一隻幣喺下一個 Loop 又買
                 if (success) {
                     const portfolio = getPortfolio();
                     if (portfolio && portfolio.positions) {
@@ -543,35 +546,28 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
-            // 🎯 核心防禦：動態定義 50 至 (及格線-1) 為 Shadow 區間
             if (finalScore >= 50 && finalScore < buyThreshold) {
                 
-                const { data: existingShadow, error: checkErr } = await supabase
+                const MAX_SHADOW_CAPACITY = 50; // 容量防爆：上限 50 隻
+                const { count: shadowCount, error: shadowCountErr } = await supabase
                     .from('active_positions_shadow')
-                    .select('id')
-                    .eq('mint_address', mint)
-                    .limit(1);
+                    .select('*', { count: 'exact', head: true });
 
-                if (existingShadow && existingShadow.length > 0) {
-                    console.log(`👻 [Shadow Route] ${symbol} 已存在於影子倉位，跳過重複寫入。`);
+                if (!shadowCountErr && shadowCount >= MAX_SHADOW_CAPACITY) {
+                    console.log(`👻 [Shadow Route] 影子倉位已達上限 (${shadowCount}/${MAX_SHADOW_CAPACITY})，暫停收集。`);
                 } else {
-                    console.log(`👻 [Shadow Route] ${symbol} 落入 50-${buyThreshold - 1} 分區間，建立影子倉位 (供 ML 訓練用)。`);
-                    
-                    const { error: shadowErr } = await supabase.from('active_positions_shadow').insert({
-                        mint_address: mint,
-                        token_symbol: symbol,
-                        strategy_type: poolType + '_SHADOW',
-                        entry_price_sol: marketData.p,
-                        ai_score: finalScore,
-                        ai_reason: llmReason,
-                        entry_liquidity_usd: marketData.l,
-                        entry_volume_5m_usd: marketData.v,
-                        entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
-                        market_climate: envState.climate
-                    });
-
-                    if (shadowErr) {
-                        console.error(`❌ [Shadow Error] 寫入 active_positions_shadow 失敗:`, shadowErr.message);
+                    const { data: existingShadow } = await supabase.from('active_positions_shadow').select('id').eq('mint_address', mint).limit(1);
+                    if (existingShadow && existingShadow.length > 0) {
+                        console.log(`👻 [Shadow Route] ${symbol} 已存在於影子倉位，跳過重複寫入。`);
+                    } else {
+                        console.log(`👻 [Shadow Route] ${symbol} 落入影子區間，建立倉位 (供 ML 訓練用)。`);
+                        await supabase.from('active_positions_shadow').insert({
+                            mint_address: mint, token_symbol: symbol, strategy_type: poolType + '_SHADOW',
+                            entry_price_sol: marketData.p, ai_score: finalScore, ai_reason: llmReason,
+                            entry_liquidity_usd: marketData.l, entry_volume_5m_usd: marketData.v,
+                            entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
+                            market_climate: envState.climate
+                        });
                     }
                 }
             }
@@ -602,6 +598,9 @@ burnSub.on('message', async (channel, message) => {
 
             if (incubating) {
                 console.log(`🔥 [Interrupt] 接收到 LP Burn 越獄訊號！立刻將 ${symbol} 查價並押送至決策漏斗！`);
+
+                // 👑 API 霸體：Main Bot 霸佔 DexScreener 資源，警告 Shadow 讓路 10 秒
+                await redisClient.set('DEXSCREENER_LOCK', 'MAIN_BOT', 'EX', 10);
 
                 const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${mint}`, { timeout: 4000 });
                 const pair = res.data?.pairs?.sort((a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0))[0];
@@ -636,7 +635,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (防重覆建倉 + 併發防爆版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (防重覆建倉 + 影子容量保護版 + API霸體) 啟動中...");
     
     await initPortfolio();
     

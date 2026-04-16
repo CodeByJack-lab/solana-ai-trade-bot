@@ -1,41 +1,31 @@
 // src/microservices/monitor_guards.js
 // 📝 檔案功能用途：V10.18 【護盤鐵衛】微服務 (Microservice Core)
 // 🚀 核心升級：O(1) 無迴圈運算、事件驅動觸發 AI Watchdog、完整繼承 V9 神風逃生艙與硬止損。
-// 🛡️ 終極修復：完美對接 Python 動態 SL/TP 參數；修復 DEFCON 逃生後的 Database 幽靈倉位卡死 Bug。
-// 🌪️ V10.24 新增：主動清道夫實裝「大市氣候動態縮放 (Dynamic Climate Scaling)」。
-// 👻 V10.27 影子結算：新增 Shadow 倉位 24 小時強制結算機制，餵養 ML 大腦並防止資料庫膨脹。
+// 👻 影子獨立：新增每 15 分鐘執行的 Shadow Tracker，無痛查價並於 24 小時後自動結算寫入 ML。
+// 🚦 API 讓路：Shadow 查價前會檢查 DEXSCREENER_LOCK，若 Main Bot 佔用則強制等待 10 秒。
 
 require('dotenv').config();
 const Redis = require('ioredis');
+const axios = require('axios');
 const { supabase } = require('../config/supabase');
 
-// 載入 V10 底層依賴
 const { getPortfolio, initPortfolio } = require('../services/portfolioService'); 
 const { runSellPipeline } = require('../services/tradeService');
 const { fallbackEscapeService } = require('../services/fallbackEscapeService');
 const { healthMonitor } = require('../services/healthMonitor');
 
-// ------------------------------------------------------------------
-// 1. 初始化與全域防禦變數
-// ------------------------------------------------------------------
 const redisSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 
 let globalConfig = { is_running: true };
 let localClimate = 'CHOPPY'; 
-let dynamic_sl_limit = -15.0; // 動態止損
-let dynamic_tp_step = 20.0;   // 動態階梯體檢點
+let dynamic_sl_limit = -15.0; 
+let dynamic_tp_step = 20.0;   
 
-// 🛡️ 時光倒流護盾 Map (O(1) 查詢)
 const last_valid_ts = new Map();
-
-// 🚨 逃生艙實體隔離鎖 (確保被隔離的幣不會再次觸發任何運算)
 const quarantine_lock = new Set();
 const guard_states = new Map();
 
-// ------------------------------------------------------------------
-// 2. O(1) 內存數學狀態機
-// ------------------------------------------------------------------
 class MathGuardState {
     constructor() {
         this.p_arr = new Float64Array(500); this.v_arr = new Float64Array(500);
@@ -63,12 +53,8 @@ class MathGuardState {
     getCVD() { return this.cvd; } 
 }
 
-// ------------------------------------------------------------------
-// 3. 神風逃生艙實體隔離
-// ------------------------------------------------------------------
 async function triggerDefconEscape(pos, portfolio) {
     if (quarantine_lock.has(pos.mint_address)) return;
-
     quarantine_lock.add(pos.mint_address);
     const actualIndex = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
     if (actualIndex > -1) portfolio.positions.splice(actualIndex, 1); 
@@ -76,30 +62,13 @@ async function triggerDefconEscape(pos, portfolio) {
     console.log(`🚨 [DEFCON] ${pos.token_symbol} 觸發極端崩盤，已實體隔離進入神風逃生艙！`);
 
     try {
-        const isShadow = pos.strategy_type?.includes('SHADOW');
-        
-        // 如果是 Shadow Trade，直接抹殺紀錄，無需發射逃生艙
-        if (isShadow) {
-             const currentPrice = pos.current_price_sol || pos.highest_price_sol || pos.entry_price_sol;
-             await runSellPipeline(pos, currentPrice, "☠️ Shadow 爆倉結算", 1.0);
-             guard_states.delete(pos.mint_address);
-             last_valid_ts.delete(pos.mint_address);
-             return;
-        }
-
         const escapeResult = await fallbackEscapeService.executeEscape(pos, pos.quantity);
-
         if (escapeResult && escapeResult.success) {
             console.log(`☠️ [DEFCON] ${pos.token_symbol} 逃生成功！正在清理 Database 幽靈紀錄...`);
-            
             const activeTables = ['active_positions_live', 'active_positions_paper'];
-            for (const table of activeTables) {
-                await supabase.from(table).delete().eq('mint_address', pos.mint_address);
-            }
-
+            for (const table of activeTables) await supabase.from(table).delete().eq('mint_address', pos.mint_address);
             guard_states.delete(pos.mint_address);
             last_valid_ts.delete(pos.mint_address);
-            console.log(`✅ [DEFCON] ${pos.token_symbol} 實體清理完畢。`);
         } else {
             portfolio.positions.push(pos);
         }
@@ -110,16 +79,13 @@ async function triggerDefconEscape(pos, portfolio) {
     }
 }
 
-// ------------------------------------------------------------------
-// 4. V9 硬止損與 V10 Math Guards 演算核心
-// ------------------------------------------------------------------
 async function executeV9HardStopLoss(pos, pnlPct, currentPrice) {
     if (pnlPct <= dynamic_sl_limit) { 
         const lockKey = `sell_lock:${pos.mint_address}`;
         const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
         if (acquired) {
-            console.log(`💥 [Grace Period] ${pos.token_symbol} 建倉首分鐘跌穿 ${dynamic_sl_limit.toFixed(2)}% 硬止損底線！`);
-            const sold = await runSellPipeline(pos, currentPrice, `💥 冷啟動期硬止損觸發 (${dynamic_sl_limit.toFixed(2)}%)`, 1.0)
+            console.log(`💥 [Grace Period] ${pos.token_symbol} 跌穿 ${dynamic_sl_limit.toFixed(2)}% 硬止損底線！`);
+            const sold = await runSellPipeline(pos, currentPrice, `💥 硬止損觸發 (${dynamic_sl_limit.toFixed(2)}%)`, 1.0)
                 .finally(() => redisClient.del(lockKey));
             return sold;
         }
@@ -131,7 +97,6 @@ setInterval(async () => {
     try {
         const envStr = await redisClient.get('global_env_state');
         if (envStr) localClimate = JSON.parse(envStr).climate || 'CHOPPY';
-        
         const paramsStr = await redisClient.get('cache:dynamic_scoring_model');
         if (paramsStr) {
             const mlModel = JSON.parse(paramsStr);
@@ -156,7 +121,7 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
     if (vwap > 0 && currentPrice < vwap * 0.90 && pnlPct <= (dynamic_sl_limit * 0.5)) {
         const lockKey = `sell_lock:${pos.mint_address}`;
         if (await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX')) {
-            console.log(`📉 [V10 Guard] ${pos.token_symbol} 跌穿 VWAP 防線且虧損 (${pnlPct.toFixed(2)}% <= ${(dynamic_sl_limit * 0.5).toFixed(2)}%)，執行常規止損。`);
+            console.log(`📉 [V10 Guard] ${pos.token_symbol} 跌穿 VWAP 防線，執行常規止損。`);
             const sold = await runSellPipeline(pos, currentPrice, "📉 V10 VWAP 防線崩潰", 1.0)
                 .finally(() => redisClient.del(lockKey));
             if (sold) { guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); }
@@ -182,7 +147,7 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
         if (pnlPct < highestPnlPct - 15.0 || cvd < 0) { 
             const lockKey = `sell_lock:${pos.mint_address}`;
             if (await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX')) {
-                console.log(`🌪️ [V10 Guard] ${pos.token_symbol} 偵測到大戶派發 (CVD背離) 或劇烈回撤，執行高頻波段逃頂。`);
+                console.log(`🌪️ [V10 Guard] ${pos.token_symbol} 偵測到大戶派發 (CVD背離)，執行逃頂。`);
                 const sold = await runSellPipeline(pos, currentPrice, "🌪️ CVD 背離/波幅直斬", 1.0)
                     .finally(() => redisClient.del(lockKey));
                 if (sold) { guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); }
@@ -191,34 +156,25 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
     }
 }
 
-// ------------------------------------------------------------------
-// 5. Redis 報價接收與護盤主迴圈
-// ------------------------------------------------------------------
 redisSub.subscribe('price_updates', 'emergency_action');
-
 redisSub.on('message', async (channel, message) => {
     if (channel === 'emergency_action') {
         try {
             const { action, reason } = JSON.parse(message);
             if (action === 'LIQUIDATE_ALL') {
-                console.log(`☢️ [DEFCON 1] 收到全域強平指令！正在併發執行大屠殺...`);
                 globalConfig.is_running = false; 
                 const portfolio = getPortfolio();
                 if (!portfolio || !portfolio.positions) return;
 
                 const sellPromises = portfolio.positions.map(async (pos) => {
                     if (quarantine_lock.has(pos.mint_address)) return; 
-                    
                     const lockKey = `sell_lock:${pos.mint_address}`;
                     const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                     if (acquired) {
                         const currentPrice = pos.current_price_sol || pos.highest_price_sol || pos.entry_price_sol;
                         const sold = await runSellPipeline(pos, currentPrice, reason, 1.0)
                             .finally(() => redisClient.del(lockKey));
-                        if (sold) {
-                            guard_states.delete(pos.mint_address);
-                            last_valid_ts.delete(pos.mint_address);
-                        }
+                        if (sold) { guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); }
                     }
                 });
                 await Promise.allSettled(sellPromises);
@@ -267,9 +223,6 @@ redisSub.on('message', async (channel, message) => {
     }
 });
 
-// ------------------------------------------------------------------
-// 6. OOM 防禦：實時交叉比對清道夫 
-// ------------------------------------------------------------------
 setInterval(() => {
     const now = Date.now();
     let cleanedCount = 0;
@@ -287,7 +240,7 @@ setInterval(() => {
 }, 60 * 1000); 
 
 // ------------------------------------------------------------------
-// 7. 主動清道夫 (Zombie Sweeper) - 🚀 V10.27 包含 Shadow 結算
+// 7. 主動清道夫 (Zombie Sweeper) - 僅清理真/模擬倉
 // ------------------------------------------------------------------
 setInterval(async () => {
     if (!globalConfig.is_running) return;
@@ -299,35 +252,21 @@ setInterval(async () => {
         let baseMaxAgeMeme = 15;
         let baseMaxAgeTrending = 120;
         try {
-            const { data: dbConfig } = await supabase
-                .from('system_config')
-                .select('min_age_mins, max_age_mins')
-                .eq('id', 1)
-                .single();
-            if (dbConfig) {
-                baseMaxAgeMeme = dbConfig.min_age_mins || 15; 
-                baseMaxAgeTrending = dbConfig.max_age_mins || 120; 
-            }
+            const { data: dbConfig } = await supabase.from('system_config').select('min_age_mins, max_age_mins').eq('id', 1).single();
+            if (dbConfig) { baseMaxAgeMeme = dbConfig.min_age_mins || 15; baseMaxAgeTrending = dbConfig.max_age_mins || 120; }
         } catch (dbErr) {}
-
-        const currentClimate = localClimate;
 
         let timeMultiplier = 1.0;
         let requiredPnlPct = 5.0;
-
-        switch (currentClimate) {
+        switch (localClimate) {
             case 'RAGING_BULL': timeMultiplier = 2.0; requiredPnlPct = 1.0; break;
             case 'BULL_FRENZY': timeMultiplier = 1.5; requiredPnlPct = 2.0; break;
             case 'BEAR_PANIC':  timeMultiplier = 0.5; requiredPnlPct = 8.0; break;
-            case 'CHOPPY':
             default:            timeMultiplier = 1.0; requiredPnlPct = 5.0; break;
         }
 
         const dynamicAgeMeme = Math.floor(baseMaxAgeMeme * timeMultiplier);
         const dynamicAgeTrending = Math.floor(baseMaxAgeTrending * timeMultiplier);
-        
-        // 👻 Shadow 幣強制結算時間 (24 小時 = 1440 分鐘)
-        const SHADOW_MAX_AGE_MINS = 1440; 
 
         for (const pos of portfolio.positions) {
             if (quarantine_lock.has(pos.mint_address)) continue;
@@ -336,39 +275,16 @@ setInterval(async () => {
             const currentPrice = pos.current_price_sol || pos.highest_price_sol || pos.entry_price_sol;
             const pnlPct = ((currentPrice - pos.entry_price_sol) / pos.entry_price_sol) * 100;
             
-            const isShadow = pos.strategy_type?.includes('SHADOW');
+            const timeStopLimit = pos.strategy_type?.includes('TRENDING') ? dynamicAgeTrending : dynamicAgeMeme; 
             
-            if (isShadow) {
-                // 👻 Shadow 結算邏輯：如果活過 24 小時，就強制結算餵畀 ML
-                if (ageMins >= SHADOW_MAX_AGE_MINS) {
-                    const lockKey = `sell_lock:${pos.mint_address}`;
-                    const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
-                    if (acquired) {
-                        console.log(`👻 [Shadow Sweeper] ${pos.token_symbol} 已存活 24 小時，強制結算 PnL 供 ML 訓練！`);
-                        const sold = await runSellPipeline(pos, currentPrice, `👻 Shadow 24h 強制結算`, 1.0)
-                            .finally(() => redisClient.del(lockKey));
-                        if (sold) {
-                            guard_states.delete(pos.mint_address);
-                            last_valid_ts.delete(pos.mint_address);
-                        }
-                    }
-                }
-            } else {
-                // ⚔️ 正常/模擬倉 清掃邏輯
-                const timeStopLimit = pos.strategy_type?.includes('TRENDING') ? dynamicAgeTrending : dynamicAgeMeme; 
-                
-                if (ageMins >= timeStopLimit && pnlPct < requiredPnlPct) {
-                    const lockKey = `sell_lock:${pos.mint_address}`;
-                    const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
-                    if (acquired) {
-                        console.log(`🧹 [Zombie Sweeper] ${pos.token_symbol} 滯留過久 (${ageMins.toFixed(0)} / ${timeStopLimit} mins 未達標 ${requiredPnlPct}%)，無差別清倉！`);
-                        const sold = await runSellPipeline(pos, currentPrice, `⏱️ Time-Stop (${currentClimate}): 超時 ${timeStopLimit}m 未達 ${requiredPnlPct}%`, 1.0)
-                            .finally(() => redisClient.del(lockKey));
-                        if (sold) {
-                            guard_states.delete(pos.mint_address);
-                            last_valid_ts.delete(pos.mint_address);
-                        }
-                    }
+            if (ageMins >= timeStopLimit && pnlPct < requiredPnlPct) {
+                const lockKey = `sell_lock:${pos.mint_address}`;
+                const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
+                if (acquired) {
+                    console.log(`🧹 [Zombie Sweeper] ${pos.token_symbol} 滯留過久，無差別清倉！`);
+                    const sold = await runSellPipeline(pos, currentPrice, `⏱️ Time-Stop: 超時未達標`, 1.0)
+                        .finally(() => redisClient.del(lockKey));
+                    if (sold) { guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); }
                 }
             }
         }
@@ -376,10 +292,100 @@ setInterval(async () => {
 }, 60 * 1000);
 
 // ------------------------------------------------------------------
-// 8. 啟動程序
+// 8. 👻 專屬的影子清道夫 (每 15 分鐘慢速查價，並懂得避開 Main Bot)
+// ------------------------------------------------------------------
+setInterval(async () => {
+    if (!globalConfig.is_running) return;
+    try {
+        const { data: shadows, error } = await supabase.from('active_positions_shadow').select('*');
+        if (error || !shadows || shadows.length === 0) return;
+
+        console.log(`\n👻 [Shadow Tracker] 正在每 15 分鐘緩慢巡邏 ${shadows.length} 隻影子幣...`);
+
+        const mints = shadows.map(s => s.mint_address);
+        const priceMap = new Map();
+
+        for (let i = 0; i < mints.length; i += 30) {
+            // 🚦 核心防禦：檢查 Main Bot 有冇用緊 DexScreener API
+            let apiLocked = await redisClient.get('DEXSCREENER_LOCK');
+            while (apiLocked === 'MAIN_BOT') {
+                console.log(`⏳ [Shadow Tracker] Main Bot 正在使用 DexScreener，影子查價讓路，等待 10 秒...`);
+                await new Promise(r => setTimeout(r, 10000));
+                apiLocked = await redisClient.get('DEXSCREENER_LOCK');
+            }
+
+            // 宣告 Shadow Bot 用緊，防禦 5 秒
+            await redisClient.set('DEXSCREENER_LOCK', 'SHADOW_BOT', 'EX', 5);
+
+            const chunk = mints.slice(i, i + 30).join(',');
+            try {
+                const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${chunk}`, { timeout: 5000 });
+                const pairs = res.data?.pairs || [];
+                for (const p of pairs) {
+                    if (p.chainId === 'solana' && p.baseToken?.address) {
+                        const currentPrice = parseFloat(p.priceNative); 
+                        if (!priceMap.has(p.baseToken.address) || currentPrice > priceMap.get(p.baseToken.address)) {
+                            priceMap.set(p.baseToken.address, currentPrice);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.warn(`⚠️ [Shadow Tracker] DexScreener 查價失敗，休息 10 秒:`, err.message);
+                await new Promise(r => setTimeout(r, 10000)); // 俾 429 抖抖
+            }
+            await new Promise(r => setTimeout(r, 3000));
+        }
+
+        const now = Date.now();
+        const SHADOW_MAX_AGE_MINS = 1440; // 24小時結算
+        let settledCount = 0;
+
+        for (const pos of shadows) {
+            const currentPrice = priceMap.get(pos.mint_address);
+            if (!currentPrice) continue;
+
+            const ageMins = pos.created_at ? (now - new Date(pos.created_at).getTime()) / 60000 : 0;
+            
+            if (currentPrice > (pos.highest_price_sol || 0)) {
+                await supabase.from('active_positions_shadow').update({ highest_price_sol: currentPrice }).eq('id', pos.id);
+            }
+
+            if (ageMins >= SHADOW_MAX_AGE_MINS) {
+                const entryPrice = pos.entry_price_sol || 0;
+                let realizedPnlPct = 0;
+                if (entryPrice > 0) realizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
+
+                await supabase.from('trade_patterns').insert([{
+                    mint_address: pos.mint_address,
+                    is_shadow: true,
+                    strategy_version: pos.strategy_type || 'v10_shadow',
+                    entry_ofi: pos.entry_ofi || 0,
+                    entry_liquidity_usd: pos.entry_liquidity_usd || 0,
+                    realized_pnl_pct: realizedPnlPct,
+                    market_climate: pos.market_climate || 'UNKNOWN',
+                    entry_price_sol: entryPrice,
+                    entry_volume_5m: pos.entry_volume_5m_usd || 0,
+                    token_symbol: pos.token_symbol || 'UNKNOWN'
+                }]);
+
+                await supabase.from('active_positions_shadow').delete().eq('id', pos.id);
+                settledCount++;
+            }
+        }
+
+        if (settledCount > 0) {
+            console.log(`👻 [Shadow Tracker] 本輪成功結算 ${settledCount} 隻滿 24 小時的影子幣，寫入 ML 訓練庫！`);
+        }
+    } catch (e) {
+        console.error("❌ [Shadow Tracker] 巡邏崩潰:", e.message);
+    }
+}, 15 * 60 * 1000); 
+
+// ------------------------------------------------------------------
+// 9. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.27 (含 Shadow 結算) 啟動中...");
+    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.28 (API 讓路鎖版) 啟動中...");
     await initPortfolio();
     await healthMonitor.setStatus('Monitor_Guards', '🟢 鐵衛巡邏中');
 }
