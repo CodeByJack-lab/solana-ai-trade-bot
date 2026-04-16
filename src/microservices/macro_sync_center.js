@@ -1,9 +1,6 @@
 // src/microservices/macro_sync_center.js
-// 📝 檔案功能用途：V10 【後勤樞紐】微服務 (Microservice Core)
-// 🚀 核心升級：徹底拔除 Hardcode Prompt，全面依賴 Supabase 動態變數注入 (Zero-Prompt Codebase)。
-// 🛡️ 容錯升級：實裝 MISTRAL 三重 Model 陣列切換邏輯 (Graceful Fallback)。
-// 🦎 擴充掛載：整合 trendingMonitorService、trendingJob 以及所有 V9 背景排程，並加入 Dashboard 心跳機制。
-// 📢 Telegram 升級：AI 診斷氣候/分數發生變化時，即時推送 Comment 與理據至 SQL QUANT ALert。
+// 📝 檔案功能用途：V10.1 【後勤樞紐】微服務 (Microservice Core)
+// 🚀 核心升級：實裝 Supabase Realtime 全域記憶體校準 (RAM Sync)，徹底消滅幽靈倉位。
 
 require('dotenv').config();
 const { createClient } = require('@supabase/supabase-js');
@@ -29,9 +26,6 @@ const { graveyardJob } = require('../jobs/graveyardJob');
 const { retrospectiveJob } = require('../jobs/retrospectiveJob');
 const { trendingJob } = require('../jobs/trendingJob'); 
 
-// ------------------------------------------------------------------
-// 1. 初始化與全域變數
-// ------------------------------------------------------------------
 const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL || process.env.SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
@@ -49,9 +43,21 @@ const NEWS_PROVIDERS = [
 let activeMacroIdx = 0;
 let activeNewsIdx = 0;
 
-// ------------------------------------------------------------------
-// 2. 全域熱緩存同步橋樑 (Hot Cache Bridge) & 動態規則編譯
-// ------------------------------------------------------------------
+// 🚀 記憶體同步引擎
+let portfolioSyncTimeout = null;
+function schedulePortfolioSync(source) {
+    if (portfolioSyncTimeout) clearTimeout(portfolioSyncTimeout);
+    portfolioSyncTimeout = setTimeout(async () => {
+        console.log(`🔄 [System Sync] 偵測到 ${source}，正在強制校準樞紐 RAM 倉位...`);
+        try {
+            await initPortfolio();
+            console.log(`✅ [System Sync] 樞紐 RAM 倉位已與大本營 Database 完美清空/對齊！`);
+        } catch (e) {
+            console.error(`❌ [System Sync] 重新校準失敗:`, e.message);
+        }
+    }, 2000);
+}
+
 async function syncCoreConfigsToRedis() {
     try {
         console.log('🔄 [Hot Cache] 正在將 Supabase 配置同步至 Redis 記憶體...');
@@ -130,18 +136,15 @@ function setupRealtimeListeners() {
            .on('postgres_changes', { event: '*', schema: 'public', table: 'ml_blacklist_rules' }, syncCoreConfigsToRedis)
            .on('postgres_changes', { event: '*', schema: 'public', table: 'brand_blacklist' }, syncCoreConfigsToRedis)
            .on('postgres_changes', { event: '*', schema: 'public', table: 'ml_strategy_params' }, syncCoreConfigsToRedis)
+           // 🚀 新增：監聽 DB 刪除與設定變更，連動清理 RAM
+           .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'system_config', filter: 'id=eq.1' }, () => schedulePortfolioSync('System Config 變更'))
+           .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'active_positions_paper' }, () => schedulePortfolioSync('Paper 倉位重置'))
+           .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'active_positions_live' }, () => schedulePortfolioSync('Live 倉位重置'))
            .subscribe();
 }
 
-// ------------------------------------------------------------------
-// 3. 4D 大市氣候台與 3分鐘死亡開關
-// ------------------------------------------------------------------
 class EnvironmentCenter {
-    constructor() {
-        this.last_climate = null;
-        this.last_news_score = null;
-    }
-
+    
     async _fetchMarketMetrics() {
         for (let i = 0; i < MACRO_PROVIDERS.length; i++) {
             const provider = MACRO_PROVIDERS[(activeMacroIdx + i) % MACRO_PROVIDERS.length];
@@ -237,7 +240,7 @@ class EnvironmentCenter {
         let aiReasoning = "純數降級模式 (無 AI 回應)";
 
         let mistralModels = ['mistral-small-latest', 'ministral-8b-latest', 'open-mistral-nemo'];
-        let rawPromptTemplate = `You are the Chief Macro Economist. Analyze data: BTC {{btc_change}}%, SOL {{sol_change}}%. News: {{titles}}. Output exact JSON format: {"climate": "CHOPPY", "news_score": 0, "reasoning": "..."}`;
+        let rawPrompt = `You are the Chief Macro Economist. Analyze data: BTC {{btc_change}}%, SOL {{sol_change}}%. News: {{titles}}. Output JSON: {"climate": "CHOPPY", "news_score": 0, "reasoning": "..."}`;
         
         try {
             const cachedStr = await redis.get('cache:bot_prompts');
@@ -245,7 +248,7 @@ class EnvironmentCenter {
                 const pMap = JSON.parse(cachedStr);
                 const dbPrompt = pMap['news_sentiment_analyst'];
                 if (dbPrompt) {
-                    if (dbPrompt.content) rawPromptTemplate = dbPrompt.content; 
+                    if (dbPrompt.content) rawPrompt = dbPrompt.content;
                     if (dbPrompt.model_main) mistralModels[0] = dbPrompt.model_main;
                     if (dbPrompt.model_backup_1) mistralModels[1] = dbPrompt.model_backup_1;
                     if (dbPrompt.model_backup_2) mistralModels[2] = dbPrompt.model_backup_2;
@@ -255,7 +258,7 @@ class EnvironmentCenter {
             console.warn("⚠️ [Macro Center] 無法讀取 Redis 模型設定，使用預設 Mistral 模型與防跌 Prompt");
         }
 
-        const promptStr = rawPromptTemplate
+        const promptStr = rawPrompt
             .replace(/{{btc_change}}/g, metrics.btc_change.toFixed(2))
             .replace(/{{btc_vol}}/g, (metrics.btc_vol/1e9).toFixed(1))
             .replace(/{{sol_change}}/g, metrics.sol_change.toFixed(2))
@@ -297,33 +300,10 @@ class EnvironmentCenter {
             if (metrics.btc_change <= -5.0 || metrics.sol_change <= -8.0 || winRate < 15) {
                 currentClimate = 'BEAR_PANIC';
             } else if (metrics.sol_change >= 5.0 && winRate > 60) {
-                currentClimate = 'BULL_FRENZY'; // 確保硬邏輯降級都用正確名字
+                currentClimate = 'RAGING_BULL';
             }
             healthMonitor.setStatus('Macro_Sync_Center', '🟡 AI 分析超時，已降級硬邏輯', `降級氣候: ${currentClimate}`);
         }
-
-        // 🚀 Telegram 推送：當氣候或情感分數有改變時，廣播去 SQL QUANT ALert
-        const isClimateChanged = this.last_climate !== currentClimate;
-        const isScoreChanged = this.last_news_score !== newsScore;
-
-        if ((isClimateChanged || isScoreChanged) && this.last_climate !== null) {
-            const climateEmoji = currentClimate === 'BULL_FRENZY' ? '🚀' : (currentClimate === 'BEAR_PANIC' ? '🩸' : '⚖️');
-            const alertMsg = `🌍 <b>【AI 大市氣候變更通報】</b>\n\n` +
-                             `🔄 <b>狀態切換:</b> ${this.last_climate || 'N/A'} ➡️ <b>${currentClimate}</b> ${climateEmoji}\n` +
-                             `🌡️ <b>情感分數:</b> ${this.last_news_score || 'N/A'} ➡️ <b>${newsScore}</b>/5\n\n` +
-                             `🧠 <b>AI 診斷理據:</b>\n<i>${aiReasoning}</i>\n\n` +
-                             `📉 <b>硬數據參考:</b>\n` +
-                             `• BTC 24h: ${metrics.btc_change.toFixed(2)}%\n` +
-                             `• SOL 24h: ${metrics.sol_change.toFixed(2)}%\n` +
-                             `• 內部勝率: ${winRate.toFixed(1)}%`;
-            
-            if (typeof sendAdminAlert === 'function') {
-                sendAdminAlert(alertMsg).catch(e => console.error('Telegram 發送失敗', e));
-            }
-        }
-
-        this.last_climate = currentClimate;
-        this.last_news_score = newsScore;
 
         const envState = { climate: currentClimate, newsScore, jitoP50, timestamp: Date.now() };
         await redis.set('global_env_state', JSON.stringify(envState), 'EX', 3600);
@@ -375,9 +355,6 @@ class EnvironmentCenter {
 
 const envCenter = new EnvironmentCenter();
 
-// ------------------------------------------------------------------
-// 4. 60 分鐘超時安全降級
-// ------------------------------------------------------------------
 async function checkAndApply60MinFallback() {
     try {
         const { data: pendingProposals } = await supabase
@@ -425,7 +402,7 @@ async function checkAndApply60MinFallback() {
 // 5. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10 (後勤樞紐) 啟動中...");
+    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.1 (後勤樞紐全域 RAM 對齊版) 啟動中...");
     
     await initPortfolio();
     
@@ -446,6 +423,32 @@ async function bootstrap() {
     retrospectiveJob.start();
 
     await healthMonitor.setStatus('Macro_Sync_Center', '🟢 氣候監控中');
+
+    setInterval(async () => {
+        try {
+            const { data } = await supabase.from('system_config').select('is_running').eq('id', 1).single();
+            const is_running = data ? data.is_running : true;
+            
+            const statusMsg = is_running 
+                ? 'V10 雙軌智腦穩定運行中 🟢' 
+                : '系統處於暫停/待機狀態 🟡';
+                
+            await supabase.from('bot_status').upsert({ id: 1, message: statusMsg, updated_at: new Date().toISOString() });
+        } catch (err) {}
+    }, 60 * 1000);
+
+    setInterval(async () => {
+        try {
+            const port = getPortfolio();
+            if (!port) return;
+            const hkd = await getSolPriceInHKD();
+            const totalSol = port.cash_sol + port.positions.reduce((sum, p) => sum + (p.quantity * p.entry_price_sol), 0);
+            const modeText = port.mode === 'PAPER' ? '📝 模擬盤' : '🔥 實盤';
+            console.log(`\n========================================`);
+            console.log(`📊 [實時戰報] ${modeText} | 總資產: $${(totalSol * hkd).toFixed(2)} HKD | 現金: ${port.cash_sol.toFixed(4)} SOL`);
+            console.log(`========================================\n`);
+        } catch(e) {}
+    }, 15 * 60 * 1000); 
 }
 
 bootstrap();
