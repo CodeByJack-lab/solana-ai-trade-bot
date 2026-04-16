@@ -1,17 +1,16 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10.28 交易執行大腦 (Microservice Core)
+// 📝 檔案功能及用途：V10.30 交易執行大腦 (Microservice Core)
 // 🚀 核心升級：徹底修復實盤買入斷層，正式呼叫 executeLiveSwapUAT 進行真金白銀上鏈！
 // 🛡️ 數據防護：加入 Infinity PnL 阻截機制與一票否決結算防禦 (修復 Telegram 轟炸)。
-// 🧠 權限解放：徹底拔除多餘的 isShadow 判斷，100% 無條件服從 trade_frontline 的開火指令。
+// 🧠 記憶體同步：實裝「秒速 RAM 清除」機制，杜絕模擬盤因 DB 延遲導致的無限鞭屍賣出。
 // 📊 Schema 同步：已擴容 active_positions 表，全面寫入環境氣候與量價數據。
-// 💬 TG 廣播：完美還原舊版經典 Telegram 買入/平倉通知格式。
 
 require('dotenv').config();
 const axios = require('axios');
 const Redis = require('ioredis');
 const crypto = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
-const { getPortfolio } = require('./portfolioService');
+const { getPortfolio, updateCache } = require('./portfolioService'); // 🚀 FIX: 引入 updateCache
 const { sendTelegramAlert } = require('./telegramService');
 const { fallbackEscapeService } = require('./fallbackEscapeService');
 const { executeLiveSwapUAT } = require('./liveTradeService');
@@ -150,7 +149,6 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         }]);
 
         if (typeof sendTelegramAlert === 'function') {
-            // 🎯 還原舊版經典 Telegram 格式
             const modeText = mode === 'LIVE' ? '[實盤]' : '[模擬]';
             const catText = strategyVersion.includes('TRENDING') ? '🔥 TRENDING' : '🐣 NEWBORN';
             
@@ -185,7 +183,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         if (mode === 'LIVE') {
             if (quoteData && quoteData.quoteResponse) {
                 const txPromise = executeLiveSwapUAT(quoteData.quoteResponse, 'SELL', reason);
-                // 🚀 修復 1：延長等待時間至 15 秒，給予 Jito 充分確認時間
                 const timeoutPromise = new Promise((_, reject) => setTimeout(() => reject(new Error('TX_TIMEOUT')), 15000));
 
                 try {
@@ -212,10 +209,11 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                 }
             }
         } else {
+            // 📝 模擬盤直接當成功
             success = true;
         }
 
-        // 🚀 修復 2：一票否決防禦！如果 LIVE 模式下交易最終失敗，絕對不准刪除 DB 和發送 Telegram！
+        // 🛑 一票否決防禦：如果真實交易未上鏈，終止流程防轟炸
         if (mode === 'LIVE' && !success) {
             console.warn(`⚠️ [Sell Pipeline] $${position.token_symbol} 賣出未能成功上鏈，終止結算流程以防重覆轟炸。`);
             return false;
@@ -229,15 +227,33 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         
         const isShadow = position.strategy_type?.includes('SHADOW') || position.strategy_version?.includes('shadow') || false; 
 
+        // 🗑️ 清除或更新資料庫倉位
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
         if (fraction === 1.0) {
-            for (const table of activeTables) await supabase.from(table).delete().eq('mint_address', mint);
+            for (const table of activeTables) {
+                await supabase.from(table).delete().eq('mint_address', mint);
+            }
+            
+            // 🚀 終極修復：立即從本地 RAM 中移除該倉位，徹底斬斷 Zombie Sweeper 的無限鞭屍循環！
+            updateCache('SELL', sellQuantity * currentPrice, position);
         } else {
             const table = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
             await supabase.from(table).update({
                 quantity: position.quantity - sellQuantity,
                 strategy_type: position.strategy_type + '_HALF_SOLD'
             }).eq('mint_address', mint);
+
+            // 🚀 終極修復：同步更新 RAM 內的倉位數量
+            const port = getPortfolio();
+            if (port && port.positions) {
+                const pIndex = port.positions.findIndex(p => p.mint_address === mint);
+                if (pIndex > -1) {
+                    port.positions[pIndex].quantity -= sellQuantity;
+                    if (!port.positions[pIndex].strategy_type.includes('HALF_SOLD')) {
+                        port.positions[pIndex].strategy_type += '_HALF_SOLD';
+                    }
+                }
+            }
         }
 
         const climateStr = await redis.get('global_env_state');
@@ -288,7 +304,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
     } catch (err) {
         console.error(`❌ [Sell Pipeline] 平倉異常:`, err.message);
-        // 🚀 修復 3：移除 await redis.del(lockKey); 讓鎖自然過期 45 秒，避免狂炸重試
+        // 保留 Redis Lock 讓其自然過期 45 秒，避免狂炸重試
         return false;
     }
 }
