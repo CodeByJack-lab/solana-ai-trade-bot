@@ -6,6 +6,7 @@
 // ⏱️ 保溫修復：拔除 5 分鐘時光陷阱，改為滿 20 隻或最舊等滿 1 分鐘即發車。
 // 👻 影子修復：動態設定 50 至 (及格線-1) 為 Shadow 區間，最大化收集邊緣數據供 ML 訓練。
 // 🛑 防禦升級：攔截已持有倉位，踢出 trending_pool；加入 Shadow 表防重覆寫入機制。
+// 🚦 併發防爆：加入開火前 DB 實時點算及 Redis In-flight 鎖，徹底解決異步併發導致無視倉位上限的問題。
 
 require('dotenv').config();
 const express = require('express');
@@ -357,14 +358,13 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const symbol = symbol_cache.get(mint) || 'UNKNOWN';
 
-        // 🛑 核心防禦：檢查 RAM 倉位，避免對已持有的代幣重複買入及消耗 API 費用
+        // 🛑 核心防禦 1：檢查 RAM 倉位
         const portfolio = getPortfolio();
         const isHolding = portfolio.positions && portfolio.positions.some(p => p.mint_address === mint);
         
         if (isHolding) {
             console.log(`⚠️ [Frontline] 發現已持有倉位 $${symbol}，停止重複掃描/買入。`);
             if (poolType === 'TRENDING') {
-                // 如果是 TRENDING 掃到的舊幣，順手將其從 DB 踢出，保持池子乾淨
                 await supabase.from('trending_pool').delete().eq('mint_address', mint);
                 console.log(`🗑️ [Frontline] 已將 $${symbol} 從 trending_pool 中剔除。`);
             }
@@ -452,9 +452,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const finalScore = quantScore + mlScore + llmScore;
         
-        // ---------------------------------------------------------
-        // 🚀 動態獲取最新及格線
-        // ---------------------------------------------------------
         let buyThreshold = 70; 
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
@@ -475,36 +472,80 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         console.log(`⚖️ [Final Verdict] ${symbol} 總分: ${finalScore} / 100 (及格線: ${buyThreshold})`);
 
         if (finalScore >= buyThreshold) {
+            
+            // ===================================================================
+            // 🛑 核心防禦 2：開火前實時對 DB 進行容量檢查及併發攔截 (Async Race Condition Shield)
+            // ===================================================================
+            let maxPositions = poolType === 'NEWBORN' ? 4 : 8; 
+            let currentMode = 'paper';
+            let baseAmount = poolType === 'NEWBORN' ? 0.1 : 0.2; 
+            let currentPositionsCount = 0;
+            
+            try {
+                const { data: config } = await supabase.from('system_config')
+                    .select('trade_mode, trade_amount_sol, trending_trade_amount_sol, max_meme_positions, max_trending_positions')
+                    .eq('id', 1).single();
+                if (config) {
+                    currentMode = config.trade_mode === 'LIVE' ? 'live' : 'paper';
+                    baseAmount = poolType === 'NEWBORN' ? config.trade_amount_sol : config.trending_trade_amount_sol;
+                    maxPositions = poolType === 'NEWBORN' ? config.max_meme_positions : config.max_trending_positions;
+                }
+
+                const { count, error: countErr } = await supabase
+                    .from(`active_positions_${currentMode}`)
+                    .select('*', { count: 'exact', head: true })
+                    .like('strategy_type', `${poolType}%`);
+                
+                if (!countErr && count !== null) currentPositionsCount = count;
+
+            } catch(e) {
+                console.warn(`⚠️ [Capacity Check] 獲取倉位數量失敗:`, e.message);
+            }
+
+            if (currentPositionsCount >= maxPositions) {
+                console.log(`🛑 [Capacity Full] ${poolType} 倉位已滿 (${currentPositionsCount}/${maxPositions})，放棄買入 ${symbol}。`);
+                return; 
+            }
+
             const lockKey = `buy_lock:${mint}`;
             const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 10, 'NX');
             if (acquired) {
+                // 利用 Redis In-flight 鎖，防止同 1 秒內有幾隻幣一齊衝過 DB 檢查
+                const inflightKey = `inflight_buy_${poolType}_${currentMode}`;
+                const inflightCount = await redisClient.incr(inflightKey);
+                await redisClient.expire(inflightKey, 10); 
+
+                if ((currentPositionsCount + inflightCount - 1) >= maxPositions) {
+                    console.log(`🚦 [Concurrency Block] 併發買單過多，${poolType} 倉位即將爆滿，攔截買入 ${symbol}。`);
+                    return;
+                }
+
                 console.log(`🎯 [TRIGGER] 總分達標 (${finalScore} >= ${buyThreshold})！授權開火！`);
-                
-                let baseAmount = poolType === 'NEWBORN' ? 0.1 : 0.2; 
-                try {
-                    const { data: config } = await supabase.from('system_config').select('trade_amount_sol, trending_trade_amount_sol').eq('id', 1).single();
-                    if (config) {
-                        baseAmount = poolType === 'NEWBORN' ? config.trade_amount_sol : config.trending_trade_amount_sol;
-                    }
-                } catch(e){}
                 
                 const safeMultiplier = Math.max(0.5, Math.min(2.0, mlConfidenceMultiplier));
                 const finalTradeAmountSol = parseFloat((baseAmount * safeMultiplier).toFixed(3));
                 console.log(`💰 [Sizing] 基礎注碼: ${baseAmount} SOL, 乘數: x${safeMultiplier} -> 最終下單: ${finalTradeAmountSol} SOL`);
 
-                await executeBuy(
+                const success = await executeBuy(
                     mint, symbol, poolType, finalScore, 
                     `🤖 三權決策 (Q:${quantScore} + M:${mlScore} + L:${llmScore}) | LLM: ${llmReason}`, 
                     finalTradeAmountSol, marketData, envState, appliedMlStrategyId, safeMultiplier
                 );
+
+                // 買入成功後，即時手動 Update 內存，防止下一隻幣喺下一個 Loop 又買
+                if (success) {
+                    const portfolio = getPortfolio();
+                    if (portfolio && portfolio.positions) {
+                        portfolio.positions.push({ mint_address: mint, strategy_type: poolType });
+                    }
+                }
             }
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
-            // 🎯 核心防禦與修復：動態定義 50 至 (及格線-1) 為 Shadow 區間
+            // 🎯 核心防禦：動態定義 50 至 (及格線-1) 為 Shadow 區間
             if (finalScore >= 50 && finalScore < buyThreshold) {
                 
-                // 🛑 防重覆寫入：先檢查 Shadow 表是否已存在該幣
                 const { data: existingShadow, error: checkErr } = await supabase
                     .from('active_positions_shadow')
                     .select('id')
@@ -595,7 +636,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (防重覆建倉 + 動態 Shadow 區間版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.26 (防重覆建倉 + 併發防爆版) 啟動中...");
     
     await initPortfolio();
     
