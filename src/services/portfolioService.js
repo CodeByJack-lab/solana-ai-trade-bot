@@ -2,7 +2,8 @@
 // 📝 檔案功能用途：倉位與資產大管家。維護 RAM 中的持倉狀態，控制 Meme 與 Trending 雙軌額度。
 // 🚀 V10 實裝：真・鏈上同步心跳，確保實盤數據與 RPC 節點自動對齊。
 // 🛡️ 終極修復：加入跨進程記憶體同步，並實裝「防無限 Listener 護盾」杜絕 OOM，以及修復 limitsCache 未定義錯誤。
-// 👻 幽靈修復：全面改用 Incremental Payload 更新 RAM，杜絕 SELECT * 導致的異步幽靈倉位復活現象！
+// 👻 幽靈殺手：全面改用 Incremental Payload 更新 RAM，徹底杜絕 SELECT * 導致的異步幽靈倉位復活現象！
+// ⚖️ 會計校準：新增 Auto-Calibration 機制，每次啟動自動根據本金、歷史利潤及持倉成本，完美修復 simulated_balance。
 
 const { supabase } = require('../config/supabase'); 
 const { connection } = require('../config/solana');
@@ -38,13 +39,11 @@ let my_portfolio = {
     last_sync: null
 };
 
-// 🚀 核心修復：宣告 limitsCache 變數並賦予預設值，防止拋出 is not defined 錯誤
 let limitsCache = {
     maxMeme: 2,
     maxTrending: 3
 };
 
-// 🚀 V10 動態持倉上限引擎 (每 30 秒自動從 DB 同步，即時生效)
 setInterval(async () => {
     try {
         const { data: dbConfig } = await supabase
@@ -78,7 +77,6 @@ async function initPortfolio() {
 
         my_portfolio.mode = config ? (config.trade_mode || 'PAPER') : 'PAPER';
         
-        // 賦予初始上限
         limitsCache.maxMeme = config?.max_meme_positions || 2;
         limitsCache.maxTrending = config?.max_trending_positions || 3;
 
@@ -90,7 +88,41 @@ async function initPortfolio() {
              syncLiveBalanceToDB(); 
         } else {
             my_portfolio.reference_capital = config?.reference_capital || 10;
-            my_portfolio.cash_sol = config?.simulated_balance || 10;
+            
+            // ⚖️ 核心升級：自動校準模擬資金 (Auto-Calibration)
+            try {
+                // 1. 計算已實現利潤 (Realized PnL)
+                const { data: history } = await supabase.from('trade_history_paper')
+                    .select('realized_pnl_sol')
+                    .like('action', 'SELL%');
+                const totalRealizedPnl = (history || []).reduce((sum, record) => sum + (parseFloat(record.realized_pnl_sol) || 0), 0);
+
+                // 2. 計算目前持倉總成本 (Total Invested)
+                const { data: activePos } = await supabase.from('active_positions_paper')
+                    .select('quantity, entry_price_sol');
+                const totalInvested = (activePos || []).reduce((sum, pos) => sum + ((parseFloat(pos.quantity) || 0) * (parseFloat(pos.entry_price_sol) || 0)), 0);
+
+                // 3. 計算數學正確餘額: 初始本金 + 歷史利潤 - 目前未平倉押注
+                const expectedBalance = my_portfolio.reference_capital + totalRealizedPnl - totalInvested;
+                const currentDbBalance = parseFloat(config?.simulated_balance || 0);
+
+                // 4. 如果發現資料庫餘額偏差大於 0.0001 SOL，自動修復並寫入 DB
+                if (Math.abs(expectedBalance - currentDbBalance) > 0.0001) {
+                    console.log(`🛠️ [Auto-Calibration] 發現模擬餘額偏差，自動修復中...`);
+                    console.log(`   - 初始本金: ${my_portfolio.reference_capital} SOL`);
+                    console.log(`   - 歷史總利潤: ${totalRealizedPnl.toFixed(4)} SOL`);
+                    console.log(`   - 持倉總成本: ${totalInvested.toFixed(4)} SOL`);
+                    console.log(`   - 校正餘額: ${currentDbBalance.toFixed(4)} -> ${expectedBalance.toFixed(4)} SOL`);
+                    
+                    await supabase.from('system_config').update({ simulated_balance: expectedBalance }).eq('id', 1);
+                    my_portfolio.cash_sol = expectedBalance;
+                } else {
+                    my_portfolio.cash_sol = currentDbBalance;
+                }
+            } catch (calErr) {
+                console.warn(`⚠️ [Auto-Calibration] 會計校準失敗，退回使用資料庫原值:`, calErr.message);
+                my_portfolio.cash_sol = config?.simulated_balance || 10;
+            }
         }
 
         const { data: positions } = await supabase.from(tableName).select('*');
@@ -105,10 +137,8 @@ async function initPortfolio() {
         my_portfolio.nav_sol = my_portfolio.cash_sol; 
         my_portfolio.last_sync = new Date();
 
-        // 🚀 終極修復：先移除舊的 Channel，防止 Listener 無限疊加導致 OOM
         await supabase.removeChannel(supabase.channel('portfolio_cross_sync'));
 
-        // 建立新的跨進程同步監聽 (🚀 幽靈殺手：改為 Incremental Update)
         supabase.channel('portfolio_cross_sync')
             .on('postgres_changes', { event: 'INSERT', schema: 'public', table: tableName }, (payload) => {
                 const exists = my_portfolio.positions.some(p => p.mint_address === payload.new.mint_address);
@@ -123,7 +153,6 @@ async function initPortfolio() {
                 }
             })
             .on('postgres_changes', { event: 'DELETE', schema: 'public', table: tableName }, (payload) => {
-                // 🛑 只精準刪除被賣出嗰隻幣，絕對唔會做 SELECT * 導致復活
                 my_portfolio.positions = my_portfolio.positions.filter(p => p.mint_address !== payload.old.mint_address);
             })
             .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: tableName }, (payload) => {
@@ -133,7 +162,8 @@ async function initPortfolio() {
                         ...my_portfolio.positions[idx],
                         ...payload.new,
                         quantity: parseFloat(payload.new.quantity || payload.new.amount || 0),
-                        highest_price_sol: parseFloat(payload.new.highest_price_sol || my_portfolio.positions[idx].highest_price_sol)
+                        highest_price_sol: parseFloat(payload.new.highest_price_sol || my_portfolio.positions[idx].highest_price_sol),
+                        strategy_type: payload.new.strategy_type || my_portfolio.positions[idx].strategy_type
                     };
                 }
             })
@@ -148,7 +178,6 @@ async function initPortfolio() {
     }
 }
 
-// 首次啟動定時心跳 (保證只執行一次)
 let isHeartbeatStarted = false;
 if (!isHeartbeatStarted) {
     setInterval(() => {
@@ -192,9 +221,6 @@ function updateCache(action, solAmount, positionData = null) {
         }
     } else if (action === 'SELL') {
         my_portfolio.cash_sol += solAmount;
-        if (positionData) {
-            my_portfolio.positions = my_portfolio.positions.filter(p => p.mint_address !== positionData.mint_address);
-        }
     }
 }
 

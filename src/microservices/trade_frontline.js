@@ -1,8 +1,8 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.30 【獵人中樞】微服務 (Microservice Core)
-// 🚀 核心升級：實裝「單幣撤池防禦 (Rugpull Shield) V3」，救援 API 全面轉用 DexScreener。
-// 🛡️ 防禦機制：最多 3 次 Strike 判刑，每次強制 30 秒 DexScreener 查價冷卻。
-// 👻 幽靈修復：移除底部會錯誤觸發 initPortfolio() 嘅 DELETE 監聽器。
+// 📝 檔案功能用途：V10.32 【獵人中樞】微服務 (Microservice Core)
+// 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，連同 Shadow 表一起檢查，徹底杜絕同幣重複買入！
+// 🛡️ 記憶體修復：解決 AI Watchdog 觸發 SELL_HALF 時，RAM 記憶體未相應減半導致重複賣出全倉的問題。
+// 👑 API 霸體：每次 Call DexScreener 前設定 Redis DEXSCREENER_LOCK，迫使 Shadow 任務讓路。
 
 require('dotenv').config();
 const express = require('express');
@@ -124,8 +124,20 @@ watchdogSub.on('message', async (channel, message) => {
                     const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
                     if (acquired) {
                         const fraction = decision.action === 'SELL_HALF' ? 0.5 : 1.0;
-                        await runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, `🤖 AI 數據體檢: ${decision.thought_process}`, fraction)
-                            .finally(() => redisClient.del(lockKey));
+                        const sold = await runSellPipeline(pos, pos.highest_price_sol || pos.entry_price_sol, `🤖 AI 數據體檢: ${decision.thought_process}`, fraction);
+                        
+                        if (sold) {
+                            if (fraction === 1.0) {
+                                const idx = portfolio.positions.findIndex(p => p.mint_address === mint);
+                                if (idx > -1) portfolio.positions.splice(idx, 1);
+                            } else {
+                                // 🚀 記憶體同步修復：更新 RAM 的數量和狀態，防止下次當全倉賣
+                                pos.quantity = pos.quantity * 0.5;
+                                pos.strategy_type = pos.strategy_type + '_HALF_SOLD';
+                            }
+                        } else {
+                            await redisClient.del(lockKey); // 失敗才解鎖，等下次體檢重試
+                        }
                     }
                 }
             }
@@ -238,8 +250,13 @@ setInterval(async () => {
                             const lockKey = `sell_lock:${m}`;
                             const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
                             if (acquired) {
-                                await runSellPipeline(pos, 0.000000001, `🚨 徹底失去報價 (連續3次 DexScreener 查價失敗)，判定為 Rugpull 撤池`, 1.0)
-                                    .finally(() => redisClient.del(lockKey));
+                                const sold = await runSellPipeline(pos, 0.000000001, `🚨 徹底失去報價 (連續3次 DexScreener 查價失敗)，判定為 Rugpull 撤池`, 1.0);
+                                if (sold) {
+                                    const idx = portfolio.positions.findIndex(p => p.mint_address === m);
+                                    if (idx > -1) portfolio.positions.splice(idx, 1);
+                                } else {
+                                    await redisClient.del(lockKey);
+                                }
                             }
                         }
                         token_strike_count.delete(m);
@@ -409,11 +426,20 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const symbol = symbol_cache.get(mint) || 'UNKNOWN';
 
+        // 🚀 核心防護：全域倉位攔截 (Global Holding Shield)
+        // 同時檢查 RAM 嘅 Main 倉位同 DB 嘅 Shadow 倉位，防止重覆掃描入貨！
         const portfolio = getPortfolio();
-        const isHolding = portfolio.positions && portfolio.positions.some(p => p.mint_address === mint);
+        const isHoldingMain = portfolio.positions && portfolio.positions.some(p => p.mint_address === mint);
         
-        if (isHolding) {
-            console.log(`⚠️ [Frontline] 發現已持有倉位 $${symbol}，停止重複掃描/買入。`);
+        const { data: shadowData } = await supabase
+            .from('active_positions_shadow')
+            .select('id')
+            .eq('mint_address', mint)
+            .limit(1);
+        const isHoldingShadow = shadowData && shadowData.length > 0;
+
+        if (isHoldingMain || isHoldingShadow) {
+            console.log(`⚠️ [Frontline] 發現已持有倉位 $${symbol} (Main: ${isHoldingMain}, Shadow: ${isHoldingShadow})，停止重複掃描/買入。`);
             if (poolType === 'TRENDING') {
                 await supabase.from('trending_pool').delete().eq('mint_address', mint);
             }
@@ -578,10 +604,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                     `🤖 三權決策 (Q:${quantScore} + M:${mlScore} + L:${llmScore}) | LLM: ${llmReason}`, 
                     finalTradeAmountSol, marketData, envState, activeStrategyId, safeMultiplier
                 );
-
-                if (success) {
-                    // RAM 將會由 portfolioService 的增量 WebSocket payload 自動推入
-                }
             }
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
@@ -672,7 +694,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.30 (DexScreener 防撤池精準救援版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.32 (全域攔截防重複買入版) 啟動中...");
     
     await initPortfolio();
 
@@ -692,7 +714,6 @@ async function bootstrap() {
 
     supabase.channel('frontline_portfolio_sync')
         .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'system_config', filter: 'id=eq.1' }, () => schedulePortfolioSync('System Config 變更'))
-        // 💥 已拔除 DELETE 事件監聽，完全交由 portfolioService 進行增量更新 (Incremental Update)，根絕幽靈倉位復活！
         .subscribe();
     
     redisClient.get('cache:ml_compiled_rule_string').then(str => {

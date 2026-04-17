@@ -1,8 +1,9 @@
 // src/microservices/monitor_guards.js
-// 📝 檔案功能用途：V10.18 【護盤鐵衛】微服務 (Microservice Core)
+// 📝 檔案功能用途：V10.33 【護盤鐵衛】微服務 (Microservice Core)
 // 🚀 核心升級：O(1) 無迴圈運算、事件驅動觸發 AI Watchdog、完整繼承 V9 神風逃生艙與硬止損。
 // 👻 影子獨立：新增每 15 分鐘執行的 Shadow Tracker，無痛查價並於 24 小時後自動結算寫入 ML。
-// 🚦 API 讓路：Shadow 查價前會檢查 DEXSCREENER_LOCK，若 Main Bot 佔用則強制等待 10 秒。
+// 🚦 API 讓路：Shadow 查價前會檢查 DEXSCREENER_LOCK，若 Main Bot 佔用則強制等待 10 秒 (已隱藏等待 Log 防洗版)。
+// 💥 連環斬修復：拔除所有 finally 解鎖，改為成功後即斬 RAM 倉位，失敗才解鎖重試，徹底根絕無限平倉 Loop。
 
 require('dotenv').config();
 const Redis = require('ioredis');
@@ -79,14 +80,21 @@ async function triggerDefconEscape(pos, portfolio) {
     }
 }
 
-async function executeV9HardStopLoss(pos, pnlPct, currentPrice) {
+async function executeV9HardStopLoss(pos, pnlPct, currentPrice, portfolio) {
     if (pnlPct <= dynamic_sl_limit) { 
         const lockKey = `sell_lock:${pos.mint_address}`;
         const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
         if (acquired) {
             console.log(`💥 [Grace Period] ${pos.token_symbol} 跌穿 ${dynamic_sl_limit.toFixed(2)}% 硬止損底線！`);
-            const sold = await runSellPipeline(pos, currentPrice, `💥 硬止損觸發 (${dynamic_sl_limit.toFixed(2)}%)`, 1.0)
-                .finally(() => redisClient.del(lockKey));
+            const sold = await runSellPipeline(pos, currentPrice, `💥 硬止損觸發 (${dynamic_sl_limit.toFixed(2)}%)`, 1.0);
+            
+            // 🚀 核心修復：成功後即斬 RAM，失敗先解鎖
+            if (sold) {
+                const idx = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
+                if (idx > -1) portfolio.positions.splice(idx, 1);
+            } else {
+                await redisClient.del(lockKey);
+            }
             return sold;
         }
     }
@@ -122,9 +130,15 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
         const lockKey = `sell_lock:${pos.mint_address}`;
         if (await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX')) {
             console.log(`📉 [V10 Guard] ${pos.token_symbol} 跌穿 VWAP 防線，執行常規止損。`);
-            const sold = await runSellPipeline(pos, currentPrice, "📉 V10 VWAP 防線崩潰", 1.0)
-                .finally(() => redisClient.del(lockKey));
-            if (sold) { guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); }
+            const sold = await runSellPipeline(pos, currentPrice, "📉 V10 VWAP 防線崩潰", 1.0);
+            
+            if (sold) { 
+                guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); 
+                const idx = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
+                if (idx > -1) portfolio.positions.splice(idx, 1);
+            } else {
+                await redisClient.del(lockKey);
+            }
         }
         return;
     }
@@ -148,9 +162,15 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio)
             const lockKey = `sell_lock:${pos.mint_address}`;
             if (await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX')) {
                 console.log(`🌪️ [V10 Guard] ${pos.token_symbol} 偵測到大戶派發 (CVD背離)，執行逃頂。`);
-                const sold = await runSellPipeline(pos, currentPrice, "🌪️ CVD 背離/波幅直斬", 1.0)
-                    .finally(() => redisClient.del(lockKey));
-                if (sold) { guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); }
+                const sold = await runSellPipeline(pos, currentPrice, "🌪️ CVD 背離/波幅直斬", 1.0);
+                
+                if (sold) { 
+                    guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); 
+                    const idx = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
+                    if (idx > -1) portfolio.positions.splice(idx, 1);
+                } else {
+                    await redisClient.del(lockKey);
+                }
             }
         }
     }
@@ -172,9 +192,14 @@ redisSub.on('message', async (channel, message) => {
                     const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                     if (acquired) {
                         const currentPrice = pos.current_price_sol || pos.highest_price_sol || pos.entry_price_sol;
-                        const sold = await runSellPipeline(pos, currentPrice, reason, 1.0)
-                            .finally(() => redisClient.del(lockKey));
-                        if (sold) { guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); }
+                        const sold = await runSellPipeline(pos, currentPrice, reason, 1.0);
+                        if (sold) { 
+                            guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); 
+                            const idx = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
+                            if (idx > -1) portfolio.positions.splice(idx, 1);
+                        } else {
+                            await redisClient.del(lockKey);
+                        }
                     }
                 });
                 await Promise.allSettled(sellPromises);
@@ -213,7 +238,7 @@ redisSub.on('message', async (channel, message) => {
                 const pnlPct = ((marketData.p - pos.entry_price_sol) / pos.entry_price_sol) * 100;
 
                 if (state.ticks_collected < 30) {
-                    const sold = await executeV9HardStopLoss(pos, pnlPct, marketData.p);
+                    const sold = await executeV9HardStopLoss(pos, pnlPct, marketData.p, portfolio);
                     if (sold) { guard_states.delete(mint); last_valid_ts.delete(mint); }
                 } else {
                     await executeV10MathGuards(pos, state, pnlPct, marketData.p, portfolio);
@@ -268,7 +293,9 @@ setInterval(async () => {
         const dynamicAgeMeme = Math.floor(baseMaxAgeMeme * timeMultiplier);
         const dynamicAgeTrending = Math.floor(baseMaxAgeTrending * timeMultiplier);
 
-        for (const pos of portfolio.positions) {
+        // 💥 核心修復：反向迴圈確保 Splice 時不會跳過元素
+        for (let i = portfolio.positions.length - 1; i >= 0; i--) {
+            const pos = portfolio.positions[i];
             if (quarantine_lock.has(pos.mint_address)) continue;
             
             const ageMins = pos.created_at ? (now - new Date(pos.created_at).getTime()) / 60000 : 0;
@@ -282,9 +309,15 @@ setInterval(async () => {
                 const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                 if (acquired) {
                     console.log(`🧹 [Zombie Sweeper] ${pos.token_symbol} 滯留過久，無差別清倉！`);
-                    const sold = await runSellPipeline(pos, currentPrice, `⏱️ Time-Stop: 超時未達標`, 1.0)
-                        .finally(() => redisClient.del(lockKey));
-                    if (sold) { guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address); }
+                    const sold = await runSellPipeline(pos, currentPrice, `⏱️ Time-Stop: 超時未達標`, 1.0);
+                    
+                    if (sold) { 
+                        guard_states.delete(pos.mint_address); 
+                        last_valid_ts.delete(pos.mint_address); 
+                        portfolio.positions.splice(i, 1); // 🚀 成功即斬 RAM，根絕無限鞭屍
+                    } else {
+                        await redisClient.del(lockKey);
+                    }
                 }
             }
         }
@@ -309,7 +342,8 @@ setInterval(async () => {
             // 🚦 核心防禦：檢查 Main Bot 有冇用緊 DexScreener API
             let apiLocked = await redisClient.get('DEXSCREENER_LOCK');
             while (apiLocked === 'MAIN_BOT') {
-                console.log(`⏳ [Shadow Tracker] Main Bot 正在使用 DexScreener，影子查價讓路，等待 10 秒...`);
+                // 🤫 隱藏 Log，保護 Server 唔洗版
+                // console.log(`⏳ [Shadow Tracker] Main Bot 正在使用 DexScreener，影子查價讓路，等待 10 秒...`);
                 await new Promise(r => setTimeout(r, 10000));
                 apiLocked = await redisClient.get('DEXSCREENER_LOCK');
             }
@@ -385,7 +419,7 @@ setInterval(async () => {
 // 9. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.28 (API 讓路鎖版) 啟動中...");
+    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.33 (防洗版 + RAM 徹底清倉版) 啟動中...");
     await initPortfolio();
     await healthMonitor.setStatus('Monitor_Guards', '🟢 鐵衛巡邏中');
 }
