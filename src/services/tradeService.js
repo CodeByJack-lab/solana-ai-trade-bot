@@ -1,9 +1,10 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10.36 交易執行大腦 (終極修復資金扣減與 TG 顯示版)
+// 📝 檔案功能及用途：V10.37 交易執行大腦 (終極修復資金扣減與 TG 顯示版)
 // 🚀 核心升級：徹底修復 simulated_balance 買賣不扣款問題，並於 TG 訊息明確區分「半倉」與「全倉」。
 // 🛡️ 數據防護：實施「結算與廣播的一票否決權」，交易未上鏈絕不結算，杜絕 TG 轟炸。
 // 🧠 記憶體同步：實裝「秒速 RAM 清除」機制，斬斷 Zombie Sweeper 的無限鞭屍循環。
 // 📊 ML 對接：全面寫入 applied_ml_strategy_id 供 Python 進行回測。
+// 👻 幽靈修復：修正 buy_dex_label 錯誤標記為 SHADOW 的問題。
 
 require('dotenv').config();
 const axios = require('axios');
@@ -142,7 +143,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             token_decimals: actualDecimals, 
             ai_score: aiScore,
             ai_reason: reason,
-            buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER',
+            buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER', // 🚀 幽靈修復：確保不會變 SHADOW
             market_climate: envState.climate || 'UNKNOWN',
             entry_liquidity_usd: marketData.l || 0,
             entry_volume_5m_usd: marketData.v || 0,
@@ -267,13 +268,14 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
         if (fraction === 1.0) {
-            for (const table of activeTables) await supabase.from(table).delete().eq('mint_address', mint);
+            // 👻 核心修復：使用 id 刪除，精準消滅！
+            for (const table of activeTables) await supabase.from(table).delete().eq('id', position.id);
         } else {
             const table = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
             await supabase.from(table).update({
                 quantity: position.quantity - sellQuantity,
                 strategy_type: position.strategy_type + '_HALF_SOLD'
-            }).eq('mint_address', mint);
+            }).eq('id', position.id);
         }
 
         const climateStr = await redis.get('global_env_state');

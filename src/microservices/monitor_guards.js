@@ -1,9 +1,8 @@
 // src/microservices/monitor_guards.js
-// 📝 檔案功能用途：V10.33 【護盤鐵衛】微服務 (Microservice Core)
+// 📝 檔案功能用途：V10.34 【護盤鐵衛】微服務 (Microservice Core)
 // 🚀 核心升級：O(1) 無迴圈運算、事件驅動觸發 AI Watchdog、完整繼承 V9 神風逃生艙與硬止損。
-// 👻 影子獨立：新增每 15 分鐘執行的 Shadow Tracker，無痛查價並於 24 小時後自動結算寫入 ML。
-// 🚦 API 讓路：Shadow 查價前會檢查 DEXSCREENER_LOCK，若 Main Bot 佔用則強制等待 10 秒 (已隱藏等待 Log 防洗版)。
-// 💥 連環斬修復：拔除所有 finally 解鎖，改為成功後即斬 RAM 倉位，失敗才解鎖重試，徹底根絕無限平倉 Loop。
+// 👻 幽靈殺手：全面將神風逃生艙的 DB 刪除條件由 mint_address 改為精準的 id，配合 Incremental RAM 徹底防復活。
+// 🚦 API 讓路：Shadow 查價前會檢查 DEXSCREENER_LOCK，若 Main Bot 佔用則強制等待 10 秒 (隱藏 Log 防洗版)。
 
 require('dotenv').config();
 const Redis = require('ioredis');
@@ -67,7 +66,8 @@ async function triggerDefconEscape(pos, portfolio) {
         if (escapeResult && escapeResult.success) {
             console.log(`☠️ [DEFCON] ${pos.token_symbol} 逃生成功！正在清理 Database 幽靈紀錄...`);
             const activeTables = ['active_positions_live', 'active_positions_paper'];
-            for (const table of activeTables) await supabase.from(table).delete().eq('mint_address', pos.mint_address);
+            // 🚀 核心修復：使用 id 精準刪除，防止幽靈倉位復活
+            for (const table of activeTables) await supabase.from(table).delete().eq('id', pos.id);
             guard_states.delete(pos.mint_address);
             last_valid_ts.delete(pos.mint_address);
         } else {
@@ -88,7 +88,6 @@ async function executeV9HardStopLoss(pos, pnlPct, currentPrice, portfolio) {
             console.log(`💥 [Grace Period] ${pos.token_symbol} 跌穿 ${dynamic_sl_limit.toFixed(2)}% 硬止損底線！`);
             const sold = await runSellPipeline(pos, currentPrice, `💥 硬止損觸發 (${dynamic_sl_limit.toFixed(2)}%)`, 1.0);
             
-            // 🚀 核心修復：成功後即斬 RAM，失敗先解鎖
             if (sold) {
                 const idx = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
                 if (idx > -1) portfolio.positions.splice(idx, 1);
@@ -293,7 +292,6 @@ setInterval(async () => {
         const dynamicAgeMeme = Math.floor(baseMaxAgeMeme * timeMultiplier);
         const dynamicAgeTrending = Math.floor(baseMaxAgeTrending * timeMultiplier);
 
-        // 💥 核心修復：反向迴圈確保 Splice 時不會跳過元素
         for (let i = portfolio.positions.length - 1; i >= 0; i--) {
             const pos = portfolio.positions[i];
             if (quarantine_lock.has(pos.mint_address)) continue;
@@ -314,7 +312,7 @@ setInterval(async () => {
                     if (sold) { 
                         guard_states.delete(pos.mint_address); 
                         last_valid_ts.delete(pos.mint_address); 
-                        portfolio.positions.splice(i, 1); // 🚀 成功即斬 RAM，根絕無限鞭屍
+                        portfolio.positions.splice(i, 1);
                     } else {
                         await redisClient.del(lockKey);
                     }
@@ -339,16 +337,12 @@ setInterval(async () => {
         const priceMap = new Map();
 
         for (let i = 0; i < mints.length; i += 30) {
-            // 🚦 核心防禦：檢查 Main Bot 有冇用緊 DexScreener API
             let apiLocked = await redisClient.get('DEXSCREENER_LOCK');
             while (apiLocked === 'MAIN_BOT') {
-                // 🤫 隱藏 Log，保護 Server 唔洗版
-                // console.log(`⏳ [Shadow Tracker] Main Bot 正在使用 DexScreener，影子查價讓路，等待 10 秒...`);
                 await new Promise(r => setTimeout(r, 10000));
                 apiLocked = await redisClient.get('DEXSCREENER_LOCK');
             }
 
-            // 宣告 Shadow Bot 用緊，防禦 5 秒
             await redisClient.set('DEXSCREENER_LOCK', 'SHADOW_BOT', 'EX', 5);
 
             const chunk = mints.slice(i, i + 30).join(',');
@@ -365,13 +359,13 @@ setInterval(async () => {
                 }
             } catch (err) {
                 console.warn(`⚠️ [Shadow Tracker] DexScreener 查價失敗，休息 10 秒:`, err.message);
-                await new Promise(r => setTimeout(r, 10000)); // 俾 429 抖抖
+                await new Promise(r => setTimeout(r, 10000)); 
             }
             await new Promise(r => setTimeout(r, 3000));
         }
 
         const now = Date.now();
-        const SHADOW_MAX_AGE_MINS = 1440; // 24小時結算
+        const SHADOW_MAX_AGE_MINS = 1440; 
         let settledCount = 0;
 
         for (const pos of shadows) {
@@ -419,7 +413,7 @@ setInterval(async () => {
 // 9. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.33 (防洗版 + RAM 徹底清倉版) 啟動中...");
+    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.34 (防復活與防洗版版) 啟動中...");
     await initPortfolio();
     await healthMonitor.setStatus('Monitor_Guards', '🟢 鐵衛巡邏中');
 }

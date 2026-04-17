@@ -1,11 +1,11 @@
 # ml_engine/main.py
-# 📝 檔案功能用途：V10.25 【Python 雙塔融合智腦】 (Microservice Core)
+# 📝 檔案功能用途：V10.26 【Python 雙塔融合智腦】 (Microservice Core)
 # 🚀 核心升級：配合 V10.25 三權分立架構，ML 權重滿分上調至 70 分。
 # 🛡️ 數據防護：加入 np.inf 洗刷機制，絕對防止 Random Forest 被 Infinity 搞崩潰。
-# 🧊 破冰升級：加入 Ice-Breaker 機制，防止 0 交易勝率導致門檻錯誤收緊的死循環。
+# 💊 治癒升級：引入 class_weight="balanced" 及「成交量」第三特徵維度，徹底根治模型預測抑鬱症。
 # 🧠 全權接管：拆除所有物理參數 Hardcode，從 Redis Array 讀取舊值並進行動態 EMA 進化。
 # 📢 Telegram 廣播：每日 11:00 覆盤完成後，自動將結果推送到 Telegram Channel。
-# 👻 影子降權：訓練時將 is_shadow == True 的樣本權重 (w_time) 大砍至 10%，只借用其物理特徵作陪襯。
+# 👻 影子降權：訓練時將 is_shadow == True 的樣本權重 (w_time) 大砍至 10%，避免雜訊干擾。
 
 import os
 import json
@@ -34,7 +34,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("NEXT_PUBLIC_
 REDIS_URL = os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL") or "redis://localhost:6379"
 MODEL_PATH = "/tmp/v10_rf_model.pkl"
 
-# Telegram 環境變數 (讀取 Node.js 用緊嘅同一組)
+# Telegram 環境變數
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_MAIN_BOT_TOKEN") or os.getenv("MAIN_BOT_TOKEN")
 TELEGRAM_CHANNEL_ID = os.getenv("TELEGRAM_CHANNEL_ID") or os.getenv("CHANNEL_ID")
 
@@ -45,7 +45,7 @@ try:
     opts = ClientOptions(postgrest_client_timeout=30, storage_client_timeout=30)
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY, options=opts)
 except Exception as e:
-    print(f"⚠️ [System] 帶 Options 建立 Supabase Client 失敗，嘗試回退原始連線。錯誤: {e}")
+    print(f"⚠️ [System] 建立 Supabase Client 失敗，嘗試回退。錯誤: {e}")
     supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 redis_client = redis.from_url(REDIS_URL, decode_responses=True)
@@ -53,7 +53,7 @@ redis_client = redis.from_url(REDIS_URL, decode_responses=True)
 def send_telegram_channel_alert(message: str):
     """直接向 Telegram Channel 發送報告"""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHANNEL_ID:
-        print("⚠️ [Telegram] 缺少 BOT_TOKEN 或 CHANNEL_ID，無法廣播。")
+        print("⚠️ [Telegram] 缺少參數，無法廣播。")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = json.dumps({"chat_id": TELEGRAM_CHANNEL_ID, "text": message, "parse_mode": "HTML"}).encode('utf-8')
@@ -61,7 +61,7 @@ def send_telegram_channel_alert(message: str):
     try:
         urllib.request.urlopen(req, timeout=10)
     except Exception as e:
-        print(f"⚠️ [Telegram] 廣播至 Channel 失敗: {e}")
+        print(f"⚠️ [Telegram] 廣播失敗: {e}")
 
 # ------------------------------------------------------------------
 # 🎯 FastAPI Lifespan 管理 (背景排程器)
@@ -71,7 +71,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=background_scheduler, daemon=True).start()
     yield 
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.25", lifespan=lifespan)
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.26", lifespan=lifespan)
 
 # ------------------------------------------------------------------
 # 2. 即時推論端點
@@ -106,10 +106,11 @@ async def predict_score(req: PredictRequest):
     if os.path.exists(MODEL_PATH):
         try:
             rf_model = joblib.load(MODEL_PATH)
-            X_live = pd.DataFrame([[ofi, f.l]], columns=['entry_ofi', 'entry_liquidity_usd'])
+            # 💊 治癒升級：推論時也必須加入成交量特徵 (f.v)
+            X_live = pd.DataFrame([[ofi, f.l, f.v]], columns=['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd'])
             survival_prob = rf_model.predict_proba(X_live)[0][1]
-        except Exception:
-            pass 
+        except Exception as e:
+            print(f"⚠️ [Predict] 模型推論異常: {e}")
 
     news_score = 0
     env_str = redis_client.get("global_env_state")
@@ -210,7 +211,7 @@ def execute_evolution_pipeline():
         
         df = fetch_trade_patterns_paginated(lookback_days)
         if df.empty or len(df) < 10:
-            print("⚠️ [ML Engine] 歷史樣本庫不足 (需至少 10 條)，中止訓練。請讓系統空轉收集數據。")
+            print("⚠️ [ML Engine] 歷史樣本庫不足，中止訓練。")
             send_telegram_channel_alert("⚠️ <b>【ML 大腦進化跳過】</b>\n樣本庫不足 10 條，今日不進行訓練。")
             return
 
@@ -228,7 +229,7 @@ def execute_evolution_pipeline():
         df['age_days'] = df['age_days'].clip(lower=0)
         df['w_time'] = 0.5 ** (df['age_days'] / (lookback_days / 3.0)) 
 
-        # 🚀 影子降權：將影子倉位的影響力強制壓至 10%
+        # 🚀 影子降權
         df['is_shadow'] = df.get('is_shadow', pd.Series(False, index=df.index)).fillna(False).astype(bool)
         df.loc[df['is_shadow'] == True, 'w_time'] *= 0.10
 
@@ -325,27 +326,27 @@ def execute_evolution_pipeline():
                     'trailing_tp_trigger': round(final_tp, 2),
                     'updated_at': datetime.now(timezone.utc).isoformat()
                 }).eq('token_type', p['token_type']).eq('market_climate', p['market_climate']).execute()
-            except Exception as e:
-                pass
+            except Exception: pass
 
-        print(f"🧠 [ML Engine] 自動進化完成！近期勝率: {recent_win_rate*100:.1f}%。目標偏移量: {threshold_target_offset}")
-        
         is_rf_trained = False
         if len((df['realized_pnl_pct'] > 0).unique()) > 1:
             n_est = int(params.get('rf_n_estimators', 100))
             m_depth = int(params.get('rf_max_depth', 5))
-            rf = RandomForestClassifier(n_estimators=n_est, max_depth=m_depth, random_state=42, n_jobs=1)
-            rf.fit(df[['entry_ofi', 'entry_liquidity_usd']], (df['realized_pnl_pct'] > 0).astype(int), sample_weight=df['w_time'])
+            # 💊 治癒升級：引入 class_weight="balanced" 強制對沖樣本失衡
+            rf = RandomForestClassifier(n_estimators=n_est, max_depth=m_depth, random_state=42, n_jobs=1, class_weight="balanced")
+            
+            # 💊 治癒升級：訓練時加入成交量特徵 ['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']
+            rf.fit(df[['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']], (df['realized_pnl_pct'] > 0).astype(int), sample_weight=df['w_time'])
             joblib.dump(rf, MODEL_PATH)
             is_rf_trained = True
 
         y_toxic = (df['realized_pnl_pct'] <= -15).astype(int)
         if len(y_toxic.unique()) > 1:
-            extract_and_save_toxic_clusters(df[['entry_ofi', 'entry_liquidity_usd']], y_toxic)
+            # 💊 治癒升級：黑名單規則也要看成交量維度
+            extract_and_save_toxic_clusters(df[['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']], y_toxic)
 
         print(f"✅ [Baseline Engine] 全管線更新完畢")
         
-        # 🚀 發送日報去 Telegram Channel
         rf_status = "已重新訓練" if is_rf_trained else "跳過 (無雙向結果)"
         report_msg = (
             f"🧠 <b>【V10 ML 智腦每日進化報告】</b>\n\n"
@@ -353,14 +354,15 @@ def execute_evolution_pipeline():
             f"📊 <b>近期 14 日勝率:</b> {recent_win_rate*100:.1f}%\n"
             f"📝 <b>訓練樣本數:</b> {total_trades_count} 筆\n"
             f"🎯 <b>門檻微調 (破冰補償):</b> {threshold_target_offset} 分\n"
-            f"🌲 <b>Random Forest:</b> {rf_status}\n\n"
+            f"🌲 <b>Random Forest:</b> {rf_status} (已開啟 Balanced 模式)\n"
+            f"📈 <b>維度升級:</b> 已注入成交量數據 (Volume 5m)\n\n"
             f"🤖 <i>系統已將新參數寫入資料庫，前線獵人已熱更新。</i>"
         )
         send_telegram_channel_alert(report_msg)
 
     except Exception as e:
-        print(f"❌ [Baseline Engine] 建模管線發生崩潰: {str(e)}")
-        send_telegram_channel_alert(f"❌ <b>【ML 大腦崩潰警告】</b>\n\n進化管線發生異常，請工程師檢查:\n<code>{str(e)}</code>")
+        print(f"❌ [Baseline Engine] 建模管線崩潰: {str(e)}")
+        send_telegram_channel_alert(f"❌ <b>【ML 大腦崩潰警告】</b>\n\n進化管線異常:\n<code>{str(e)}</code>")
 
 # ------------------------------------------------------------------
 # 4. 全自動無人值守排程器
@@ -370,8 +372,7 @@ def run_evolution_job():
 
 def background_scheduler():
     schedule.every().day.at("11:00").do(run_evolution_job)
-    print("🕒 [ML Engine] 已設定每日 HKT 19:00 (UTC 11:00) 進行大數據覆盤訓練。開機不作初次訓練。")
-    
+    print("🕒 [ML Engine] 背景排程啟動。")
     while True:
         schedule.run_pending()
         time.sleep(60) 
@@ -382,21 +383,12 @@ def background_scheduler():
 @app.post("/trigger_evolution")
 def trigger_evolution(background_tasks: BackgroundTasks):
     background_tasks.add_task(execute_evolution_pipeline)
-    return {"status": "success", "message": "ML Evolution pipeline triggered in background."}
+    return {"status": "success", "message": "Evolution triggered."}
 
 @app.get("/health")
 def health_check():
-    return {"status": "alive", "engine": "V10 Dual-Tower ML Brain", "cores": 1}
+    return {"status": "alive", "engine": "V10 Dual-Tower ML Brain"}
 
 if __name__ == "__main__":
     import uvicorn
-    import asyncio
-    try:
-        # 正常啟動伺服器
-        uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=1, log_config="log_config.json")
-    except (KeyboardInterrupt, SystemExit):
-        print("🛑 [ML Engine] 收到系統中斷指令，Python 智腦已安全關機。")
-    except asyncio.CancelledError:
-        print("🛑 [ML Engine] 背景任務已取消，安全關機。")
-    except Exception as e:
-        print(f"❌ [ML Engine] 啟動失敗或崩潰: {e}")
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, workers=1)
