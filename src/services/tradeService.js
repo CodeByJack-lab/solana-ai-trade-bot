@@ -127,7 +127,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             token_decimals: actualDecimals, 
             ai_score: aiScore,
             ai_reason: reason,
-            buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER',
+            buy_dex_label: mode === 'LIVE' ? 'PAPER' : 'SHADOW',
             market_climate: envState.climate || 'UNKNOWN',
             entry_liquidity_usd: marketData.l || 0,
             entry_volume_5m_usd: marketData.v || 0,

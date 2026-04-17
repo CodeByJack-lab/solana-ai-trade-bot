@@ -5,6 +5,7 @@
 # 🧊 破冰升級：加入 Ice-Breaker 機制，防止 0 交易勝率導致門檻錯誤收緊的死循環。
 # 🧠 全權接管：拆除所有物理參數 Hardcode，從 Redis Array 讀取舊值並進行動態 EMA 進化。
 # 📢 Telegram 廣播：每日 11:00 覆盤完成後，自動將結果推送到 Telegram Channel。
+# 👻 影子降權：訓練時將 is_shadow == True 的樣本權重 (w_time) 大砍至 10%，只借用其物理特徵作陪襯。
 
 import os
 import json
@@ -226,6 +227,10 @@ def execute_evolution_pipeline():
         df['age_days'] = (now_utc - df['created_at']).dt.total_seconds() / 86400.0
         df['age_days'] = df['age_days'].clip(lower=0)
         df['w_time'] = 0.5 ** (df['age_days'] / (lookback_days / 3.0)) 
+
+        # 🚀 影子降權：將影子倉位的影響力強制壓至 10%
+        df['is_shadow'] = df.get('is_shadow', pd.Series(False, index=df.index)).fillna(False).astype(bool)
+        df.loc[df['is_shadow'] == True, 'w_time'] *= 0.10
 
         winning_df = df[df['realized_pnl_pct'] > 0]
         losing_df = df[df['realized_pnl_pct'] < 0]
