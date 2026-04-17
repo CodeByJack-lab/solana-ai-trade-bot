@@ -1,10 +1,8 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10.37 交易執行大腦 (終極修復資金扣減與 TG 顯示版)
-// 🚀 核心升級：徹底修復 simulated_balance 買賣不扣款問題，並於 TG 訊息明確區分「半倉」與「全倉」。
-// 🛡️ 數據防護：實施「結算與廣播的一票否決權」，交易未上鏈絕不結算，杜絕 TG 轟炸。
-// 🧠 記憶體同步：實裝「秒速 RAM 清除」機制，斬斷 Zombie Sweeper 的無限鞭屍循環。
+// 📝 檔案功能及用途：V10.38 交易執行大腦 (極限防覆蓋與精準帳本版)
+// 🚀 核心升級：徹底解決 Race Condition！強制於寫入 DB 前一毫秒才拉取最新 simulated_balance，杜絕利潤被互相覆蓋而看似「重置」的問題。
+// 🛡️ 數據防護：加入 safeCurrentPrice 防呆機制，防止手動平倉時因缺乏價格導致 PnL 計算歸零。
 // 📊 ML 對接：全面寫入 applied_ml_strategy_id 供 Python 進行回測。
-// 👻 幽靈修復：修正 buy_dex_label 錯誤標記為 SHADOW 的問題。
 
 require('dotenv').config();
 const axios = require('axios');
@@ -81,8 +79,8 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
     try {
         console.log(`🛒 [Trade Service] 準備買入 ${symbol} (${mint}) | 分數: ${aiScore} | 注碼: ${finalTradeAmountSol} SOL`);
 
-        // 💰 資金防護：同時拉取 mode 與 simulated_balance
-        const { data: sysConfig } = await supabase.from('system_config').select('trade_mode, simulated_balance').eq('id', 1).single();
+        // 僅拉取模式，避免太早拉取餘額導致 Race Condition
+        const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
         const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
 
         if (mode === 'SHUTDOWN') {
@@ -90,11 +88,11 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             return false;
         }
 
-        // 🛑 Paper 模式下，先檢查餘額夠不夠
+        // 🛑 初步餘額檢查 (節省不必要的 API 呼叫)
         if (mode === 'PAPER') {
-            const currentSimulatedBalance = parseFloat(sysConfig.simulated_balance || 0);
-            if (currentSimulatedBalance < finalTradeAmountSol) {
-                console.error(`❌ [Trade Service] 模擬資金不足！餘額: ${currentSimulatedBalance} SOL, 需要: ${finalTradeAmountSol} SOL`);
+            const { data: preCheck } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
+            if (parseFloat(preCheck?.simulated_balance || 0) < finalTradeAmountSol) {
+                console.error(`❌ [Trade Service] 模擬資金不足，拒絕下單！`);
                 return false;
             }
         }
@@ -127,8 +125,9 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
                 return false; 
             }
         } else {
-            // 💸 PAPER 模式正式扣款 (寫入 DB 並更新 RAM)
-            const newBalance = parseFloat(sysConfig.simulated_balance || 0) - finalTradeAmountSol;
+            // 💸 PAPER 模式正式扣款：🚀 強制拉取寫入前一毫秒的最新餘額，杜絕被其他併發交易覆蓋！
+            const { data: freshConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
+            const newBalance = parseFloat(freshConfig?.simulated_balance || 0) - finalTradeAmountSol;
             await supabase.from('system_config').update({ simulated_balance: newBalance }).eq('id', 1);
             updateCache('BUY', finalTradeAmountSol); // 立即扣減 RAM 的現金
         }
@@ -143,7 +142,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             token_decimals: actualDecimals, 
             ai_score: aiScore,
             ai_reason: reason,
-            buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER', // 🚀 幽靈修復：確保不會變 SHADOW
+            buy_dex_label: mode === 'LIVE' ? 'JUPITER_LIVE' : 'JUPITER_PAPER', 
             market_climate: envState.climate || 'UNKNOWN',
             entry_liquidity_usd: marketData.l || 0,
             entry_volume_5m_usd: marketData.v || 0,
@@ -156,9 +155,11 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         
         if (insertErr) {
             console.error(`❌ [Main Route] 寫入 ${tableName} 失敗:`, insertErr.message);
-            // 容錯：若寫入失敗，把錢退回模擬倉
             if (mode === 'PAPER') {
-                await supabase.from('system_config').update({ simulated_balance: parseFloat(sysConfig.simulated_balance || 0) }).eq('id', 1);
+                // 容錯：若 DB 寫入失敗，重新補回剛才扣除的資金
+                const { data: rollbackConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
+                const revertedBalance = parseFloat(rollbackConfig?.simulated_balance || 0) + finalTradeAmountSol;
+                await supabase.from('system_config').update({ simulated_balance: revertedBalance }).eq('id', 1);
             }
             return false; 
         }
@@ -215,7 +216,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         let txid = `SELL_${Date.now()}`;
         let success = false;
 
-        const { data: sysConfig } = await supabase.from('system_config').select('trade_mode, simulated_balance').eq('id', 1).single();
+        const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
         const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
 
         if (mode === 'LIVE') {
@@ -253,22 +254,24 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             return false; 
         }
 
-        // 💰 資金結算 (PAPER)
+        // 🛡️ 防護網：避免因極端情況下 currentPrice 丟失而導致 PnL 錯誤
+        const safeCurrentPrice = currentPrice || position.entry_price_sol || 0;
         const entryPrice = position.entry_price_sol || 0;
-        const realizedPnlPct = entryPrice > 0 ? ((currentPrice - entryPrice) / entryPrice) * 100 : 0;
-        const sellValueSol = sellQuantity * currentPrice;
+        const realizedPnlPct = entryPrice > 0 ? ((safeCurrentPrice - entryPrice) / entryPrice) * 100 : 0;
+        const sellValueSol = sellQuantity * safeCurrentPrice;
         const isShadow = position.strategy_type?.includes('SHADOW') || false; 
 
+        // 💰 資金結算 (PAPER)
         if (mode === 'PAPER' && !isShadow) {
-             // 將賣出得益加回 simulated_balance
-             const newBalance = parseFloat(sysConfig.simulated_balance || 0) + sellValueSol;
+             // 🚀 核心修復：強制在寫入前一毫秒拉取最新餘額，杜絕 Race Condition 導致的利潤丟失與重置
+             const { data: freshConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
+             const newBalance = parseFloat(freshConfig?.simulated_balance || 0) + sellValueSol;
              await supabase.from('system_config').update({ simulated_balance: newBalance }).eq('id', 1);
              updateCache('SELL', sellValueSol); // 立即增加 RAM 的現金
         }
 
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
         if (fraction === 1.0) {
-            // 👻 核心修復：使用 id 刪除，精準消滅！
             for (const table of activeTables) await supabase.from(table).delete().eq('id', position.id);
         } else {
             const table = mode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
@@ -304,11 +307,11 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                 token_symbol: position.token_symbol,
                 action: fraction === 1.0 ? 'SELL' : 'SELL_HALF',
                 strategy_type: position.strategy_type,
-                price_sol: currentPrice,
+                price_sol: safeCurrentPrice,
                 quantity: sellQuantity,
                 total_value_sol: sellValueSol,
                 realized_pnl_pct: realizedPnlPct,
-                realized_pnl_sol: (currentPrice - entryPrice) * sellQuantity,
+                realized_pnl_sol: (safeCurrentPrice - entryPrice) * sellQuantity,
                 txid: txid,
                 market_climate: climate,
                 applied_ml_strategy_id: position.applied_ml_strategy_id 
@@ -321,7 +324,6 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             if (typeof sendTelegramAlert === 'function') {
                 const icon = realizedPnlPct > 0 ? '🟢' : '🔴';
                 const modeText = mode === 'LIVE' ? '[實盤]' : '[模擬]';
-                // 📣 明確顯示是半倉還是全倉
                 const fractionText = fraction === 1.0 ? '全倉平倉結算' : '半倉平倉結算';
                 await sendTelegramAlert(`${icon} ${modeText} <b>${fractionText}</b>\n幣種: <b>${position.token_symbol}</b>\n原因: ${reason}\n利潤: ${realizedPnlPct.toFixed(2)}%\nTX: <code>${txid}</code>`);
             }

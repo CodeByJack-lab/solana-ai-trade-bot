@@ -83,13 +83,13 @@ async function initPortfolio() {
         const tableName = my_portfolio.mode === 'PAPER' ? 'active_positions_paper' : 'active_positions_live';
 
         if (my_portfolio.mode === 'LIVE') {
-             my_portfolio.cash_sol = config?.live_wallet_balance || 0;
+             my_portfolio.cash_sol = parseFloat(config?.live_wallet_balance || 0);
              my_portfolio.reference_capital = my_portfolio.cash_sol;
              syncLiveBalanceToDB(); 
         } else {
-            my_portfolio.reference_capital = config?.reference_capital || 10;
-            // ⚖️ 拔除自作聰明的歷史校準，直接忠實讀取 Database 的 simulated_balance
-            my_portfolio.cash_sol = config?.simulated_balance || 10;
+            my_portfolio.reference_capital = parseFloat(config?.reference_capital || 10);
+            // ⚖️ 忠實讀取 Database 的 simulated_balance
+            my_portfolio.cash_sol = parseFloat(config?.simulated_balance || 10);
         }
 
         const { data: positions } = await supabase.from(tableName).select('*');
@@ -120,7 +120,6 @@ async function initPortfolio() {
                 }
             })
             .on('postgres_changes', { event: 'DELETE', schema: 'public', table: tableName }, (payload) => {
-                // 👻 核心修復：Supabase DELETE 預設只有 id，沒有 mint_address！必須用 payload.old.id
                 my_portfolio.positions = my_portfolio.positions.filter(p => p.id !== payload.old.id);
             })
             .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: tableName }, (payload) => {
@@ -146,7 +145,6 @@ async function initPortfolio() {
     }
 }
 
-// 首次啟動定時心跳 (保證只執行一次)
 let isHeartbeatStarted = false;
 if (!isHeartbeatStarted) {
     setInterval(() => {
@@ -200,7 +198,6 @@ function getTrendingCount() {
 }
 
 function updateCache(action, solAmount, positionData = null) {
-    // 記憶體更新已全權交由 WebSocket 與 60s 輪詢處理，這裡只做基礎現金運算
     if (action === 'BUY') {
         my_portfolio.cash_sol -= solAmount;
     } else if (action === 'SELL') {
@@ -213,7 +210,7 @@ async function resetPaperMemory() {
     my_portfolio.positions = [];
     try {
         const { data: dbConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
-        if (dbConfig) my_portfolio.cash_sol = dbConfig.simulated_balance;
+        if (dbConfig) my_portfolio.cash_sol = parseFloat(dbConfig.simulated_balance || 0);
     } catch (e) {}
 }
 
