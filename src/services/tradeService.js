@@ -1,7 +1,7 @@
 // src/services/tradeService.js
-// 📝 檔案功能及用途：V10.38 交易執行大腦 (極限防覆蓋與精準帳本版)
-// 🚀 核心升級：徹底解決 Race Condition！強制於寫入 DB 前一毫秒才拉取最新 simulated_balance，杜絕利潤被互相覆蓋而看似「重置」的問題。
-// 🛡️ 數據防護：加入 safeCurrentPrice 防呆機制，防止手動平倉時因缺乏價格導致 PnL 計算歸零。
+// 📝 檔案功能及用途：V10.39 交易執行大腦 (真實報價強制結算版)
+// 🚀 核心升級：模擬盤平倉強制提取 Jupiter 真實報價結算盈虧，徹底消滅 0% PnL 幻象。
+// 🛡️ 數據防護：強制寫入 review_history (平倉原因) 及 hold_time_mins，確保歷史數據完整。
 // 📊 ML 對接：全面寫入 applied_ml_strategy_id 供 Python 進行回測。
 
 require('dotenv').config();
@@ -79,7 +79,6 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
     try {
         console.log(`🛒 [Trade Service] 準備買入 ${symbol} (${mint}) | 分數: ${aiScore} | 注碼: ${finalTradeAmountSol} SOL`);
 
-        // 僅拉取模式，避免太早拉取餘額導致 Race Condition
         const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
         const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
 
@@ -88,7 +87,6 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             return false;
         }
 
-        // 🛑 初步餘額檢查 (節省不必要的 API 呼叫)
         if (mode === 'PAPER') {
             const { data: preCheck } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
             if (parseFloat(preCheck?.simulated_balance || 0) < finalTradeAmountSol) {
@@ -125,11 +123,10 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
                 return false; 
             }
         } else {
-            // 💸 PAPER 模式正式扣款：🚀 強制拉取寫入前一毫秒的最新餘額，杜絕被其他併發交易覆蓋！
             const { data: freshConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
             const newBalance = parseFloat(freshConfig?.simulated_balance || 0) - finalTradeAmountSol;
             await supabase.from('system_config').update({ simulated_balance: newBalance }).eq('id', 1);
-            updateCache('BUY', finalTradeAmountSol); // 立即扣減 RAM 的現金
+            updateCache('BUY', finalTradeAmountSol); 
         }
 
         const positionData = {
@@ -156,7 +153,6 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         if (insertErr) {
             console.error(`❌ [Main Route] 寫入 ${tableName} 失敗:`, insertErr.message);
             if (mode === 'PAPER') {
-                // 容錯：若 DB 寫入失敗，重新補回剛才扣除的資金
                 const { data: rollbackConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
                 const revertedBalance = parseFloat(rollbackConfig?.simulated_balance || 0) + finalTradeAmountSol;
                 await supabase.from('system_config').update({ simulated_balance: revertedBalance }).eq('id', 1);
@@ -211,10 +207,18 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         const sellQuantity = position.quantity * fraction;
         const tokenDecimals = position.token_decimals || 6; 
 
+        // 🚀 核心升級：強制所有模式向 Jupiter 獲取真實報價
         const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || position.strategy_type || 'v10', tokenDecimals);
 
         let txid = `SELL_${Date.now()}`;
         let success = false;
+        let actualExecutionPrice = currentPrice; // 預設使用 RAM 傳入價格兜底
+
+        if (quoteData && quoteData.pricePerToken) {
+            actualExecutionPrice = quoteData.pricePerToken; // 🚀 使用 Jupiter 真實報價結算！
+        } else {
+            console.warn(`⚠️ [Sell Pipeline] ${position.token_symbol} 無法獲取 Jupiter 真實報價，將使用 RAM 緩存價格結算！`);
+        }
 
         const { data: sysConfig } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
         const mode = sysConfig ? (sysConfig.trade_mode || 'PAPER') : 'PAPER';
@@ -254,20 +258,18 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             return false; 
         }
 
-        // 🛡️ 防護網：避免因極端情況下 currentPrice 丟失而導致 PnL 錯誤
-        const safeCurrentPrice = currentPrice || position.entry_price_sol || 0;
+        // 🛡️ 防護網：使用 Jupiter 價格計算真實 PnL
+        const safeCurrentPrice = actualExecutionPrice || position.entry_price_sol || 0;
         const entryPrice = position.entry_price_sol || 0;
         const realizedPnlPct = entryPrice > 0 ? ((safeCurrentPrice - entryPrice) / entryPrice) * 100 : 0;
         const sellValueSol = sellQuantity * safeCurrentPrice;
         const isShadow = position.strategy_type?.includes('SHADOW') || false; 
 
-        // 💰 資金結算 (PAPER)
         if (mode === 'PAPER' && !isShadow) {
-             // 🚀 核心修復：強制在寫入前一毫秒拉取最新餘額，杜絕 Race Condition 導致的利潤丟失與重置
              const { data: freshConfig } = await supabase.from('system_config').select('simulated_balance').eq('id', 1).single();
              const newBalance = parseFloat(freshConfig?.simulated_balance || 0) + sellValueSol;
              await supabase.from('system_config').update({ simulated_balance: newBalance }).eq('id', 1);
-             updateCache('SELL', sellValueSol); // 立即增加 RAM 的現金
+             updateCache('SELL', sellValueSol); 
         }
 
         const activeTables = ['active_positions_live', 'active_positions_paper', 'active_positions_shadow'];
@@ -283,6 +285,7 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
 
         const climateStr = await redis.get('global_env_state');
         const climate = climateStr ? JSON.parse(climateStr).climate : 'UNKNOWN';
+        const holdTimeMins = position.created_at ? Math.floor((Date.now() - new Date(position.created_at).getTime()) / 60000) : 0;
 
         await supabase.from('trade_patterns').insert([{
             mint_address: mint, 
@@ -314,7 +317,9 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
                 realized_pnl_sol: (safeCurrentPrice - entryPrice) * sellQuantity,
                 txid: txid,
                 market_climate: climate,
-                applied_ml_strategy_id: position.applied_ml_strategy_id 
+                applied_ml_strategy_id: position.applied_ml_strategy_id,
+                review_history: reason, // 🚀 補回寫入平倉原因 (包括 Time-Stop 等)
+                hold_time_mins: holdTimeMins // 🚀 補回持倉時間
             }]);
 
             if (historyErr) {
@@ -324,7 +329,8 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             if (typeof sendTelegramAlert === 'function') {
                 const icon = realizedPnlPct > 0 ? '🟢' : '🔴';
                 const modeText = mode === 'LIVE' ? '[實盤]' : '[模擬]';
-                const fractionText = fraction === 1.0 ? '全倉平倉結算' : '半倉平倉結算';
+                // 🚀 統一個 TG 字眼：平倉結算
+                const fractionText = fraction === 1.0 ? '平倉結算' : '半倉平倉結算';
                 await sendTelegramAlert(`${icon} ${modeText} <b>${fractionText}</b>\n幣種: <b>${position.token_symbol}</b>\n原因: ${reason}\n利潤: ${realizedPnlPct.toFixed(2)}%\nTX: <code>${txid}</code>`);
             }
         }
