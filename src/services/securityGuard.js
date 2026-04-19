@@ -2,6 +2,7 @@
 // 📝 檔案功能用途：V10.18 量化安檢中樞 (全自動 ML 參數接管版 - 三權分立之第一權)
 // 🚀 升級功能：加入 ML 動態參數接收器，實現真正 AI 驅動。分數重構為 0-20 物理安全及格線，為 ML 騰出 60 分龐大計分空間。
 // 🛡️ 終極修復：加入 preFetchedData 綠色通道，完美解決與前線批次查價的 DexScreener 429 API 撞車問題。
+// 💰 CVD 淨流防禦：實裝偽 CVD (Cumulative Volume Delta) 估算法，防禦大戶左手交右手之假 OFI 陷阱。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -142,7 +143,6 @@ class SecurityGuard {
         } catch (err) { return true; }
     }
 
-    // 🚀 核心修復：加入 preFetchedData 參數，避免重複 Call API
     async calculateQuantScore(mint, type = 'NEWBORN', preFetchedData = null) {
         const { climate, newsScore } = await this._getMacroClimate();
         const dbParams = cacheManager.getStrategy(type);
@@ -160,6 +160,7 @@ class SecurityGuard {
             console.warn("⚠️ 無法讀取 ML 動態參數，降級使用經驗預設值");
         }
 
+        // 🚀 新增讀取 min_cvd_usd，預設為 0
         let activeParams = {
             buyThreshold: targetParam?.buy_threshold ? Number(targetParam.buy_threshold) : (mlParams?.buy_threshold ?? 70), 
             minOFI: parseFloat(targetParam?.min_ofi ?? targetParam?.minOfi ?? (type === 'TRENDING' ? -0.4 : -0.2)),
@@ -167,10 +168,10 @@ class SecurityGuard {
             minTradeSize: parseFloat(targetParam?.min_avg_trade_usd ?? targetParam?.minAvgTradeUsd ?? 10),
             maxTurnover: parseFloat(targetParam?.max_turnover_5m ?? targetParam?.maxTurnover5m ?? (type === 'TRENDING' ? 0.50 : 0.80)),
             zombieVolReq: parseFloat(targetParam?.zombie_vol_req ?? targetParam?.zombieVolReq ?? 500),
-            minLiquidityUsd: Math.max(2000, parseFloat(targetParam?.optimal_min_liquidity_usd ?? targetParam?.optimalMinLiquidityUsd ?? (dbParams?.min_liquidity || 2000)))
+            minLiquidityUsd: Math.max(2000, parseFloat(targetParam?.optimal_min_liquidity_usd ?? targetParam?.optimalMinLiquidityUsd ?? (dbParams?.min_liquidity || 2000))),
+            minCvdUsd: parseFloat(targetParam?.min_cvd_usd ?? 0) 
         };
 
-        // 🚀 核心修復：優先使用前線傳遞的完整報價數據 (綠色通道)
         let marketData = null;
         if (preFetchedData && preFetchedData.symbol && preFetchedData.p !== undefined) {
             marketData = {
@@ -228,9 +229,15 @@ class SecurityGuard {
         const buyRatio = buys / totalTxs5m;
         if (totalTxs5m > 30 && buyRatio > 0.45 && buyRatio < 0.55) return { numeric_score: 0, isSafe: false, reason: `🛑 女巫刷量: 買賣極度對稱`, marketData };
 
+        // 🚀 核心升級：OFI 與 CVD 雙重淨流防禦
         const pseudoOfi = totalTxs5m > 0 ? (buys - sells) / totalTxs5m : 0;
+        const pseudoCvdUsd = marketData.volume5m * pseudoOfi; 
+
         if (totalTxs5m >= 10 && pseudoOfi < activeParams.minOFI) {
             return { numeric_score: 0, isSafe: false, reason: `🛑 惡劣 OFI: 買賣失衡 (OFI: ${pseudoOfi.toFixed(2)} < ML底線: ${activeParams.minOFI})`, marketData };
+        }
+        if (totalTxs5m >= 10 && pseudoCvdUsd < activeParams.minCvdUsd) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 資金淨流出/不足: 估算 CVD $${pseudoCvdUsd.toFixed(0)} < ML要求 $${activeParams.minCvdUsd}`, marketData };
         }
 
         const VERIFIED_TOKENS = cacheManager.getVerifiedTokens();

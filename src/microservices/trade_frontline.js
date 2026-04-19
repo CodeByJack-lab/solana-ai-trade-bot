@@ -1,9 +1,11 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.32 【獵人中樞】微服務 (Microservice Core)
+// 📝 檔案功能用途：V10.38 【獵人中樞】微服務 (Microservice Core) - 完整升級版
 // 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，連同 Shadow 表一起檢查，徹底杜絕同幣重複買入！
 // 🛡️ 記憶體修復：解決 AI Watchdog 觸發 SELL_HALF 時，RAM 記憶體未相應減半導致重複賣出全倉的問題。
 // 👑 API 霸體：每次 Call DexScreener 前設定 Redis DEXSCREENER_LOCK，迫使 Shadow 任務讓路。
 // 🔒 安全升級：加入 LLM Hard-Fail 防禦，當 AI 資源池異常時強行拉高 threshold，拒絕盲買。
+// ✨ 敘事特赦：總分差 1-2 分及格時，若 LLM 評分 >= 3，加送 3 分保送過關。
+// 🎯 動態風控：買入成功後，將專屬 stop_loss_pct 與 trailing_tp_trigger 寫入 Redis 供 Monitor 讀取。
 
 require('dotenv').config();
 const express = require('express');
@@ -427,8 +429,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const symbol = symbol_cache.get(mint) || 'UNKNOWN';
 
-        // 🚀 核心防護：全域倉位攔截 (Global Holding Shield)
-        // 同時檢查 RAM 嘅 Main 倉位同 DB 嘅 Shadow 倉位，防止重覆掃描入貨！
         const portfolio = getPortfolio();
         const isHoldingMain = portfolio.positions && portfolio.positions.some(p => p.mint_address === mint);
         
@@ -467,16 +467,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const ofi = totalTxs > 0 ? (marketData.b - marketData.s) / totalTxs : 0;
                 
                 supabase.from('trade_patterns').insert([{
-                    mint_address: mint,
-                    token_symbol: symbol,
-                    entry_price_sol: marketData.p || 0,
-                    entry_ofi: ofi,
-                    entry_liquidity_usd: marketData.l,
-                    entry_volume_5m: marketData.v,
-                    realized_pnl_pct: -100.00 
-                }]).then(({error}) => {
-                    if (error) console.error(`❌ [Poison Data] 寫入負樣本失敗:`, error.message);
-                });
+                    mint_address: mint, token_symbol: symbol, entry_price_sol: marketData.p || 0,
+                    entry_ofi: ofi, entry_liquidity_usd: marketData.l, entry_volume_5m: marketData.v, realized_pnl_pct: -100.00 
+                }]).catch(()=>{});
             }
             return;
         }
@@ -507,13 +500,11 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         
         let llmScore = 0;
         let llmReason = "LLM 未啟用";
-        let llmFailed = false; // 🚀 記錄 LLM 是否崩潰
+        let llmFailed = false;
 
         try {
             console.log(`   - 🧠 [LLM Consensus] 發起 ${symbol} 的敘事潛力會議...`);
-            
             const llmStartTime = Date.now();
-            
             let llmTargetData = secResult.marketData || {};
             if (!llmTargetData.description || llmTargetData.description.trim() === '') {
                 llmTargetData.description = `Newly launched community token. Ticker: $${llmTargetData.symbol}, Name: ${llmTargetData.name}. No official description provided yet. Please evaluate the viral/meme potential based solely on its ticker and name. Do NOT penalize for lacking description.`;
@@ -526,14 +517,17 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             llmReason = llmResult.reason || "無解釋";
         } catch (e) {
             console.warn(`   - ⚠️ [LLM Down] 敘事分析失敗，觸發 LLM Hard-Fail 標記。`);
-            llmFailed = true; // 🚀 標記異常
+            llmFailed = true;
             llmReason = "LLM 資源池全線異常";
         }
 
-        const finalScore = quantScore + mlScore + llmScore;
-        
+        let finalScore = quantScore + mlScore + llmScore;
         let buyThreshold = 70; 
         let activeStrategyId = appliedMlStrategyId || 0; 
+        
+        // 🚀 新增讀取動態 SL/TP
+        let dynamicSL = -15.0; 
+        let dynamicTP = 20.0;
 
         try {
             const mlParamsStr = await redisClient.get('ml_strategy_params');
@@ -546,16 +540,26 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 if (targetParam) {
                     if (targetParam.buy_threshold) buyThreshold = Number(targetParam.buy_threshold);
                     if (targetParam.id) activeStrategyId = targetParam.id; 
+                    if (targetParam.stop_loss_pct) dynamicSL = Number(targetParam.stop_loss_pct);
+                    if (targetParam.trailing_tp_trigger) dynamicTP = Number(targetParam.trailing_tp_trigger);
                 }
             }
         } catch(e) {
             console.warn(`⚠️ [Frontline] 讀取動態及格線失敗，使用預設防守線 70 分`);
         }
 
-        // 🚀 LLM 盲買防禦：若 LLM 瓜咗，強行將門檻推高到天際，拒絕下單！
         if (llmFailed) {
             console.log(`🛑 [Hard-Fail 防禦] 偵測到 LLM 異常，強行將 Buy Threshold 從 ${buyThreshold} 提升至 999，阻截盲買風險！`);
             buyThreshold = 999;
+        }
+
+        // 🚀 邊緣計分微調 (Narrative Override 敘事特赦)
+        if (!llmFailed && finalScore >= buyThreshold - 2 && finalScore < buyThreshold) {
+            if (llmScore >= 3) {
+                console.log(`✨ [Narrative Override] 差少少及格 (${finalScore}/${buyThreshold})，但 LLM 敘事極度睇好 (${llmScore}分)，觸發特赦 +3 分！`);
+                finalScore += 3;
+                llmReason += " [✨敘事特赦+3保送]";
+            }
         }
 
         console.log(`⚖️ [Final Verdict] ${symbol} 總分: ${finalScore} / 100 (及格線: ${buyThreshold})`);
@@ -576,16 +580,11 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                     maxPositions = poolType === 'NEWBORN' ? config.max_meme_positions : config.max_trending_positions;
                 }
 
-                const { count, error: countErr } = await supabase
-                    .from(`active_positions_${currentMode}`)
-                    .select('*', { count: 'exact', head: true })
-                    .like('strategy_type', `${poolType}%`);
-                
-                if (!countErr && count !== null) currentPositionsCount = count;
+                const { count } = await supabase.from(`active_positions_${currentMode}`)
+                    .select('*', { count: 'exact', head: true }).like('strategy_type', `${poolType}%`);
+                if (count !== null) currentPositionsCount = count;
 
-            } catch(e) {
-                console.warn(`⚠️ [Capacity Check] 獲取倉位數量失敗:`, e.message);
-            }
+            } catch(e) {}
 
             if (currentPositionsCount >= maxPositions) {
                 console.log(`🛑 [Capacity Full] ${poolType} 倉位已滿 (${currentPositionsCount}/${maxPositions})，放棄買入 ${symbol}。`);
@@ -608,25 +607,27 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 
                 const safeMultiplier = Math.max(0.5, Math.min(2.0, mlConfidenceMultiplier));
                 const finalTradeAmountSol = parseFloat((baseAmount * safeMultiplier).toFixed(3));
-                console.log(`💰 [Sizing] 基礎注碼: ${baseAmount} SOL, 乘數: x${safeMultiplier} -> 最終下單: ${finalTradeAmountSol} SOL`);
-
+                
                 const success = await executeBuy(
                     mint, symbol, poolType, finalScore, 
                     `🤖 三權決策 (Q:${quantScore} + M:${mlScore} + L:${llmScore}) | LLM: ${llmReason}`, 
                     finalTradeAmountSol, marketData, envState, activeStrategyId, safeMultiplier
                 );
+
+                // 🚀 交易成功後，將專屬的動態 SL/TP 寫入 Redis，供 Monitor Guards 讀取
+                if (success) {
+                    await redisClient.set(`pos_sl_tp:${mint}`, JSON.stringify({ sl: dynamicSL, tp: dynamicTP }), 'EX', 86400 * 3);
+                    console.log(`🛡️ [Strategy Config] 已為 ${symbol} 綁定專屬止損 (${dynamicSL}%) / 止盈 (${dynamicTP}%) 參數。`);
+                }
             }
         } else {
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
             
             if (finalScore >= 50 && finalScore < buyThreshold) {
-                
                 const MAX_SHADOW_CAPACITY = 50; 
-                const { count: shadowCount, error: shadowCountErr } = await supabase
-                    .from('active_positions_shadow')
-                    .select('*', { count: 'exact', head: true });
+                const { count: shadowCount } = await supabase.from('active_positions_shadow').select('*', { count: 'exact', head: true });
 
-                if (!shadowCountErr && shadowCount >= MAX_SHADOW_CAPACITY) {
+                if (shadowCount >= MAX_SHADOW_CAPACITY) {
                     console.log(`👻 [Shadow Route] 影子倉位已達上限 (${shadowCount}/${MAX_SHADOW_CAPACITY})，暫停收集。`);
                 } else {
                     const { data: existingShadow } = await supabase.from('active_positions_shadow').select('id').eq('mint_address', mint).limit(1);
@@ -641,15 +642,13 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                             entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
                             market_climate: envState.climate,
                             applied_ml_strategy_id: activeStrategyId 
-                        });
+                        }).catch(()=>{});
                     }
                 }
             }
         }
-
     } catch (err) {
-        const symbol = symbol_cache.get(mint) || 'UNKNOWN';
-        console.error(`❌ [Routing Error] 決策漏斗處理 ${symbol} (${mint}) 時發生崩潰:`, err.message);
+        console.error(`❌ [Routing Error] 決策漏斗處理崩潰:`, err.message);
     }
 }
 
@@ -705,7 +704,7 @@ burnSub.on('message', async (channel, message) => {
 // 8. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.32 (全域攔截防重複買入版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.38 (動態 SL/TP 與敘事特赦版) 啟動中...");
     
     await initPortfolio();
 
