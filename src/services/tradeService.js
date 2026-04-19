@@ -3,6 +3,7 @@
 // 🚀 核心升級：模擬盤平倉強制提取 Jupiter 真實報價結算盈虧，徹底消滅 0% PnL 幻象。
 // 🛡️ 數據防護：強制寫入 review_history (平倉原因) 及 hold_time_mins，確保歷史數據完整。
 // 📊 ML 對接：全面寫入 applied_ml_strategy_id 供 Python 進行回測。
+// 🚨 極限逃生：加入動態 Slippage (Dynamic Slippage)，遇緊急止損將滑點放寬至 50% 確保成交。
 
 require('dotenv').config();
 const axios = require('axios');
@@ -207,8 +208,15 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
         const sellQuantity = position.quantity * fraction;
         const tokenDecimals = position.token_decimals || 6; 
 
+        // 🚀 動態 Slippage 判定：遇到極端情況放寬滑點至 50%
+        let dynamicSlippage = 1500; // 預設 15%
+        if (reason && (reason.includes('硬止損') || reason.includes('VWAP 防線崩潰') || reason.includes('Rugpull') || reason.includes('CVD 背離') || reason.includes('DEFCON'))) {
+            dynamicSlippage = 5000; // 50%
+            console.warn(`🚨 [Emergency Mode] 偵測到恐慌拋售/止損信號，Slippage 已拉升至 50% (5000 bps) 以確保逃生！`);
+        }
+
         // 🚀 核心升級：強制所有模式向 Jupiter 獲取真實報價
-        const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, 1500, position.strategy_version || position.strategy_type || 'v10', tokenDecimals);
+        const quoteData = await getJupiterFinalQuote(mint, false, sellQuantity, dynamicSlippage, position.strategy_version || position.strategy_type || 'v10', tokenDecimals);
 
         let txid = `SELL_${Date.now()}`;
         let success = false;

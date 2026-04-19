@@ -1,6 +1,7 @@
 // src/services/liveTradeService.js
 // 📝 檔案功能用途：實盤簽名與上鏈引擎。
 // 🚀 V9.3 強化：實裝交易後「秒速餘額校準」機制，杜絕 PnL 數據幻象。
+// 🧨 V10.4 逃生升級：加入 Banzai 模式 (10倍 Jito 小費 + veryHigh Jupiter 優先級)，抵禦深度 Rug Pull。
 
 const { Keypair, VersionedTransaction, Transaction, SystemProgram, PublicKey } = require('@solana/web3.js');
 const { connection, broadcastWithPromiseAny } = require('../config/solana'); 
@@ -66,7 +67,7 @@ async function pollSignatureStatus(signature, timeoutMs = 15000) {
     throw new Error('Jito Bundle 確認超時 (Transaction Dropped or Pending)');
 }
 
-async function getJupiterSwapTransaction(quoteResponse) {
+async function getJupiterSwapTransaction(quoteResponse, isEmergency = false) {
     if (!wallet) return null;
     const baseUrl = (configEnv.external.jupiterBaseUrl || 'https://quote-api.jup.ag').replace(/\/$/, '');
     const endpoint = baseUrl.includes('quote-api') ? '/v6/swap' : '/swap/v1/swap';
@@ -76,15 +77,18 @@ async function getJupiterSwapTransaction(quoteResponse) {
         config.headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
     }
 
+    // 🚀 緊急狀態下，拉爆 Jupiter Priority Fee
+    const priorityFee = isEmergency ? "veryHigh" : "auto";
+
     const payload = {
         quoteResponse,
         userPublicKey: wallet.publicKey.toString(),
         wrapAndUnwrapSol: true, 
         dynamicComputeUnitLimit: true, 
-        prioritizationFeeLamports: "auto" 
+        prioritizationFeeLamports: priorityFee 
     };
 
-    const maxRetries = 3; 
+    const maxRetries = isEmergency ? 5 : 3; 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
         try {
             const response = await axios.post(`${baseUrl}${endpoint}`, payload, config);
@@ -112,10 +116,17 @@ async function fetchJitoTipFloor() {
 async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
     if (!wallet) return { success: false, txid: null };
 
-    console.log(`\n⚡ [Live Execution] 正在向 Jupiter 請求構建 ${action} 交易...`);
+    let isEmergency = false;
+    if (action === 'SELL' && reason) {
+        if (reason.includes('瀑布') || reason.includes('硬止損') || reason.includes('崩盤') || reason.includes('拔線') || reason.includes('EXIT') || reason.includes('Rugpull') || reason.includes('DEFCON')) {
+            isEmergency = true;
+        }
+    }
+
+    console.log(`\n⚡ [Live Execution] 正在向 Jupiter 請求構建 ${action} 交易... (緊急模式: ${isEmergency})`);
     healthMonitor.setStatus('Live_Engine', `🟢 構建 ${action} 交易中...`); 
 
-    const swapTransactionBase64 = await getJupiterSwapTransaction(quoteResponse);
+    const swapTransactionBase64 = await getJupiterSwapTransaction(quoteResponse, isEmergency);
     if (!swapTransactionBase64) {
         healthMonitor.setStatus('Live_Engine', '🔴 構建交易失敗'); 
         return { success: false, txid: null };
@@ -141,7 +152,6 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
         const maxTipPct = cache.max_jito_tip_pct || 0.02;
 
         let currentTip = baseTip;
-        let isEmergency = false;
         let maxBuyTipLamports = Infinity;
 
         if (action === 'BUY') {
@@ -153,14 +163,15 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
                 return { success: false, txid: null };
             }
             currentTip = Math.min(p50Tip, maxBuyTipLamports);
-        } else if (action === 'SELL' && reason) {
-            if (reason.includes('瀑布') || reason.includes('硬止損') || reason.includes('崩盤') || reason.includes('拔線') || reason.includes('EXIT')) {
-                currentTip = baseTip * 4; 
-                isEmergency = true;
-            }
+        } else if (isEmergency) {
+            // 🧨 Banzai Mode: 10 倍小費強行擠入區塊
+            currentTip = baseTip * 10; 
+            console.log(`🧨 [Jito Banzai Mode] 緊急逃生！Jito 小費拉升 10 倍至 ${currentTip} Lamports!`);
+        } else if (action === 'SELL') {
+            currentTip = baseTip * 2; // 普通賣出給予 2 倍
         }
 
-        const maxRetries = isEmergency ? 4 : 3; 
+        const maxRetries = isEmergency ? 5 : 3; 
         const serializedSwapTx = transaction.serialize();
         const base58SwapTx = bs58.encode(serializedSwapTx);
         const txid = bs58.encode(transaction.signatures[0]);
@@ -188,7 +199,10 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
                 healthMonitor.setStatus('Live_Engine', `🟢 交易確認成功`); 
                 return { success: true, txid: txid }; 
             } catch (e) {
-                if (attempt < maxRetries) currentTip = currentTip * 2; 
+                if (attempt < maxRetries) {
+                    currentTip = currentTip * 1.5; // 每次失敗再加碼 1.5 倍
+                    console.log(`⚠️ [Jito Retry] 嘗試 ${attempt} 失敗，加碼小費至 ${Math.floor(currentTip)} Lamports`);
+                }
             }
         }
 

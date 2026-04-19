@@ -3,6 +3,7 @@
 // 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，連同 Shadow 表一起檢查，徹底杜絕同幣重複買入！
 // 🛡️ 記憶體修復：解決 AI Watchdog 觸發 SELL_HALF 時，RAM 記憶體未相應減半導致重複賣出全倉的問題。
 // 👑 API 霸體：每次 Call DexScreener 前設定 Redis DEXSCREENER_LOCK，迫使 Shadow 任務讓路。
+// 🔒 安全升級：加入 LLM Hard-Fail 防禦，當 AI 資源池異常時強行拉高 threshold，拒絕盲買。
 
 require('dotenv').config();
 const express = require('express');
@@ -506,6 +507,8 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         
         let llmScore = 0;
         let llmReason = "LLM 未啟用";
+        let llmFailed = false; // 🚀 記錄 LLM 是否崩潰
+
         try {
             console.log(`   - 🧠 [LLM Consensus] 發起 ${symbol} 的敘事潛力會議...`);
             
@@ -522,7 +525,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             llmScore = llmResult.narrative_score || 0;
             llmReason = llmResult.reason || "無解釋";
         } catch (e) {
-            console.warn(`   - ⚠️ [LLM Down] 敘事分析失敗，跳過 LLM 加減分。`);
+            console.warn(`   - ⚠️ [LLM Down] 敘事分析失敗，觸發 LLM Hard-Fail 標記。`);
+            llmFailed = true; // 🚀 標記異常
+            llmReason = "LLM 資源池全線異常";
         }
 
         const finalScore = quantScore + mlScore + llmScore;
@@ -545,6 +550,12 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             }
         } catch(e) {
             console.warn(`⚠️ [Frontline] 讀取動態及格線失敗，使用預設防守線 70 分`);
+        }
+
+        // 🚀 LLM 盲買防禦：若 LLM 瓜咗，強行將門檻推高到天際，拒絕下單！
+        if (llmFailed) {
+            console.log(`🛑 [Hard-Fail 防禦] 偵測到 LLM 異常，強行將 Buy Threshold 從 ${buyThreshold} 提升至 999，阻截盲買風險！`);
+            buyThreshold = 999;
         }
 
         console.log(`⚖️ [Final Verdict] ${symbol} 總分: ${finalScore} / 100 (及格線: ${buyThreshold})`);

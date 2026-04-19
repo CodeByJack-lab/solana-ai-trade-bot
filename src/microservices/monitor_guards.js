@@ -2,7 +2,7 @@
 // 📝 檔案功能用途：V10.34 【護盤鐵衛】微服務 (Microservice Core)
 // 🚀 核心升級：O(1) 無迴圈運算、事件驅動觸發 AI Watchdog、完整繼承 V9 神風逃生艙與硬止損。
 // 👻 幽靈殺手：全面將神風逃生艙的 DB 刪除條件由 mint_address 改為精準的 id，配合 Incremental RAM 徹底防復活。
-// 🚦 API 讓路：Shadow 查價前會檢查 DEXSCREENER_LOCK，若 Main Bot 佔用則強制等待 10 秒 (隱藏 Log 防洗版)。
+// ✂️ 動態止損：實裝 Dynamic Time-Stop，偵測到早期動能衰退立即提早斬纜，改善資金利用率。
 
 require('dotenv').config();
 const Redis = require('ioredis');
@@ -264,7 +264,7 @@ setInterval(() => {
 }, 60 * 1000); 
 
 // ------------------------------------------------------------------
-// 7. 主動清道夫 (Zombie Sweeper) - 僅清理真/模擬倉
+// 7. 主動清道夫 (Zombie Sweeper) - 僅清理真/模擬倉 (加入 Dynamic Time-Stop)
 // ------------------------------------------------------------------
 setInterval(async () => {
     if (!globalConfig.is_running) return;
@@ -302,12 +302,35 @@ setInterval(async () => {
             
             const timeStopLimit = pos.strategy_type?.includes('TRENDING') ? dynamicAgeTrending : dynamicAgeMeme; 
             
-            if (ageMins >= timeStopLimit && pnlPct < requiredPnlPct) {
+            let shouldTimeStop = false;
+            let stopReason = '';
+
+            // 🚀 動態提早斬纜 (Dynamic Time-Stop): Weed out the weak
+            const state = guard_states.get(pos.mint_address);
+            if (ageMins >= 10 && ageMins < timeStopLimit && pnlPct < -5.0 && state) {
+                const vwap = state.getVWAP();
+                const cvd = state.getCVD();
+                const isBelowVWAP = vwap > 0 && currentPrice < vwap * 0.95;
+
+                // 若買入超過 10 分鐘，依然浮虧大於 5%，且 (大戶資金淨流出 或 跌穿 VWAP 5% 以上)
+                if (cvd < 0 || isBelowVWAP) {
+                    shouldTimeStop = true;
+                    stopReason = `✂️ Dynamic Time-Stop: 早期動能衰退，提早斬纜 (持有 ${Math.floor(ageMins)}m)`;
+                }
+            }
+
+            // ⏱️ 常規 Time-Stop (原有死板邏輯)
+            if (!shouldTimeStop && ageMins >= timeStopLimit && pnlPct < requiredPnlPct) {
+                shouldTimeStop = true;
+                stopReason = `⏱️ Time-Stop: 超時未達標`;
+            }
+            
+            if (shouldTimeStop) {
                 const lockKey = `sell_lock:${pos.mint_address}`;
                 const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX');
                 if (acquired) {
-                    console.log(`🧹 [Zombie Sweeper] ${pos.token_symbol} 滯留過久，無差別清倉！`);
-                    const sold = await runSellPipeline(pos, currentPrice, `⏱️ Time-Stop: 超時未達標`, 1.0);
+                    console.log(`🧹 [Zombie Sweeper] ${pos.token_symbol} 觸發清倉: ${stopReason}`);
+                    const sold = await runSellPipeline(pos, currentPrice, stopReason, 1.0);
                     
                     if (sold) { 
                         guard_states.delete(pos.mint_address); 
