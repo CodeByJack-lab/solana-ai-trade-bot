@@ -1,6 +1,6 @@
 # ml_engine/main.py
-# 📝 檔案功能用途：V10.26 【Python 雙塔融合智腦】 (Microservice Core)
-# 🚀 核心升級：配合 V10.25 三權分立架構，ML 權重滿分上調至 70 分。
+# 📝 檔案功能用途：V10.27 【Python 雙塔融合智腦】 (Microservice Core)
+# 🚀 核心升級：實裝「真・雙塔模型分家」，將 NEWBORN 與 TRENDING 的訓練數據與模型徹底隔離 (.pkl)。
 # 🛡️ 數據防護：加入 np.inf 洗刷機制，絕對防止 Random Forest 被 Infinity 搞崩潰。
 # 💊 治癒升級：引入 class_weight="balanced" 及「成交量」第三特徵維度，徹底根治模型預測抑鬱症。
 # 🧠 全權接管：拆除所有物理參數 Hardcode，從 Redis Array 讀取舊值並進行動態 EMA 進化。
@@ -32,7 +32,10 @@ from sklearn.tree import DecisionTreeClassifier
 SUPABASE_URL = os.getenv("NEXT_PUBLIC_SUPABASE_URL") or os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("NEXT_PUBLIC_SUPABASE_ANON_KEY")
 REDIS_URL = os.getenv("REDIS_PUBLIC_URL") or os.getenv("REDIS_URL") or "redis://localhost:6379"
-MODEL_PATH = "/tmp/v10_rf_model.pkl"
+
+# 🚀 升級：雙塔模型獨立儲存路徑
+MODEL_PATH_NEWBORN = "/tmp/v10_rf_model_newborn.pkl"
+MODEL_PATH_TRENDING = "/tmp/v10_rf_model_trending.pkl"
 
 # Telegram 環境變數
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_MAIN_BOT_TOKEN") or os.getenv("MAIN_BOT_TOKEN")
@@ -71,7 +74,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=background_scheduler, daemon=True).start()
     yield 
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.26", lifespan=lifespan)
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.27", lifespan=lifespan)
 
 # ------------------------------------------------------------------
 # 2. 即時推論端點
@@ -103,14 +106,18 @@ async def predict_score(req: PredictRequest):
     ofi = (f.b - f.s) / total_tx if total_tx > 0 else 0
 
     survival_prob = 0.5 
-    if os.path.exists(MODEL_PATH):
+    
+    # 🚀 升級：根據來源類型讀取對應的專屬模型
+    target_model_path = MODEL_PATH_NEWBORN if "NEWBORN" in req.type.upper() else MODEL_PATH_TRENDING
+
+    if os.path.exists(target_model_path):
         try:
-            rf_model = joblib.load(MODEL_PATH)
+            rf_model = joblib.load(target_model_path)
             # 💊 治癒升級：推論時也必須加入成交量特徵 (f.v)
             X_live = pd.DataFrame([[ofi, f.l, f.v]], columns=['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd'])
             survival_prob = rf_model.predict_proba(X_live)[0][1]
         except Exception as e:
-            print(f"⚠️ [Predict] 模型推論異常: {e}")
+            print(f"⚠️ [Predict] 模型推論異常 ({req.type}): {e}")
 
     news_score = 0
     env_str = redis_client.get("global_env_state")
@@ -219,6 +226,7 @@ def execute_evolution_pipeline():
         df['entry_ofi'] = pd.to_numeric(df['entry_ofi'], errors='coerce').fillna(0)
         df['entry_liquidity_usd'] = pd.to_numeric(df['entry_liquidity_usd'], errors='coerce').fillna(0)
         df['entry_volume_5m_usd'] = pd.to_numeric(df.get('entry_volume_5m_usd', df.get('entry_volume_5m', 0)), errors='coerce').fillna(0)
+        df['strategy_version'] = df.get('strategy_version', pd.Series('UNKNOWN', index=df.index)).fillna('UNKNOWN').astype(str)
         
         df.replace([np.inf, -np.inf], 0, inplace=True)
         
@@ -250,7 +258,8 @@ def execute_evolution_pipeline():
                                 .replace('Txs5m', 'min_txs_5m')\
                                 .replace('AvgTradeUsd', 'min_avg_trade_usd')\
                                 .replace('Turnover5m', 'max_turnover_5m')\
-                                .replace('VolReq', 'zombie_vol_req')
+                                .replace('VolReq', 'zombie_vol_req')\
+                                .replace('CvdUsd', 'min_cvd_usd')
                     return float(item.get(db_key, fallback))
             return fallback
 
@@ -281,8 +290,9 @@ def execute_evolution_pipeline():
                 o_avg = find_old(t, c, 'AvgTradeUsd', 15.0)
                 o_turn = find_old(t, c, 'Turnover5m', 1.5)
                 o_zomb = find_old(t, c, 'VolReq', 1200)
+                o_cvd = find_old(t, c, 'CvdUsd', 0.0)
 
-                n_thresh = round(evolve_param(o_thresh, o_thresh + threshold_target_offset, ema_alpha, 50, 75))
+                n_thresh = round(evolve_param(o_thresh, o_thresh + threshold_target_offset, ema_alpha, 50, 80))
                 n_ofi = round(evolve_param(o_ofi, win_ofi_p15, ema_alpha, -0.6, 0.4), 2)
                 n_zomb = round(evolve_param(o_zomb, win_vol_p15, ema_alpha, 500, 8000))
 
@@ -294,7 +304,8 @@ def execute_evolution_pipeline():
                     "min_txs_5m": o_txs,
                     "min_avg_trade_usd": o_avg,
                     "max_turnover_5m": o_turn,
-                    "zombie_vol_req": n_zomb
+                    "zombie_vol_req": n_zomb,
+                    "min_cvd_usd": o_cvd
                 })
         
         new_sl = max(-25.0, min(-10.0, float(np.average(losing_df['realized_pnl_pct'], weights=losing_df['w_time']) * 1.2))) if not losing_df.empty else -15.0
@@ -328,35 +339,42 @@ def execute_evolution_pipeline():
                 }).eq('token_type', p['token_type']).eq('market_climate', p['market_climate']).execute()
             except Exception: pass
 
-        is_rf_trained = False
-        if len((df['realized_pnl_pct'] > 0).unique()) > 1:
-            n_est = int(params.get('rf_n_estimators', 100))
-            m_depth = int(params.get('rf_max_depth', 5))
-            # 💊 治癒升級：引入 class_weight="balanced" 強制對沖樣本失衡
-            rf = RandomForestClassifier(n_estimators=n_est, max_depth=m_depth, random_state=42, n_jobs=1, class_weight="balanced")
-            
-            # 💊 治癒升級：訓練時加入成交量特徵 ['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']
-            rf.fit(df[['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']], (df['realized_pnl_pct'] > 0).astype(int), sample_weight=df['w_time'])
-            joblib.dump(rf, MODEL_PATH)
-            is_rf_trained = True
+        # 🚀 升級：將 DataFrame 斬開為 NEWBORN 與 TRENDING 獨立陣營
+        df_newborn = df[df['strategy_version'].str.contains('NEWBORN', na=False, case=False)]
+        df_trending = df[df['strategy_version'].str.contains('TRENDING', na=False, case=False)]
+
+        def train_model_if_valid(train_df, path):
+            if len((train_df['realized_pnl_pct'] > 0).unique()) > 1:
+                n_est = int(params.get('rf_n_estimators', 100))
+                m_depth = int(params.get('rf_max_depth', 5))
+                rf = RandomForestClassifier(n_estimators=n_est, max_depth=m_depth, random_state=42, n_jobs=1, class_weight="balanced")
+                rf.fit(train_df[['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']], (train_df['realized_pnl_pct'] > 0).astype(int), sample_weight=train_df['w_time'])
+                joblib.dump(rf, path)
+                return True
+            return False
+
+        is_nb_trained = train_model_if_valid(df_newborn, MODEL_PATH_NEWBORN)
+        is_tr_trained = train_model_if_valid(df_trending, MODEL_PATH_TRENDING)
 
         y_toxic = (df['realized_pnl_pct'] <= -15).astype(int)
         if len(y_toxic.unique()) > 1:
-            # 💊 治癒升級：黑名單規則也要看成交量維度
             extract_and_save_toxic_clusters(df[['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']], y_toxic)
 
         print(f"✅ [Baseline Engine] 全管線更新完畢")
         
-        rf_status = "已重新訓練" if is_rf_trained else "跳過 (無雙向結果)"
+        nb_status = "✅ 成功" if is_nb_trained else "⚠️ 樣本不足跳過"
+        tr_status = "✅ 成功" if is_tr_trained else "⚠️ 樣本不足跳過"
+        
         report_msg = (
-            f"🧠 <b>【V10 ML 智腦每日進化報告】</b>\n\n"
+            f"🧠 <b>【V10 雙塔智腦每日進化報告】</b>\n\n"
             f"✅ <b>管線更新完畢</b>\n"
             f"📊 <b>近期 14 日勝率:</b> {recent_win_rate*100:.1f}%\n"
             f"📝 <b>訓練樣本數:</b> {total_trades_count} 筆\n"
-            f"🎯 <b>門檻微調 (破冰補償):</b> {threshold_target_offset} 分\n"
-            f"🌲 <b>Random Forest:</b> {rf_status} (已開啟 Balanced 模式)\n"
+            f"🎯 <b>門檻微調 (破冰):</b> {threshold_target_offset} 分\n"
+            f"🌲 <b>RF Newborn 塔:</b> {nb_status}\n"
+            f"🌲 <b>RF Trending 塔:</b> {tr_status}\n"
             f"📈 <b>維度升級:</b> 已注入成交量數據 (Volume 5m)\n\n"
-            f"🤖 <i>系統已將新參數寫入資料庫，前線獵人已熱更新。</i>"
+            f"🤖 <i>系統已將雙塔參數寫入資料庫，前線獵人已熱更新。</i>"
         )
         send_telegram_channel_alert(report_msg)
 

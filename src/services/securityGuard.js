@@ -1,5 +1,5 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V10.18 量化安檢中樞 (全自動 ML 參數接管版 - 三權分立之第一權)
+// 📝 檔案功能用途：V10.40 量化安檢中樞 (全自動 ML 參數接管版 - 三權分立之第一權)
 // 🚀 升級功能：加入 ML 動態參數接收器，實現真正 AI 驅動。分數重構為 0-20 物理安全及格線，為 ML 騰出 60 分龐大計分空間。
 // 🛡️ 終極修復：加入 preFetchedData 綠色通道，完美解決與前線批次查價的 DexScreener 429 API 撞車問題。
 // 💰 CVD 淨流防禦：實裝偽 CVD (Cumulative Volume Delta) 估算法，防禦大戶左手交右手之假 OFI 陷阱。
