@@ -1,11 +1,10 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.38 【獵人中樞】微服務 (Microservice Core) - 完整升級版
-// 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，連同 Shadow 表一起檢查，徹底杜絕同幣重複買入！
-// 🛡️ 記憶體修復：解決 AI Watchdog 觸發 SELL_HALF 時，RAM 記憶體未相應減半導致重複賣出全倉的問題。
-// 👑 API 霸體：每次 Call DexScreener 前設定 Redis DEXSCREENER_LOCK，迫使 Shadow 任務讓路。
-// 🔒 安全升級：加入 LLM Hard-Fail 防禦，當 AI 資源池異常時強行拉高 threshold，拒絕盲買。
-// ✨ 敘事特赦：總分差 1-2 分及格時，若 LLM 評分 >= 3，加送 3 分保送過關。
-// 🎯 動態風控：買入成功後，將專屬 stop_loss_pct 與 trailing_tp_trigger 寫入 Redis 供 Monitor 讀取。
+// 📝 檔案功能用途：V10.39 【獵人中樞】微服務 (Microservice Core) - 完整升級版
+// 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，徹底杜絕同幣重複買入！
+// 🚀 極速出車：將 Newborn 保溫箱由 5 分鐘等死機制，改為 15 秒光速出車，適配 Pump.fun 閃電戰 Meta！
+// 🛡️ 記憶體修復：解決 AI Watchdog 觸發 SELL_HALF 時的 OOM 隱患。
+// 🔒 安全升級：加入 LLM Hard-Fail 防禦與 Narrative Override (敘事特赦)。
+// 🛠️ Bug Fix：修正 Supabase insert 無法使用 .catch 導致漏斗崩潰的問題。
 
 require('dotenv').config();
 const express = require('express');
@@ -14,7 +13,6 @@ const crypto = require('crypto');
 const axios = require('axios');
 const { createClient } = require('@supabase/supabase-js'); 
 
-// 載入 V10 底層模組
 const { getPortfolio, initPortfolio, canBuyMeme, canBuyTrending } = require('../services/portfolioService');
 const { securityGuard } = require('../services/securityGuard'); 
 const { consensusService } = require('../services/consensusService'); 
@@ -26,9 +24,6 @@ const { keyRotator } = require('../services/keyRotator');
 const { cacheManager } = require('../services/cacheManager');
 const { healthMonitor } = require('../services/healthMonitor');
 
-// ------------------------------------------------------------------
-// 1. 初始化與全域防禦變數
-// ------------------------------------------------------------------
 const app = express();
 app.use(express.json());
 app.use('/', walletMonitorRouter);
@@ -61,9 +56,6 @@ async function syncBrandBlacklist() {
 syncBrandBlacklist(); 
 setInterval(syncBrandBlacklist, 30000); 
 
-// ------------------------------------------------------------------
-// 2. 時光倒流護盾 & 訊號接收
-// ------------------------------------------------------------------
 redisSub.subscribe('price_updates', 'trending_signal'); 
 redisSub.on('message', (channel, message) => {
     if (channel === 'price_updates') {
@@ -134,12 +126,11 @@ watchdogSub.on('message', async (channel, message) => {
                                 const idx = portfolio.positions.findIndex(p => p.mint_address === mint);
                                 if (idx > -1) portfolio.positions.splice(idx, 1);
                             } else {
-                                // 🚀 記憶體同步修復：更新 RAM 的數量和狀態，防止下次當全倉賣
                                 pos.quantity = pos.quantity * 0.5;
                                 pos.strategy_type = pos.strategy_type + '_HALF_SOLD';
                             }
                         } else {
-                            await redisClient.del(lockKey); // 失敗才解鎖，等下次體檢重試
+                            await redisClient.del(lockKey);
                         }
                     }
                 }
@@ -150,9 +141,6 @@ watchdogSub.on('message', async (channel, message) => {
     }
 });
 
-// ------------------------------------------------------------------
-// 3. 🚨 OOM 防禦：記憶體清道夫
-// ------------------------------------------------------------------
 setInterval(() => {
     const now = Date.now();
     let cleanedCount = 0;
@@ -167,9 +155,6 @@ setInterval(() => {
     if (cleanedCount > 0) console.log(`🧹 [Garbage Collector] 已釋放 ${cleanedCount} 隻過期代幣的 RAM 緩存。`);
 }, 60 * 1000); 
 
-// ------------------------------------------------------------------
-// 4. DEFCON 6 秒接管 (單幣撤池防禦 + DexScreener 30秒冷卻版)
-// ------------------------------------------------------------------
 const token_strike_count = new Map(); 
 const token_last_dex_check_ts = new Map(); 
 
@@ -285,9 +270,6 @@ function runLayer1PhysicalFilter(symbol) {
     return true;
 }
 
-// ------------------------------------------------------------------
-// 5. Webhook 與保溫箱 (V10.3 批次查價防 429)
-// ------------------------------------------------------------------
 app.post('/webhook/radar', (req, res) => {
     res.status(200).send('OK'); 
     setImmediate(async () => {
@@ -298,7 +280,7 @@ app.post('/webhook/radar', (req, res) => {
             if (!runLayer1PhysicalFilter(symbol)) return; 
             symbol_cache.set(payload.mint, symbol);
             
-            console.log(`\n🐺 [Frontline Webhook] 接收到 NEWBORN 訊號: ${symbol}，寫入 DB 保溫箱 (進入 5 分鐘試煉)！`);
+            console.log(`\n🐺 [Frontline Webhook] 接收到 NEWBORN 訊號: ${symbol}，寫入 DB 保溫箱 (進入 15 秒光速試煉)！`);
             
             await supabase.from('newborn_incubator').upsert([
                 { 
@@ -318,27 +300,27 @@ setInterval(async () => {
     if (!globalConfig.is_running) return;
 
     try {
-        const fiveMinsAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+        const incubationTimeAgo = new Date(Date.now() - 15 * 1000).toISOString();
         
         const { data: candidates, error } = await supabase
             .from('newborn_incubator')
             .select('*')
             .eq('status', 'INCUBATING')
-            .lt('created_at', fiveMinsAgo)
+            .lt('created_at', incubationTimeAgo)
             .order('created_at', { ascending: true });
 
         if (error || !candidates || candidates.length === 0) return;
 
-        const sixMinsAgoTs = Date.now() - 6 * 60 * 1000;
+        const hardTimeoutTs = Date.now() - 30 * 1000;
         const oldestTokenTs = new Date(candidates[0].created_at).getTime();
-        const isTimeoutReached = oldestTokenTs <= sixMinsAgoTs;
+        const isTimeoutReached = oldestTokenTs <= hardTimeoutTs;
 
         let tokensToProcess = [];
 
         if (candidates.length >= 20) {
             if (isTimeoutReached) {
                 tokensToProcess = candidates;
-                console.log(`\n⏱️ [Incubator] 觸發 1 分鐘出車極限！共有 ${tokensToProcess.length} 隻歷經試煉的幣準備查價...`);
+                console.log(`\n⏱️ [Incubator] 觸發 30 秒出車極限！共有 ${tokensToProcess.length} 隻歷經試煉的幣準備查價...`);
             } else {
                 const processCount = Math.floor(candidates.length / 20) * 20;
                 tokensToProcess = candidates.slice(0, processCount);
@@ -346,7 +328,7 @@ setInterval(async () => {
             }
         } else if (isTimeoutReached) {
             tokensToProcess = candidates;
-            console.log(`\n⏱️ [Incubator] 未夠 20 隻，但最舊已等滿 1 分鐘出車線！${tokensToProcess.length} 隻幣準備查價...`);
+            console.log(`\n⏱️ [Incubator] 未夠 20 隻，但最舊已等滿 30 秒出車線！${tokensToProcess.length} 隻幣準備查價...`);
         } else {
             return;
         }
@@ -417,11 +399,8 @@ setInterval(async () => {
     } catch (e) {
         console.error("❌ [Incubator Critical] 巡邏官失職:", e.message);
     }
-}, 30 * 1000);
+}, 10 * 1000); 
 
-// ------------------------------------------------------------------
-// 6. 100% 全自動狙擊漏斗 (三權分立計分版)
-// ------------------------------------------------------------------
 async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
     try {
         if (poolType === 'NEWBORN' && !canBuyMeme()) return;
@@ -466,10 +445,13 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const totalTxs = marketData.b + marketData.s;
                 const ofi = totalTxs > 0 ? (marketData.b - marketData.s) / totalTxs : 0;
                 
+                // ✅ BUG FIX: 使用 then 檢查 error，避免 catch 導致漏斗崩潰
                 supabase.from('trade_patterns').insert([{
                     mint_address: mint, token_symbol: symbol, entry_price_sol: marketData.p || 0,
                     entry_ofi: ofi, entry_liquidity_usd: marketData.l, entry_volume_5m: marketData.v, realized_pnl_pct: -100.00 
-                }]).catch(()=>{});
+                }]).then(({ error }) => {
+                    if (error) console.error(`❌ [Poison Data] 寫入失敗:`, error.message);
+                });
             }
             return;
         }
@@ -525,7 +507,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         let buyThreshold = 70; 
         let activeStrategyId = appliedMlStrategyId || 0; 
         
-        // 🚀 新增讀取動態 SL/TP
         let dynamicSL = -15.0; 
         let dynamicTP = 20.0;
 
@@ -553,7 +534,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             buyThreshold = 999;
         }
 
-        // 🚀 邊緣計分微調 (Narrative Override 敘事特赦)
         if (!llmFailed && finalScore >= buyThreshold - 2 && finalScore < buyThreshold) {
             if (llmScore >= 3) {
                 console.log(`✨ [Narrative Override] 差少少及格 (${finalScore}/${buyThreshold})，但 LLM 敘事極度睇好 (${llmScore}分)，觸發特赦 +3 分！`);
@@ -614,7 +594,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                     finalTradeAmountSol, marketData, envState, activeStrategyId, safeMultiplier
                 );
 
-                // 🚀 交易成功後，將專屬的動態 SL/TP 寫入 Redis，供 Monitor Guards 讀取
                 if (success) {
                     await redisClient.set(`pos_sl_tp:${mint}`, JSON.stringify({ sl: dynamicSL, tp: dynamicTP }), 'EX', 86400 * 3);
                     console.log(`🛡️ [Strategy Config] 已為 ${symbol} 綁定專屬止損 (${dynamicSL}%) / 止盈 (${dynamicTP}%) 參數。`);
@@ -635,14 +614,18 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                         console.log(`👻 [Shadow Route] ${symbol} 已存在於影子倉位，跳過重複寫入。`);
                     } else {
                         console.log(`👻 [Shadow Route] ${symbol} 落入影子區間，建立倉位 (供 ML 訓練用)。`);
-                        await supabase.from('active_positions_shadow').insert({
+                        
+                        // ✅ BUG FIX: 抽走 catch，改用 await 解構 error
+                        const { error: shadowErr } = await supabase.from('active_positions_shadow').insert({
                             mint_address: mint, token_symbol: symbol, strategy_type: poolType + '_SHADOW',
                             entry_price_sol: marketData.p, ai_score: finalScore, ai_reason: llmReason,
                             entry_liquidity_usd: marketData.l, entry_volume_5m_usd: marketData.v,
                             entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
                             market_climate: envState.climate,
                             applied_ml_strategy_id: activeStrategyId 
-                        }).catch(()=>{});
+                        });
+                        
+                        if (shadowErr) console.warn(`⚠️ [Shadow Route] 寫入失敗:`, shadowErr.message);
                     }
                 }
             }
@@ -700,11 +683,8 @@ burnSub.on('message', async (channel, message) => {
     }
 });
 
-// ------------------------------------------------------------------
-// 8. 啟動程序
-// ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.38 (動態 SL/TP 與敘事特赦版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.39 (Bug Fix 版) 啟動中...");
     
     await initPortfolio();
 

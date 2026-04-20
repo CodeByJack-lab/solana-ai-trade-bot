@@ -1,6 +1,7 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V10.23 純粹動態降級版 AI 議事廳
+// 📝 檔案功能用途：V10.24 純粹動態降級版 AI 議事廳 (TradFi 風控升級版)
 // 🚀 核心升級：嚴格遵守 Zero-Config 原則，模型排序 100% 由 Supabase 決定，代碼僅負責偵測異常並觸發降級。
+// 🛡️ 風控升級：精準提取 JSON 內的 bear_case_risk 與 thesis_breaker，並將其合併至最終報告，拒絕盲目 FOMO。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -67,8 +68,18 @@ class ConsensusService {
             let nScore = parseInt(aiResult.narrative_score);
             nScore = isNaN(nScore) ? 0 : Math.max(-5, Math.min(10, nScore)); 
             
-            console.log(`[Consensus] 🗣️ LLM 評分: ${nScore} 分 | 理由: ${aiResult.reason || '無解釋'}`);
-            return { narrative_score: nScore, reason: `[${aiResult.ai_signature}] ${aiResult.reason}` };
+            // 🚀 新增：提取 TradFi 風控邏輯欄位 (熊市風險/投資邏輯破壞者)
+            const riskNote = aiResult.thesis_breaker || aiResult.bear_case_risk || "未提供風險警告";
+            const coreReason = aiResult.reason || '無解釋';
+
+            console.log(`[Consensus] 🗣️ LLM 評分: ${nScore} 分`);
+            console.log(`   📝 敘事理由: ${coreReason}`);
+            console.log(`   ⚠️ 風控警告: ${riskNote}`);
+
+            // 將風險警告 merge 入 final reason，等 DB 嘅 review_history 同 TG 都有紀錄
+            const finalReason = `[${aiResult.ai_signature}] ${coreReason} | ⚠️ Risk: ${riskNote}`;
+
+            return { narrative_score: nScore, reason: finalReason };
 
         } catch (err) {
             console.warn(`⚠️ [Consensus] 鑒定異常 (全線降級失敗): ${err.message}`);
