@@ -1,11 +1,14 @@
 // src/microservices/monitor_guards.js
-// 📝 檔案功能用途：V10.40 【護盤鐵衛】微服務 (Microservice Core) - 完整升級版
+// 📝 檔案功能用途：V10.41 【護盤鐵衛】微服務 (Microservice Core) - 完整升級版
 // 🚀 核心升級：O(1) 無迴圈運算、事件驅動觸發 AI Watchdog、完整繼承 V9 神風逃生艙與硬止損。
 // 👻 幽靈殺手：全面將神風逃生艙的 DB 刪除條件由 mint_address 改為精準的 id，配合 Incremental RAM 徹底防復活。
 // ✂️ 動態止損：實裝 Dynamic Time-Stop，偵測到早期動能衰退立即提早斬纜，改善資金利用率。
 // 🎯 千人千面風控：自動讀取每隻幣專屬的 SL/TP (由 Frontline 寫入 Redis)，實現客製化止盈止損。
+// 🛠️ 併發修復：突破 Node.js 預設 10 個 TLSSocket 監聽限制，解決 MaxListenersExceededWarning。
 
 require('dotenv').config();
+require('events').EventEmitter.defaultMaxListeners = 50; // 🚀 突破 Node.js 預設 TLSSocket 併發監聽限制
+
 const Redis = require('ioredis');
 const axios = require('axios');
 const { supabase } = require('../config/supabase');
@@ -461,7 +464,7 @@ setInterval(async () => {
 // 9. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.40 (獨立動態風控版) 啟動中...");
+    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.41 (極限併發版) 啟動中...");
     await initPortfolio();
     await healthMonitor.setStatus('Monitor_Guards', '🟢 鐵衛巡邏中');
 }

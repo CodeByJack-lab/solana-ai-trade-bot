@@ -1,12 +1,15 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.39 【獵人中樞】微服務 (Microservice Core) - 完整升級版
+// 📝 檔案功能用途：V10.41 【獵人中樞】微服務 (Microservice Core) - 完整升級版
 // 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，徹底杜絕同幣重複買入！
 // 🚀 極速出車：將 Newborn 保溫箱由 5 分鐘等死機制，改為 15 秒光速出車，適配 Pump.fun 閃電戰 Meta！
 // 🛡️ 記憶體修復：解決 AI Watchdog 觸發 SELL_HALF 時的 OOM 隱患。
 // 🔒 安全升級：加入 LLM Hard-Fail 防禦與 Narrative Override (敘事特赦)。
 // 🛠️ Bug Fix：修正 Supabase insert 無法使用 .catch 導致漏斗崩潰的問題。
+// 🛠️ 併發修復：突破 Node.js 預設 10 個 TLSSocket 監聽限制，解決 MaxListenersExceededWarning。
 
 require('dotenv').config();
+require('events').EventEmitter.defaultMaxListeners = 50; // 🚀 突破 Node.js 預設 TLSSocket 併發監聽限制
+
 const express = require('express');
 const Redis = require('ioredis');
 const crypto = require('crypto');
@@ -684,7 +687,7 @@ burnSub.on('message', async (channel, message) => {
 });
 
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.39 (Bug Fix 版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.41 (極限併發版) 啟動中...");
     
     await initPortfolio();
 
