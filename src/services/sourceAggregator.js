@@ -2,6 +2,8 @@
 // 📝 檔案功能用途：V10 多路冗餘數據源聚合器。三路 WebSocket 監聽 + LP Burn 訊號發射器。
 // 🚀 V10 升級：徹底剝離交易邏輯，專心做情報雷達，經 Redis 廣播越獄信號。
 // 🚀 V10.3 修正：完美對接 newborn_incubator 資料表，並改用官方 connection 解決 RPC 抓取失敗問題。
+require('dotenv').config();
+require('events').EventEmitter.defaultMaxListeners = 50; // 🚀 突破 Node.js 預設 TLSSocket 併發監聽限制
 
 const WebSocket = require('ws');
 const axios = require('axios');

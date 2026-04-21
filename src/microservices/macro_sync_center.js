@@ -3,6 +3,7 @@
 // 🚀 核心升級：實裝 Supabase Realtime 全域記憶體校準 (RAM Sync)，徹底消滅幽靈倉位。
 
 require('dotenv').config();
+require('events').EventEmitter.defaultMaxListeners = 50;
 const { createClient } = require('@supabase/supabase-js');
 const Redis = require('ioredis');
 const axios = require('axios');

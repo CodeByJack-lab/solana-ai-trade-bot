@@ -1,5 +1,7 @@
 // src/services/telegramService.js
 // 📝 檔案功能用途：V9.2 Telegram 路由與通訊中心。純粹的「郵差」角色，負責防 429 訊息隊列 (Message Queue) 及解析 Webhook 按鈕回調並執行熱更新。
+require('dotenv').config();
+require('events').EventEmitter.defaultMaxListeners = 50;
 
 const axios = require('axios');
 const config = require('../config/config');
