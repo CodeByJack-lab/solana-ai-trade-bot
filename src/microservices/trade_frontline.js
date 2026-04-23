@@ -6,6 +6,7 @@
 // 🔒 安全升級：加入 LLM Hard-Fail 防禦與 Narrative Override (敘事特赦)。
 // 🛠️ Bug Fix：修正 Supabase insert 無法使用 .catch 導致漏斗崩潰的問題。
 // 🛠️ 併發修復：突破 Node.js 預設 10 個 TLSSocket 監聽限制，解決 MaxListenersExceededWarning。
+// 🧬 數學升級：導入 Bayesian 貝葉斯勝率融合，及 Kelly Criterion 動態注碼倍數，完全取代 Hardcode。
 
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 50; // 🚀 突破 Node.js 預設 TLSSocket 併發監聽限制
@@ -465,6 +466,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         let mlScore = 32; 
         let mlConfidenceMultiplier = 1.0; 
+        let priorProb = 0.5; // 🚀 新增：保存 ML 勝率作貝葉斯之用
         
         try {
             const mlStartTime = Date.now();
@@ -473,8 +475,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
             if (res.data && typeof res.data.win_probability === 'number') {
                 mlScore = res.data.score || 0; 
+                priorProb = res.data.win_probability; // 🚀 提取勝率
                 mlConfidenceMultiplier = res.data.confidence_multiplier || 1.0;
-                console.log(`   - 🤖 [ML Brain] 勝率預測: ${(res.data.win_probability * 100).toFixed(1)}% | 得分: ${mlScore}/70 | 注碼乘數: x${mlConfidenceMultiplier}`);
+                console.log(`   - 🤖 [ML Brain] 勝率預測: ${(priorProb * 100).toFixed(1)}% | 得分: ${mlScore}/70`);
             }
         } catch (e) {
             console.warn(`   - ⚠️ [ML Brain] 離線或超時，無法獲取勝率預測 (給予預設 32 分)`);
@@ -506,7 +509,35 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             llmReason = "LLM 資源池全線異常";
         }
 
-        let finalScore = quantScore + mlScore + llmScore;
+        // ---------------------------------------------------------
+        // 🚀 V10.45 終極數學引擎：Bayesian 融合 + Kelly 倍數注碼
+        // ---------------------------------------------------------
+        
+        // 1. 貝葉斯更新 (Bayesian Updating) 代替暴力加減數
+        const priorOdds = priorProb / (1 - priorProb);
+        let bayesFactor = 1.0;
+        if (llmScore >= 8) bayesFactor = 2.0;       // 極強敘事，賠率翻倍
+        else if (llmScore >= 5) bayesFactor = 1.5;  // 優秀敘事
+        else if (llmScore < 0) bayesFactor = 0.5;   // 垃圾敘事，賠率劈半
+        else if (llmScore <= -3) bayesFactor = 0.2; // 災難敘事
+
+        const posteriorOdds = priorOdds * bayesFactor;
+        const finalWinProb = posteriorOdds / (1 + posteriorOdds); // 最終真實勝率
+        
+        // 將勝率還原成 0-100 的分數格式，以完美兼容舊系統的買入及格線邏輯
+        let finalScore = Math.round(finalWinProb * 100);
+
+        // 2. 凱利公式倍數計算 (Kelly Multiplier)
+        let kellyBRatio = 2.0; 
+        try {
+            const mlStr = await redisClient.get('cache:dynamic_scoring_model');
+            if (mlStr) kellyBRatio = JSON.parse(mlStr).kelly_b_ratio || 2.0;
+        } catch(e) {}
+
+        const fStar = finalWinProb - ((1 - finalWinProb) / kellyBRatio);
+        const safeKelly = Math.max(0, fStar * 0.25); // Quarter-Kelly 防爆倉
+        let kellyMultiplier = Math.max(0.1, Math.min(safeKelly / 0.05, 3.0)); // 倍數限制在 0.1x ~ 3.0x
+
         let buyThreshold = 70; 
         let activeStrategyId = appliedMlStrategyId || 0; 
         
@@ -537,6 +568,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             buyThreshold = 999;
         }
 
+        // ✅ 完美保留敘事特赦邏輯
         if (!llmFailed && finalScore >= buyThreshold - 2 && finalScore < buyThreshold) {
             if (llmScore >= 3) {
                 console.log(`✨ [Narrative Override] 差少少及格 (${finalScore}/${buyThreshold})，但 LLM 敘事極度睇好 (${llmScore}分)，觸發特赦 +3 分！`);
@@ -545,7 +577,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             }
         }
 
-        console.log(`⚖️ [Final Verdict] ${symbol} 總分: ${finalScore} / 100 (及格線: ${buyThreshold})`);
+        console.log(`⚖️ [Final Verdict] ${symbol} 貝葉斯最終分: ${finalScore} / 100 (及格線: ${buyThreshold})`);
 
         if (finalScore >= buyThreshold) {
             let maxPositions = poolType === 'NEWBORN' ? 4 : 8; 
@@ -586,15 +618,21 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                     return;
                 }
 
-                console.log(`🎯 [TRIGGER] 總分達標 (${finalScore} >= ${buyThreshold})！授權開火！`);
+                // 🚀 替換為 Kelly 注碼
+                const finalTradeAmountSol = parseFloat((baseAmount * kellyMultiplier).toFixed(3));
                 
-                const safeMultiplier = Math.max(0.5, Math.min(2.0, mlConfidenceMultiplier));
-                const finalTradeAmountSol = parseFloat((baseAmount * safeMultiplier).toFixed(3));
+                // Kelly 安全網：如果算出來過低，放棄交易
+                if (finalTradeAmountSol < 0.01) {
+                    console.log(`🛑 [Kelly Reject] 凱利公式建議注碼極低 (${finalTradeAmountSol} SOL)，強行放棄交易！`);
+                    return;
+                }
+
+                console.log(`🎯 [TRIGGER] 總分達標！授權開火！(Kelly倍數: ${kellyMultiplier.toFixed(2)}x, 總額: ${finalTradeAmountSol} SOL)`);
                 
                 const success = await executeBuy(
                     mint, symbol, poolType, finalScore, 
-                    `🤖 三權決策 (Q:${quantScore} + M:${mlScore} + L:${llmScore}) | LLM: ${llmReason}`, 
-                    finalTradeAmountSol, marketData, envState, activeStrategyId, safeMultiplier
+                    `🤖 貝葉斯決策 (Q:${quantScore} + M:${(finalWinProb*100).toFixed(0)}%) | LLM: ${llmReason}`, 
+                    finalTradeAmountSol, marketData, envState, activeStrategyId, kellyMultiplier // 替換為 Kelly
                 );
 
                 if (success) {
@@ -687,7 +725,7 @@ burnSub.on('message', async (channel, message) => {
 });
 
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.41 (極限併發版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.45 (極限數學引擎版) 啟動中...");
     
     await initPortfolio();
 
@@ -719,7 +757,7 @@ async function bootstrap() {
     });
     sourceAggregator.start();
     
-    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中 (養蠱試煉版)');
+    await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中 (數學完全體)');
 }
 
 bootstrap();

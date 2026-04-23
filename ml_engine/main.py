@@ -3,6 +3,7 @@
 # 🚀 核心升級：實裝「進化追蹤器 (Changelog Tracker)」，每日 Telegram 報告將詳細列出 SL/TP、及格線與 OFI 的變更對比。
 # 🚀 架構升級：實裝「真・雙塔模型分家」，將 NEWBORN 與 TRENDING 的訓練數據與模型徹底隔離 (.pkl)。
 # 💧 流動性聯動：將 min_liquidity_usd 納入 EMA 進化與讀取機制。
+# 💰 數學引擎：實裝 Kelly B-Ratio (大數據盈虧比) 計算，供前線計算凱利倍數。
 
 import os
 import json
@@ -256,7 +257,15 @@ def execute_evolution_pipeline():
         final_sl = evolve_param(old_sl, new_sl, ema_alpha, -25.0, -10.0)
         final_tp = evolve_param(old_tp, new_tp, ema_alpha, 15.0, 40.0)
 
-        redis_client.set("cache:dynamic_scoring_model", json.dumps({"dynamic_sl": final_sl, "dynamic_tp_trigger": final_tp, "base_math_score": params.get('base_math_score', 50)}))
+        # 🚀 核心新增：計算 Kelly B-Ratio 大數據盈虧比
+        kelly_b_ratio = abs(final_tp / final_sl) if final_sl != 0 else 2.0
+
+        redis_client.set("cache:dynamic_scoring_model", json.dumps({
+            "dynamic_sl": final_sl, 
+            "dynamic_tp_trigger": final_tp, 
+            "base_math_score": params.get('base_math_score', 50),
+            "kelly_b_ratio": kelly_b_ratio # 🚀 加入 Redis 供前線 Kelly 公式使用
+        }))
         
         for p in evolved_params_to_db:
             try: supabase.table('ml_strategy_params').update(p).eq('token_type', p['token_type']).eq('market_climate', p['market_climate']).execute()
@@ -292,6 +301,7 @@ def execute_evolution_pipeline():
             f"⚙️ <b>【參數進化追蹤 (Old ➔ New)】</b>\n"
             f"  🔸 <b>全局止損 (SL):</b> {old_sl:.1f}% ➔ {final_sl:.1f}%\n"
             f"  🔸 <b>全局止盈 (TP):</b> {old_tp:.1f}% ➔ {final_tp:.1f}%\n"
+            f"  🔸 <b>大數據盈虧比 (Kelly B):</b> {kelly_b_ratio:.2f}\n" # 🚀 Telegram 新增 Kelly B-Ratio
             + "\n".join(changelog_lines) + "\n\n"
             f"🤖 <i>系統已將雙塔參數寫入資料庫，前線獵人已熱更新。</i>"
         )
