@@ -40,9 +40,13 @@ class ConsensusService {
                 try {
                     const response = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
                         model: selectedModel,
-                        messages: [{ role: "system", content: systemPrompt }],
+                        messages: [
+                            { role: "system", content: systemPrompt },
+                            // 🚀 核心修復：強制加一個 user message，滿足 Llama 3 的 API 規範，杜絕 400 報錯
+                            { role: "user", content: "Please analyze this token now and return strictly valid JSON." }
+                        ],
                         temperature: 0.3,
-                        max_tokens: 150,
+                        max_tokens: 250, // 順手拉高少少，防 JSON 斷尾
                         response_format: { type: "json_object" }
                     }, {
                         headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
