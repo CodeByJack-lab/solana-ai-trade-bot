@@ -1,6 +1,6 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V10.29 純粹動態降級版 AI 議事廳 (全面遷移至 Mistral 版)
-// 🚀 核心升級：全面棄用 GROQ，強制將所有決策任務導向 MISTRAL 資源池。
+// 📝 檔案功能用途：V10.30 純粹動態降級版 AI 議事廳 (全面遷移 Mistral + URL 防腐版)
+// 🚀 核心升級：徹底解決 Chat 介面自動轉換 Markdown 導致 Invalid URL 的問題。
 // 🔒 安全升級：使用 Regex 正則提取 JSON，完全免疫 API 兼容性 400 報錯。
 
 const { keyRotator } = require('./keyRotator');
@@ -20,7 +20,6 @@ class ConsensusService {
             const promptConfig = cacheManager.getPromptConfig(promptId, { token_symbol: symbol, name: name });
             const systemPrompt = promptConfig.parsedPrompt;
             
-            // 🛑 核心修改：無管 DB 寫咩，強制使用 MISTRAL！
             const targetProvider = 'MISTRAL';
 
             if (!config.aiKeys[targetProvider] || config.aiKeys[targetProvider].length === 0) {
@@ -34,9 +33,11 @@ class ConsensusService {
             
             let models = Array.isArray(rawModels) && rawModels.length > 0 
                 ? rawModels 
-                : ['mistral-small-latest', 'mistral-large-latest', 'open-mistral-nemo'];
+                : ['mistral-small-2603', 'mistral-medium-2508', 'magistral-medium-2509'];
 
-            // 呼叫 keyRotator (內置全域鎖)
+            // 強制過濾，確保全部係 Mistral 模型
+            models = models.map(m => m.toLowerCase().includes('stral') ? m : 'mistral-small-2603');
+
             const aiResult = await keyRotator.runWithKey(targetProvider, async (apiKey, retryCount) => {
                 const safeIndex = Math.min((retryCount || 0), models.length - 1);
                 const selectedModel = models[safeIndex];
@@ -44,7 +45,10 @@ class ConsensusService {
                 console.log(`🤖 [Consensus] 呼叫 Mistral: ${selectedModel}`);
 
                 try {
-                    const response = await axios.post('https://api.mistral.ai/v1/chat/completions', {
+                    // 🛡️ 核心防腐：URL 切件，杜絕 Invalid URL 報錯
+                    const mistralUrl = ['https', '://', 'api.mistral.ai/v1/chat/completions'].join('');
+                    
+                    const response = await axios.post(mistralUrl, {
                         model: selectedModel,
                         messages: [
                             { role: "system", content: systemPrompt },
@@ -60,7 +64,6 @@ class ConsensusService {
                     const content = response.data.choices[0]?.message?.content;
                     if (!content || content.trim() === '') throw new Error('EMPTY_RESPONSE');
 
-                    // Regex 夾硬抽出 JSON
                     let cleanJsonString = content;
                     const jsonMatch = content.match(/\{[\s\S]*\}/);
                     if (jsonMatch) cleanJsonString = jsonMatch[0];
