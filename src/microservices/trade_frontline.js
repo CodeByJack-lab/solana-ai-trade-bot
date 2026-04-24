@@ -1,5 +1,5 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.41 【獵人中樞】微服務 (Microservice Core) - 完整升級版
+// 📝 檔案功能用途：V10.46 【獵人中樞】微服務 (Microservice Core) - 零影子淨化版
 // 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，徹底杜絕同幣重複買入！
 // 🚀 極速出車：將 Newborn 保溫箱由 5 分鐘等死機制，改為 15 秒光速出車，適配 Pump.fun 閃電戰 Meta！
 // 🛡️ 記憶體修復：解決 AI Watchdog 觸發 SELL_HALF 時的 OOM 隱患。
@@ -7,6 +7,7 @@
 // 🛠️ Bug Fix：修正 Supabase insert 無法使用 .catch 導致漏斗崩潰的問題。
 // 🛠️ 併發修復：突破 Node.js 預設 10 個 TLSSocket 監聽限制，解決 MaxListenersExceededWarning。
 // 🧬 數學升級：導入 Bayesian 貝葉斯勝率融合，及 Kelly Criterion 動態注碼倍數，完全取代 Hardcode。
+// ✂️ 邏輯精簡：徹底拔除 Shadow Route (影子倉位) 寫入與查詢，釋放系統效能，確保大數據純粹性。
 
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 50; // 🚀 突破 Node.js 預設 TLSSocket 併發監聽限制
@@ -415,15 +416,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         const portfolio = getPortfolio();
         const isHoldingMain = portfolio.positions && portfolio.positions.some(p => p.mint_address === mint);
         
-        const { data: shadowData } = await supabase
-            .from('active_positions_shadow')
-            .select('id')
-            .eq('mint_address', mint)
-            .limit(1);
-        const isHoldingShadow = shadowData && shadowData.length > 0;
-
-        if (isHoldingMain || isHoldingShadow) {
-            console.log(`⚠️ [Frontline] 發現已持有倉位 $${symbol} (Main: ${isHoldingMain}, Shadow: ${isHoldingShadow})，停止重複掃描/買入。`);
+        // ✂️ 移除查閱 Shadow DB 的邏輯
+        if (isHoldingMain) {
+            console.log(`⚠️ [Frontline] 發現已持有倉位 $${symbol}，停止重複掃描/買入。`);
             if (poolType === 'TRENDING') {
                 await supabase.from('trending_pool').delete().eq('mint_address', mint);
             }
@@ -449,7 +444,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const totalTxs = marketData.b + marketData.s;
                 const ofi = totalTxs > 0 ? (marketData.b - marketData.s) / totalTxs : 0;
                 
-                // ✅ BUG FIX: 使用 then 檢查 error，避免 catch 導致漏斗崩潰
                 supabase.from('trade_patterns').insert([{
                     mint_address: mint, token_symbol: symbol, entry_price_sol: marketData.p || 0,
                     entry_ofi: ofi, entry_liquidity_usd: marketData.l, entry_volume_5m: marketData.v, realized_pnl_pct: -100.00 
@@ -466,7 +460,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         let mlScore = 32; 
         let mlConfidenceMultiplier = 1.0; 
-        let priorProb = 0.5; // 🚀 新增：保存 ML 勝率作貝葉斯之用
+        let priorProb = 0.5; 
         
         try {
             const mlStartTime = Date.now();
@@ -475,7 +469,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
             if (res.data && typeof res.data.win_probability === 'number') {
                 mlScore = res.data.score || 0; 
-                priorProb = res.data.win_probability; // 🚀 提取勝率
+                priorProb = res.data.win_probability; 
                 mlConfidenceMultiplier = res.data.confidence_multiplier || 1.0;
                 console.log(`   - 🤖 [ML Brain] 勝率預測: ${(priorProb * 100).toFixed(1)}% | 得分: ${mlScore}/70`);
             }
@@ -513,21 +507,18 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         // 🚀 V10.45 終極數學引擎：Bayesian 融合 + Kelly 倍數注碼
         // ---------------------------------------------------------
         
-        // 1. 貝葉斯更新 (Bayesian Updating) 代替暴力加減數
         const priorOdds = priorProb / (1 - priorProb);
         let bayesFactor = 1.0;
-        if (llmScore >= 8) bayesFactor = 2.0;       // 極強敘事，賠率翻倍
-        else if (llmScore >= 5) bayesFactor = 1.5;  // 優秀敘事
-        else if (llmScore < 0) bayesFactor = 0.5;   // 垃圾敘事，賠率劈半
-        else if (llmScore <= -3) bayesFactor = 0.2; // 災難敘事
+        if (llmScore >= 8) bayesFactor = 2.0;       
+        else if (llmScore >= 5) bayesFactor = 1.5;  
+        else if (llmScore < 0) bayesFactor = 0.5;   
+        else if (llmScore <= -3) bayesFactor = 0.2; 
 
         const posteriorOdds = priorOdds * bayesFactor;
-        const finalWinProb = posteriorOdds / (1 + posteriorOdds); // 最終真實勝率
+        const finalWinProb = posteriorOdds / (1 + posteriorOdds); 
         
-        // 將勝率還原成 0-100 的分數格式，以完美兼容舊系統的買入及格線邏輯
         let finalScore = Math.round(finalWinProb * 100);
 
-        // 2. 凱利公式倍數計算 (Kelly Multiplier)
         let kellyBRatio = 2.0; 
         try {
             const mlStr = await redisClient.get('cache:dynamic_scoring_model');
@@ -535,8 +526,8 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         } catch(e) {}
 
         const fStar = finalWinProb - ((1 - finalWinProb) / kellyBRatio);
-        const safeKelly = Math.max(0, fStar * 0.25); // Quarter-Kelly 防爆倉
-        let kellyMultiplier = Math.max(0.1, Math.min(safeKelly / 0.05, 3.0)); // 倍數限制在 0.1x ~ 3.0x
+        const safeKelly = Math.max(0, fStar * 0.25); 
+        let kellyMultiplier = Math.max(0.1, Math.min(safeKelly / 0.05, 3.0)); 
 
         let buyThreshold = 70; 
         let activeStrategyId = appliedMlStrategyId || 0; 
@@ -568,7 +559,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             buyThreshold = 999;
         }
 
-        // ✅ 完美保留敘事特赦邏輯
         if (!llmFailed && finalScore >= buyThreshold - 2 && finalScore < buyThreshold) {
             if (llmScore >= 3) {
                 console.log(`✨ [Narrative Override] 差少少及格 (${finalScore}/${buyThreshold})，但 LLM 敘事極度睇好 (${llmScore}分)，觸發特赦 +3 分！`);
@@ -618,10 +608,8 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                     return;
                 }
 
-                // 🚀 替換為 Kelly 注碼
                 const finalTradeAmountSol = parseFloat((baseAmount * kellyMultiplier).toFixed(3));
                 
-                // Kelly 安全網：如果算出來過低，放棄交易
                 if (finalTradeAmountSol < 0.01) {
                     console.log(`🛑 [Kelly Reject] 凱利公式建議注碼極低 (${finalTradeAmountSol} SOL)，強行放棄交易！`);
                     return;
@@ -632,7 +620,7 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const success = await executeBuy(
                     mint, symbol, poolType, finalScore, 
                     `🤖 貝葉斯決策 (Q:${quantScore} + M:${(finalWinProb*100).toFixed(0)}%) | LLM: ${llmReason}`, 
-                    finalTradeAmountSol, marketData, envState, activeStrategyId, kellyMultiplier // 替換為 Kelly
+                    finalTradeAmountSol, marketData, envState, activeStrategyId, kellyMultiplier
                 );
 
                 if (success) {
@@ -641,35 +629,8 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 }
             }
         } else {
+            // ✂️ 拔除寫入 active_positions_shadow 的邏輯，直接乾淨利落拒絕
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
-            
-            if (finalScore >= 50 && finalScore < buyThreshold) {
-                const MAX_SHADOW_CAPACITY = 50; 
-                const { count: shadowCount } = await supabase.from('active_positions_shadow').select('*', { count: 'exact', head: true });
-
-                if (shadowCount >= MAX_SHADOW_CAPACITY) {
-                    console.log(`👻 [Shadow Route] 影子倉位已達上限 (${shadowCount}/${MAX_SHADOW_CAPACITY})，暫停收集。`);
-                } else {
-                    const { data: existingShadow } = await supabase.from('active_positions_shadow').select('id').eq('mint_address', mint).limit(1);
-                    if (existingShadow && existingShadow.length > 0) {
-                        console.log(`👻 [Shadow Route] ${symbol} 已存在於影子倉位，跳過重複寫入。`);
-                    } else {
-                        console.log(`👻 [Shadow Route] ${symbol} 落入影子區間，建立倉位 (供 ML 訓練用)。`);
-                        
-                        // ✅ BUG FIX: 抽走 catch，改用 await 解構 error
-                        const { error: shadowErr } = await supabase.from('active_positions_shadow').insert({
-                            mint_address: mint, token_symbol: symbol, strategy_type: poolType + '_SHADOW',
-                            entry_price_sol: marketData.p, ai_score: finalScore, ai_reason: llmReason,
-                            entry_liquidity_usd: marketData.l, entry_volume_5m_usd: marketData.v,
-                            entry_ofi: marketData.b && marketData.s ? (marketData.b - marketData.s) / (marketData.b + marketData.s) : 0,
-                            market_climate: envState.climate,
-                            applied_ml_strategy_id: activeStrategyId 
-                        });
-                        
-                        if (shadowErr) console.warn(`⚠️ [Shadow Route] 寫入失敗:`, shadowErr.message);
-                    }
-                }
-            }
         }
     } catch (err) {
         console.error(`❌ [Routing Error] 決策漏斗處理崩潰:`, err.message);
@@ -725,7 +686,7 @@ burnSub.on('message', async (channel, message) => {
 });
 
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.45 (極限數學引擎版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.46 (零影子淨化版) 啟動中...");
     
     await initPortfolio();
 

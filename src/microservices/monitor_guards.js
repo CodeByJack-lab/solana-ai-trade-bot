@@ -1,10 +1,11 @@
 // src/microservices/monitor_guards.js
-// 📝 檔案功能用途：V10.41 【護盤鐵衛】微服務 (Microservice Core) - 完整升級版
+// 📝 檔案功能用途：V10.42 【護盤鐵衛】微服務 (Microservice Core) - 零影子淨化版
 // 🚀 核心升級：O(1) 無迴圈運算、事件驅動觸發 AI Watchdog、完整繼承 V9 神風逃生艙與硬止損。
 // 👻 幽靈殺手：全面將神風逃生艙的 DB 刪除條件由 mint_address 改為精準的 id，配合 Incremental RAM 徹底防復活。
 // ✂️ 動態止損：實裝 Dynamic Time-Stop，偵測到早期動能衰退立即提早斬纜，改善資金利用率。
 // 🎯 千人千面風控：自動讀取每隻幣專屬的 SL/TP (由 Frontline 寫入 Redis)，實現客製化止盈止損。
 // 🛠️ 併發修復：突破 Node.js 預設 10 個 TLSSocket 監聽限制，解決 MaxListenersExceededWarning。
+// ✂️ 邏輯精簡：徹底移除無用的 Shadow (影子倉位) 巡邏邏輯，釋放系統資源。
 
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 50; // 🚀 突破 Node.js 預設 TLSSocket 併發監聽限制
@@ -374,97 +375,10 @@ setInterval(async () => {
 }, 60 * 1000);
 
 // ------------------------------------------------------------------
-// 8. 👻 專屬的影子清道夫 (每 15 分鐘慢速查價，並懂得避開 Main Bot)
-// ------------------------------------------------------------------
-setInterval(async () => {
-    if (!globalConfig.is_running) return;
-    try {
-        const { data: shadows, error } = await supabase.from('active_positions_shadow').select('*');
-        if (error || !shadows || shadows.length === 0) return;
-
-        console.log(`\n👻 [Shadow Tracker] 正在每 15 分鐘緩慢巡邏 ${shadows.length} 隻影子幣...`);
-
-        const mints = shadows.map(s => s.mint_address);
-        const priceMap = new Map();
-
-        for (let i = 0; i < mints.length; i += 30) {
-            let apiLocked = await redisClient.get('DEXSCREENER_LOCK');
-            while (apiLocked === 'MAIN_BOT') {
-                await new Promise(r => setTimeout(r, 10000));
-                apiLocked = await redisClient.get('DEXSCREENER_LOCK');
-            }
-
-            await redisClient.set('DEXSCREENER_LOCK', 'SHADOW_BOT', 'EX', 5);
-
-            const chunk = mints.slice(i, i + 30).join(',');
-            try {
-                const res = await axios.get(`https://api.dexscreener.com/latest/dex/tokens/${chunk}`, { timeout: 5000 });
-                const pairs = res.data?.pairs || [];
-                for (const p of pairs) {
-                    if (p.chainId === 'solana' && p.baseToken?.address) {
-                        const currentPrice = parseFloat(p.priceNative); 
-                        if (!priceMap.has(p.baseToken.address) || currentPrice > priceMap.get(p.baseToken.address)) {
-                            priceMap.set(p.baseToken.address, currentPrice);
-                        }
-                    }
-                }
-            } catch (err) {
-                console.warn(`⚠️ [Shadow Tracker] DexScreener 查價失敗，休息 10 秒:`, err.message);
-                await new Promise(r => setTimeout(r, 10000)); 
-            }
-            await new Promise(r => setTimeout(r, 3000));
-        }
-
-        const now = Date.now();
-        const SHADOW_MAX_AGE_MINS = 1440; 
-        let settledCount = 0;
-
-        for (const pos of shadows) {
-            const currentPrice = priceMap.get(pos.mint_address);
-            if (!currentPrice) continue;
-
-            const ageMins = pos.created_at ? (now - new Date(pos.created_at).getTime()) / 60000 : 0;
-            
-            if (currentPrice > (pos.highest_price_sol || 0)) {
-                await supabase.from('active_positions_shadow').update({ highest_price_sol: currentPrice }).eq('id', pos.id);
-            }
-
-            if (ageMins >= SHADOW_MAX_AGE_MINS) {
-                const entryPrice = pos.entry_price_sol || 0;
-                let realizedPnlPct = 0;
-                if (entryPrice > 0) realizedPnlPct = ((currentPrice - entryPrice) / entryPrice) * 100;
-
-                await supabase.from('trade_patterns').insert([{
-                    mint_address: pos.mint_address,
-                    is_shadow: true,
-                    strategy_version: pos.strategy_type || 'v10_shadow',
-                    entry_ofi: pos.entry_ofi || 0,
-                    entry_liquidity_usd: pos.entry_liquidity_usd || 0,
-                    realized_pnl_pct: realizedPnlPct,
-                    market_climate: pos.market_climate || 'UNKNOWN',
-                    entry_price_sol: entryPrice,
-                    entry_volume_5m: pos.entry_volume_5m_usd || 0,
-                    token_symbol: pos.token_symbol || 'UNKNOWN'
-                }]);
-
-                await supabase.from('active_positions_shadow').delete().eq('id', pos.id);
-                settledCount++;
-            }
-        }
-
-        if (settledCount > 0) {
-            console.log(`👻 [Shadow Tracker] 本輪成功結算 ${settledCount} 隻滿 24 小時的影子幣，寫入 ML 訓練庫！`);
-        }
-    } catch (e) {
-        console.error("❌ [Shadow Tracker] 巡邏崩潰:", e.message);
-    }
-}, 15 * 60 * 1000); 
-
-// ------------------------------------------------------------------
 // 9. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.41 (極限併發版) 啟動中...");
+    console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.42 (零影子淨化版) 啟動中...");
     await initPortfolio();
     await healthMonitor.setStatus('Monitor_Guards', '🟢 鐵衛巡邏中');
 }

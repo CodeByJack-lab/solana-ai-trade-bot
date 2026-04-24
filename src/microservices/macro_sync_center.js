@@ -1,8 +1,8 @@
 // src/microservices/macro_sync_center.js
-// 📝 檔案功能用途：V10.47 【後勤樞紐】微服務 (Microservice Core - Meme-Coin 專化版)
+// 📝 檔案功能用途：V10.48 【後勤樞紐】微服務 (Microservice Core - Meme-Coin 專化版)
 // 🚀 核心升級：實裝 Supabase Realtime 全域記憶體校準 (RAM Sync)，徹底消滅幽靈倉位。
 // 🎯 氣候改造：引入 Boredom Pump (無聊炒作效應)，以 SOL 相對強弱與 Jito Tip 主導大市評分。
-// 🛡️ 防禦升級：Mistral LLM 呼叫加入正則提取 (Regex) 防禦機制，免疫 400 Bad Request。
+// 🛡️ 防禦升級：將 enqueueRequest 改為更穩定的 runWithKey，並強制清理 URL，秒殺 Invalid URL 報錯。
 
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 50;
@@ -38,9 +38,9 @@ const parser = new Parser();
 
 const MACRO_PROVIDERS = [{ name: 'COINGECKO', keyName: 'COINGECKO_API_KEY' }, { name: 'KUCOIN', keyName: null }];
 const NEWS_PROVIDERS = [
-    { name: 'COINTELEGRAPH', type: 'RSS', url: 'https://cointelegraph.com/rss' },
-    { name: 'DECRYPT', type: 'RSS', url: 'https://decrypt.co/feed' },
-    { name: 'COINDESK', type: 'RSS', url: 'https://www.coindesk.com/arc/outboundfeeds/rss/' }
+    { name: 'COINTELEGRAPH', type: 'RSS', url: '[https://cointelegraph.com/rss](https://cointelegraph.com/rss)' },
+    { name: 'DECRYPT', type: 'RSS', url: '[https://decrypt.co/feed](https://decrypt.co/feed)' },
+    { name: 'COINDESK', type: 'RSS', url: '[https://www.coindesk.com/arc/outboundfeeds/rss/](https://www.coindesk.com/arc/outboundfeeds/rss/)' }
 ];
 
 let activeMacroIdx = 0;
@@ -139,7 +139,6 @@ function setupRealtimeListeners() {
            .on('postgres_changes', { event: '*', schema: 'public', table: 'ml_blacklist_rules' }, syncCoreConfigsToRedis)
            .on('postgres_changes', { event: '*', schema: 'public', table: 'brand_blacklist' }, syncCoreConfigsToRedis)
            .on('postgres_changes', { event: '*', schema: 'public', table: 'ml_strategy_params' }, syncCoreConfigsToRedis)
-           // 🚀 新增：監聽 DB 刪除與設定變更，連動清理 RAM
            .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'system_config', filter: 'id=eq.1' }, () => schedulePortfolioSync('System Config 變更'))
            .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'active_positions_paper' }, () => schedulePortfolioSync('Paper 倉位重置'))
            .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'active_positions_live' }, () => schedulePortfolioSync('Live 倉位重置'))
@@ -204,10 +203,10 @@ class EnvironmentCenter {
 
     async _fetchJitoCongestion() {
         try {
-            const res = await axios.get('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { timeout: 2000 });
+            const res = await axios.get('[https://bundles.jito.wtf/api/v1/bundles/tip_floor](https://bundles.jito.wtf/api/v1/bundles/tip_floor)', { timeout: 2000 });
             if (res.data && res.data.length > 0) return res.data[0].landed_tips_50th_percentile || 0.0001;
         } catch (err) {}
-        return 0.0001; // 統一轉換為較小的數值基準
+        return 0.0001; 
     }
 
     async _fetchNewsTitles() {
@@ -228,39 +227,23 @@ class EnvironmentCenter {
         return ["No breaking news available."]; 
     }
 
-    // 🚀 核心改造：完全為 Solana Meme 量身訂造的物理計分系統
     _calculateHardDataScore(metrics, jitoTip) {
         let score = 0;
         const btcChange24h = metrics.btc_change || 0;
         const solChange24h = metrics.sol_change || 0;
 
-        // A. 相對強弱 (Relative Strength) - 資金是否流入 SOL？
-        if (solChange24h > btcChange24h + 2) {
-            score += 3; // SOL 跑贏 BTC 2% 以上，資金換馬炒 SOL
-        } else if (solChange24h < btcChange24h - 3) {
-            score -= 2; // SOL 嚴重跑輸
-        }
+        if (solChange24h > btcChange24h + 2) { score += 3; } 
+        else if (solChange24h < btcChange24h - 3) { score -= 2; }
 
-        // B. 鏈上真實熱度 (Jito Tip) - 權重最大化
-        if (jitoTip > 0.005) {
-            score += 5; // 極度狂熱，大家較高 Gas 搶入局
-        } else if (jitoTip > 0.001) {
-            score += 3; // 鏈上活躍
-        } else if (jitoTip < 0.00005) {
-            score -= 2; // 鏈上死水，無人玩
-        }
+        if (jitoTip > 0.005) { score += 5; } 
+        else if (jitoTip > 0.001) { score += 3; } 
+        else if (jitoTip < 0.00005) { score -= 2; }
 
-        // C. Boredom Pump (無聊炒作效應)
-        if (Math.abs(btcChange24h) < 1.5 && jitoTip > 0.001) {
-            score += 2; // 大盤橫盤但鏈上活躍，典型土狗幣黃金時間
-        }
+        if (Math.abs(btcChange24h) < 1.5 && jitoTip > 0.001) { score += 2; }
 
-        // D. 系統性崩盤防禦 (覆巢之下無完卵)
-        if (btcChange24h < -5) {
-            score -= 5; // 真正血洗大跌時，強制扣分
-        }
+        if (btcChange24h < -5) { score -= 5; }
 
-        return Math.max(-5, Math.min(5, score)); // 鎖定在 -5 到 +5 之間
+        return Math.max(-5, Math.min(5, score)); 
     }
 
     async updateEnvironment() {
@@ -277,7 +260,6 @@ class EnvironmentCenter {
         let newsScore = 0;
         let aiReasoning = "純數降級模式 (無 AI 回應)";
 
-        // 🚀 新增：物理分數預先計算
         const hardScore = this._calculateHardDataScore(metrics, jitoP50);
 
         let mistralModels = ['mistral-small-latest', 'ministral-8b-latest', 'open-mistral-nemo'];
@@ -308,27 +290,27 @@ class EnvironmentCenter {
             .replace(/{{winRate}}/g, winRate.toFixed(1))
             .replace(/{{titles}}/g, titles.map((t, i) => `${i+1}. ${t}`).join('\n'));
 
-        // 🚀 防禦升級：強制 AI 輸出乾淨 JSON 的指令
         const enforceJsonPrompt = "CRITICAL: Output ONLY a valid JSON object. Do not include markdown formatting like ```json.";
 
         try {
-            const parsedAI = await keyRotator.enqueueRequest('MISTRAL', async (apiKey, retryCount) => {
+            // 🚀 核心防護：將 enqueueRequest 改為更純粹的 runWithKey，並明確封裝 URL 參數，秒殺 Invalid URL！
+            const parsedAI = await keyRotator.runWithKey('MISTRAL', async (apiKey, retryCount) => {
                 const currentAttempt = retryCount || 0;
                 const safeIndex = Math.min(currentAttempt, mistralModels.length - 1);
                 const selectedModel = mistralModels[safeIndex];
 
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
-                const res = await axios.post('[https://api.mistral.ai/v1/chat/completions](https://api.mistral.ai/v1/chat/completions)', {
+                const mistralUrl = 'https://api.mistral.ai/v1/chat/completions'; // 確保 URL 為乾淨字串
+                
+                const res = await axios.post(mistralUrl, {
                     model: selectedModel, 
                     messages: [
                         { role: "system", content: promptStr },
                         { role: "user", content: enforceJsonPrompt }
                     ], 
-                    // 🚀 移除 response_format 避免 API 兼容性報錯
                     temperature: 0.2
                 }, { headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' }, timeout: 15000 });
                 
-                // 🚀 正則提取 JSON
                 const textOutput = res.data.choices[0].message.content;
                 const match = textOutput.match(/\{[\s\S]*\}/);
                 if (match) return JSON.parse(match[0]);
@@ -340,7 +322,6 @@ class EnvironmentCenter {
                 currentClimate = parsedAI.climate;
             }
             if (parsedAI.news_score !== undefined) {
-                // 🚀 將物理分數與 AI 情緒分數融合
                 let aiScore = parseInt(parsedAI.news_score);
                 aiScore = isNaN(aiScore) ? 0 : aiScore;
                 newsScore = Math.max(-5, Math.min(10, aiScore + hardScore)); 
@@ -457,7 +438,7 @@ async function checkAndApply60MinFallback() {
 // 5. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.47 (Meme 專化 & JSON 防禦版) 啟動中...");
+    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.48 (Meme 專化 & 連線防彈版) 啟動中...");
     
     await initPortfolio();
     

@@ -1,7 +1,7 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V10.25 純粹動態降級版 AI 議事廳 (TradFi 風控 + JSON Regex 防彈版)
+// 📝 檔案功能用途：V10.26 純粹動態降級版 AI 議事廳 (TradFi 風控 + Groq 防呆版)
 // 🚀 核心升級：移除 Hardcode 嘅 response_format，改用 Regex 正則提取，徹底秒殺降級 400 報錯。
-// 🛡️ 風控升級：精準提取 JSON 內的 bear_case_risk 與 thesis_breaker，並將其合併至最終報告，拒絕盲目 FOMO。
+// 🛡️ 防呆攔截：自動偵測 DB 模型名稱是否錯配 (將 Mistral 派給 Groq)，並強制修正，免疫 400 Bad Request。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -22,9 +22,16 @@ class ConsensusService {
             const promptConfig = cacheManager.getPromptConfig(promptId, { token_symbol: symbol, name: name });
             const systemPrompt = promptConfig.parsedPrompt;
             
-            const models = promptConfig.models && promptConfig.models.length > 0 
+            let models = promptConfig.models && promptConfig.models.length > 0 
                 ? promptConfig.models 
                 : ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'];
+
+            // 🛑 核心防禦：如果 DB 錯配咗 Mistral 模型畀 Groq，強制修正為 Groq 支援的模型！
+            // 備註：mixtral 係開源的，Groq 支援；但 mistral/ministral 係專利的，Groq 不支援
+            if (models[0].toLowerCase().includes('mistral') && !models[0].toLowerCase().includes('mixtral')) {
+                console.warn(`⚠️ [Consensus] 偵測到 DB 配置錯亂 (將 Mistral 派畀 Groq)，強制修正為 Llama 3！`);
+                models = ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768'];
+            }
 
             const aiResult = await keyRotator.runWithKey('GROQ', async (apiKey, retryCount, providerName) => {
                 const safeIndex = Math.min((retryCount || 0), models.length - 1);
@@ -39,12 +46,10 @@ class ConsensusService {
                         model: selectedModel,
                         messages: [
                             { role: "system", content: systemPrompt },
-                            // 🚀 強化 Prompt：命令佢只准出 JSON，唔准加 markdown 廢話
                             { role: "user", content: "CRITICAL: Please analyze this token now and return strictly valid JSON. Do not include markdown formatting like ```json or any explanations." }
                         ],
                         temperature: 0.3,
                         max_tokens: 250
-                        // ❌ 核心修復：徹底刪除 response_format: { type: "json_object" }，解放模型限制！
                     }, {
                         headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
                         timeout: 5000 

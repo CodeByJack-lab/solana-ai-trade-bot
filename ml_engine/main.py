@@ -1,9 +1,10 @@
 # ml_engine/main.py
-# 📝 檔案功能用途：V10.28 【Python 雙塔融合智腦】 (Microservice Core)
+# 📝 檔案功能用途：V10.29 【Python 雙塔融合智腦】 (Microservice Core)
 # 🚀 核心升級：實裝「進化追蹤器 (Changelog Tracker)」，每日 Telegram 報告將詳細列出 SL/TP、及格線與 OFI 的變更對比。
 # 🚀 架構升級：實裝「真・雙塔模型分家」，將 NEWBORN 與 TRENDING 的訓練數據與模型徹底隔離 (.pkl)。
 # 💧 流動性聯動：將 min_liquidity_usd 納入 EMA 進化與讀取機制。
 # 💰 數學引擎：實裝 Kelly B-Ratio (大數據盈虧比) 計算，供前線計算凱利倍數。
+# ✂️ 邏輯精簡：移除 Shadow (影子倉位) 訓練權重邏輯，確保 ML 數據 100% 來自真實/紙上交易。
 
 import os
 import json
@@ -62,7 +63,7 @@ async def lifespan(app: FastAPI):
     threading.Thread(target=background_scheduler, daemon=True).start()
     yield
 
-app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.28", lifespan=lifespan)
+app = FastAPI(title="V10 Quant ML Brain (Dual-Tower)", version="1.0.29", lifespan=lifespan)
 
 class FeaturePayload(BaseModel):
     p: float = Field(..., ge=0.0)
@@ -197,8 +198,7 @@ def execute_evolution_pipeline():
         df['age_days'] = ((now_utc - df['created_at']).dt.total_seconds() / 86400.0).clip(lower=0)
         df['w_time'] = 0.5 ** (df['age_days'] / (lookback_days / 3.0)) 
 
-        df['is_shadow'] = df.get('is_shadow', pd.Series(False, index=df.index)).fillna(False).astype(bool)
-        df.loc[df['is_shadow'] == True, 'w_time'] *= 0.10
+        # ✂️ 已安全移除 df['is_shadow'] 相關嘅兩行權重扣減代碼
 
         winning_df = df[df['realized_pnl_pct'] > 0]
         losing_df = df[df['realized_pnl_pct'] < 0]
@@ -301,7 +301,7 @@ def execute_evolution_pipeline():
             f"⚙️ <b>【參數進化追蹤 (Old ➔ New)】</b>\n"
             f"  🔸 <b>全局止損 (SL):</b> {old_sl:.1f}% ➔ {final_sl:.1f}%\n"
             f"  🔸 <b>全局止盈 (TP):</b> {old_tp:.1f}% ➔ {final_tp:.1f}%\n"
-            f"  🔸 <b>大數據盈虧比 (Kelly B):</b> {kelly_b_ratio:.2f}\n" # 🚀 Telegram 新增 Kelly B-Ratio
+            f"  🔸 <b>大數據盈虧比 (Kelly B):</b> {kelly_b_ratio:.2f}\n" 
             + "\n".join(changelog_lines) + "\n\n"
             f"🤖 <i>系統已將雙塔參數寫入資料庫，前線獵人已熱更新。</i>"
         )
