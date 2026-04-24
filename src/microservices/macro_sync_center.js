@@ -1,6 +1,8 @@
 // src/microservices/macro_sync_center.js
-// 📝 檔案功能用途：V10.1 【後勤樞紐】微服務 (Microservice Core)
+// 📝 檔案功能用途：V10.47 【後勤樞紐】微服務 (Microservice Core - Meme-Coin 專化版)
 // 🚀 核心升級：實裝 Supabase Realtime 全域記憶體校準 (RAM Sync)，徹底消滅幽靈倉位。
+// 🎯 氣候改造：引入 Boredom Pump (無聊炒作效應)，以 SOL 相對強弱與 Jito Tip 主導大市評分。
+// 🛡️ 防禦升級：Mistral LLM 呼叫加入正則提取 (Regex) 防禦機制，免疫 400 Bad Request。
 
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 50;
@@ -203,9 +205,9 @@ class EnvironmentCenter {
     async _fetchJitoCongestion() {
         try {
             const res = await axios.get('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { timeout: 2000 });
-            if (res.data && res.data.length > 0) return res.data[0].landed_tips_50th_percentile || 150000;
+            if (res.data && res.data.length > 0) return res.data[0].landed_tips_50th_percentile || 0.0001;
         } catch (err) {}
-        return 150000;
+        return 0.0001; // 統一轉換為較小的數值基準
     }
 
     async _fetchNewsTitles() {
@@ -226,6 +228,41 @@ class EnvironmentCenter {
         return ["No breaking news available."]; 
     }
 
+    // 🚀 核心改造：完全為 Solana Meme 量身訂造的物理計分系統
+    _calculateHardDataScore(metrics, jitoTip) {
+        let score = 0;
+        const btcChange24h = metrics.btc_change || 0;
+        const solChange24h = metrics.sol_change || 0;
+
+        // A. 相對強弱 (Relative Strength) - 資金是否流入 SOL？
+        if (solChange24h > btcChange24h + 2) {
+            score += 3; // SOL 跑贏 BTC 2% 以上，資金換馬炒 SOL
+        } else if (solChange24h < btcChange24h - 3) {
+            score -= 2; // SOL 嚴重跑輸
+        }
+
+        // B. 鏈上真實熱度 (Jito Tip) - 權重最大化
+        if (jitoTip > 0.005) {
+            score += 5; // 極度狂熱，大家較高 Gas 搶入局
+        } else if (jitoTip > 0.001) {
+            score += 3; // 鏈上活躍
+        } else if (jitoTip < 0.00005) {
+            score -= 2; // 鏈上死水，無人玩
+        }
+
+        // C. Boredom Pump (無聊炒作效應)
+        if (Math.abs(btcChange24h) < 1.5 && jitoTip > 0.001) {
+            score += 2; // 大盤橫盤但鏈上活躍，典型土狗幣黃金時間
+        }
+
+        // D. 系統性崩盤防禦 (覆巢之下無完卵)
+        if (btcChange24h < -5) {
+            score -= 5; // 真正血洗大跌時，強制扣分
+        }
+
+        return Math.max(-5, Math.min(5, score)); // 鎖定在 -5 到 +5 之間
+    }
+
     async updateEnvironment() {
         console.log(`🌍 [Macro Center] 天文台正在採集 4D 大市氣候 (硬數據 + 新聞)...`);
         
@@ -239,6 +276,9 @@ class EnvironmentCenter {
         let currentClimate = 'CHOPPY';
         let newsScore = 0;
         let aiReasoning = "純數降級模式 (無 AI 回應)";
+
+        // 🚀 新增：物理分數預先計算
+        const hardScore = this._calculateHardDataScore(metrics, jitoP50);
 
         let mistralModels = ['mistral-small-latest', 'ministral-8b-latest', 'open-mistral-nemo'];
         let rawPrompt = `You are the Chief Macro Economist. Analyze data: BTC {{btc_change}}%, SOL {{sol_change}}%. News: {{titles}}. Output JSON: {"climate": "CHOPPY", "news_score": 0, "reasoning": "..."}`;
@@ -264,9 +304,12 @@ class EnvironmentCenter {
             .replace(/{{btc_vol}}/g, (metrics.btc_vol/1e9).toFixed(1))
             .replace(/{{sol_change}}/g, metrics.sol_change.toFixed(2))
             .replace(/{{sol_vol}}/g, (metrics.sol_vol/1e9).toFixed(1))
-            .replace(/{{jito_tip}}/g, jitoP50)
+            .replace(/{{jito_tip}}/g, jitoP50.toFixed(5))
             .replace(/{{winRate}}/g, winRate.toFixed(1))
             .replace(/{{titles}}/g, titles.map((t, i) => `${i+1}. ${t}`).join('\n'));
+
+        // 🚀 防禦升級：強制 AI 輸出乾淨 JSON 的指令
+        const enforceJsonPrompt = "CRITICAL: Output ONLY a valid JSON object. Do not include markdown formatting like ```json.";
 
         try {
             const parsedAI = await keyRotator.enqueueRequest('MISTRAL', async (apiKey, retryCount) => {
@@ -275,25 +318,36 @@ class EnvironmentCenter {
                 const selectedModel = mistralModels[safeIndex];
 
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
-                const res = await axios.post('https://api.mistral.ai/v1/chat/completions', {
+                const res = await axios.post('[https://api.mistral.ai/v1/chat/completions](https://api.mistral.ai/v1/chat/completions)', {
                     model: selectedModel, 
-                    messages: [{ role: "user", content: promptStr }], 
-                    response_format: { type: "json_object" }
+                    messages: [
+                        { role: "system", content: promptStr },
+                        { role: "user", content: enforceJsonPrompt }
+                    ], 
+                    // 🚀 移除 response_format 避免 API 兼容性報錯
+                    temperature: 0.2
                 }, { headers: { 'Authorization': `Bearer ${cleanKey}`, 'Content-Type': 'application/json' }, timeout: 15000 });
                 
-                return JSON.parse(res.data.choices[0].message.content);
+                // 🚀 正則提取 JSON
+                const textOutput = res.data.choices[0].message.content;
+                const match = textOutput.match(/\{[\s\S]*\}/);
+                if (match) return JSON.parse(match[0]);
+                return JSON.parse(textOutput);
+
             }, 'macro_climate_analyst'); 
 
             if (parsedAI.climate && ['BULL_FRENZY', 'CHOPPY', 'BEAR_PANIC'].includes(parsedAI.climate)) {
                 currentClimate = parsedAI.climate;
             }
             if (parsedAI.news_score !== undefined) {
-                newsScore = parseInt(parsedAI.news_score);
-                newsScore = Math.max(-5, Math.min(5, isNaN(newsScore) ? 0 : newsScore));
+                // 🚀 將物理分數與 AI 情緒分數融合
+                let aiScore = parseInt(parsedAI.news_score);
+                aiScore = isNaN(aiScore) ? 0 : aiScore;
+                newsScore = Math.max(-5, Math.min(10, aiScore + hardScore)); 
             }
             aiReasoning = parsedAI.reasoning || '無具體解釋';
             
-            console.log(`🤖 [AI Macro] 判定: ${currentClimate} | 情感: ${newsScore} | 理由: ${aiReasoning}`);
+            console.log(`🤖 [AI Macro] 判定: ${currentClimate} | 硬數據分: ${hardScore} | 最終分數: ${newsScore} | 理由: ${aiReasoning}`);
             healthMonitor.setStatus('Macro_Sync_Center', '🟢 氣候監控中', `當前氣候: ${currentClimate}`);
 
         } catch (err) {
@@ -403,7 +457,7 @@ async function checkAndApply60MinFallback() {
 // 5. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.1 (後勤樞紐全域 RAM 對齊版) 啟動中...");
+    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.47 (Meme 專化 & JSON 防禦版) 啟動中...");
     
     await initPortfolio();
     
