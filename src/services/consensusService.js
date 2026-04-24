@@ -1,8 +1,7 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V10.28 純粹動態降級版 AI 議事廳 (動態路由 + 格式強制修復版)
-// 🚀 核心升級：移除硬編碼的 GROQ 限制，動態根據 DB 的 Provider 切換 API Endpoint (Groq / Mistral)。
-// 🛡️ 防呆攔截：若 Provider 是 GROQ 但傳入了 Mistral 專利模型 (如 magistral)，自動糾正為 Llama 3。
-// 🔒 安全升級：使用 Regex 正則提取 JSON，完全免疫 response_format 的 API 兼容性 400 報錯。
+// 📝 檔案功能用途：V10.29 純粹動態降級版 AI 議事廳 (全面遷移至 Mistral 版)
+// 🚀 核心升級：全面棄用 GROQ，強制將所有決策任務導向 MISTRAL 資源池。
+// 🔒 安全升級：使用 Regex 正則提取 JSON，完全免疫 API 兼容性 400 報錯。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -21,14 +20,13 @@ class ConsensusService {
             const promptConfig = cacheManager.getPromptConfig(promptId, { token_symbol: symbol, name: name });
             const systemPrompt = promptConfig.parsedPrompt;
             
-            // 🚀 動態獲取 DB 的 Provider，預設為 GROQ
-            const dbProvider = promptConfig.provider ? promptConfig.provider.toUpperCase() : 'GROQ';
+            // 🛑 核心修改：無管 DB 寫咩，強制使用 MISTRAL！
+            const targetProvider = 'MISTRAL';
 
-            if (!config.aiKeys[dbProvider] || config.aiKeys[dbProvider].length === 0) {
-                return { narrative_score: 0, reason: `${dbProvider} 未啟用` };
+            if (!config.aiKeys[targetProvider] || config.aiKeys[targetProvider].length === 0) {
+                return { narrative_score: 0, reason: `${targetProvider} 未啟用，請檢查環境變數` };
             }
 
-            // 確保 models 絕對係 Array
             let rawModels = promptConfig.models;
             if (typeof rawModels === 'string') {
                 try { rawModels = JSON.parse(rawModels); } catch(e) { rawModels = [rawModels]; }
@@ -36,30 +34,17 @@ class ConsensusService {
             
             let models = Array.isArray(rawModels) && rawModels.length > 0 
                 ? rawModels 
-                : (dbProvider === 'MISTRAL' 
-                    ? ['mistral-small-latest', 'mistral-large-latest', 'open-mistral-nemo'] 
-                    : ['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'mixtral-8x7b-32768']);
+                : ['mistral-small-latest', 'mistral-large-latest', 'open-mistral-nemo'];
 
-            // 🚀 啟動動態路由
-            const aiResult = await keyRotator.runWithKey(dbProvider, async (apiKey, retryCount, actualProvider) => {
+            // 呼叫 keyRotator (內置全域鎖)
+            const aiResult = await keyRotator.runWithKey(targetProvider, async (apiKey, retryCount) => {
                 const safeIndex = Math.min((retryCount || 0), models.length - 1);
-                let selectedModel = models[safeIndex];
+                const selectedModel = models[safeIndex];
 
-                // 🛑 終極防呆：如果去緊 Groq 餐廳，但你嗌咗 Mistral 專利菜式 (如 magistral, mistral-small)，強制轉 Llama！
-                if (actualProvider === 'GROQ' && selectedModel.toLowerCase().includes('stral') && !selectedModel.toLowerCase().includes('mixtral')) {
-                    console.warn(`⚠️ [Consensus] 偵測到模型錯配 (Groq 唔支援 ${selectedModel})，自動糾正為 Llama-3！`);
-                    selectedModel = 'llama-3.3-70b-versatile';
-                }
-
-                // 🚀 動態切換 API 伺服器
-                const apiUrl = actualProvider === 'MISTRAL' 
-                    ? 'https://api.mistral.ai/v1/chat/completions'
-                    : 'https://api.groq.com/openai/v1/chat/completions';
-
-                console.log(`🤖 [Consensus] 嘗試呼叫 ${actualProvider}: ${selectedModel} (第 ${retryCount} 次重試)`);
+                console.log(`🤖 [Consensus] 呼叫 Mistral: ${selectedModel}`);
 
                 try {
-                    const response = await axios.post(apiUrl, {
+                    const response = await axios.post('https://api.mistral.ai/v1/chat/completions', {
                         model: selectedModel,
                         messages: [
                             { role: "system", content: systemPrompt },
@@ -68,24 +53,24 @@ class ConsensusService {
                         temperature: 0.2,
                         max_tokens: 300
                     }, {
-                        headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-                        timeout: 7000 
+                        headers: { 'Authorization': `Bearer ${apiKey.replace(/['"]/g, '').trim()}`, 'Content-Type': 'application/json' },
+                        timeout: 10000 
                     });
 
                     const content = response.data.choices[0]?.message?.content;
                     if (!content || content.trim() === '') throw new Error('EMPTY_RESPONSE');
 
-                    // 🚀 Regex 夾硬抽出 JSON
+                    // Regex 夾硬抽出 JSON
                     let cleanJsonString = content;
                     const jsonMatch = content.match(/\{[\s\S]*\}/);
                     if (jsonMatch) cleanJsonString = jsonMatch[0];
 
                     const parsed = JSON.parse(cleanJsonString);
-                    parsed.ai_signature = `${actualProvider}_${selectedModel}`;
+                    parsed.ai_signature = `MISTRAL_${selectedModel}`;
                     return parsed;
                 } catch (e) {
                     if (e.response && e.response.status === 400) {
-                        console.error(`❌ [API 400 Error] Provider: ${actualProvider} | 模型: ${selectedModel} | 詳細原因:`, JSON.stringify(e.response.data));
+                        console.error(`❌ [API 400 Error] 模型: ${selectedModel} | 詳細原因:`, JSON.stringify(e.response.data));
                     }
                     throw e; 
                 }

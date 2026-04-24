@@ -1,8 +1,12 @@
 // src/services/keyRotator.js
-// 📝 檔案功能用途：AI 金鑰輪替與佇列排程器。
-// 🚀 核心升級：向外導出 retryCount，賦予外部微服務「自動降級 (Model Fallback)」的能力。
+// 📝 檔案功能用途：AI 金鑰輪替與全域佇列排程器。
+// 🚀 核心升級：實裝 Redis 全域排隊鎖 (Global Mutex Lock)，保證跨微服務的 Mistral API 請求絕對單線程。
+// 🛡️ 頻率控制：每次 Mistral 請求完成後，強制執行 1000ms 的 Cooldown 才會釋放鎖，徹底消滅 429 報錯。
 
 const config = require('../config/config');
+const Redis = require('ioredis');
+// 建立 Redis 連線供全域鎖使用
+const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
 
 class KeyRotator {
     constructor() {
@@ -59,12 +63,28 @@ class KeyRotator {
             this.queue.shift();
             task.apiKeyUsed = key;
 
+            let isMistralLocked = false;
+
             try {
-                // 🎯 核心修改：將 retryCount 傳遞給具體的執行任務
+                // 🛑 核心升級：如果是 MISTRAL，獲取跨微服務的全域鎖！
+                if (task.provider === 'MISTRAL') {
+                    while (!isMistralLocked) {
+                        // 鎖定最多 20 秒，防止死鎖
+                        isMistralLocked = await redis.set('GLOBAL_MISTRAL_LOCK', 'LOCKED', 'NX', 'PX', 20000);
+                        if (!isMistralLocked) {
+                            // 排隊中，每 250ms 重新嘗試
+                            await new Promise(r => setTimeout(r, 250));
+                        }
+                    }
+                    console.log(`🚦 [KeyRotator] 取得 Mistral 全域發射權！(重試: ${task.retryCount})`);
+                }
+
+                // 執行真正的 API 請求
                 const result = await task.executeFn(key, task.retryCount);
                 
                 this._markKeyOnCooldown(key, 1000);
                 task.resolve(result);
+
             } catch (error) {
                 const is429 = error.message?.includes('429') || error.response?.status === 429;
                 const isTimeout = error.message?.includes('timeout') || error.code === 'ECONNABORTED';
@@ -86,6 +106,13 @@ class KeyRotator {
                 } else {
                     task.reject(error);
                 }
+            } finally {
+                // 🛑 核心升級：釋放全域鎖，並強制全系統 Cooldown 1 秒！
+                if (isMistralLocked) {
+                    console.log(`⏳ [KeyRotator] 請求完成，強制全域冷卻 1000ms...`);
+                    await new Promise(r => setTimeout(r, 1000));
+                    await redis.del('GLOBAL_MISTRAL_LOCK');
+                }
             }
         }
         this.isProcessing = false;
@@ -95,7 +122,6 @@ class KeyRotator {
         return new Promise((resolve, reject) => {
             this.queue.push({
                 provider, promptId,
-                // 🎯 核心修改：接收並傳遞 currentRetry
                 executeFn: async (key, currentRetry) => { return await executeFn(key, currentRetry); },
                 resolve, reject, apiKeyUsed: null, retryCount: 0
             });
@@ -104,7 +130,6 @@ class KeyRotator {
     }
 
     async runWithKey(providerName, taskFn, promptId = 'default') {
-        // 🎯 核心修改：橋樑接收 retryCount 並交給 consensusService
         return this.enqueueRequest(providerName, async (apiKey, retryCount) => {
             return await taskFn(apiKey, retryCount, providerName);
         }, promptId);

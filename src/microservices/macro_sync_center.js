@@ -1,8 +1,8 @@
 // src/microservices/macro_sync_center.js
-// 📝 檔案功能用途：V10.48 【後勤樞紐】微服務 (Microservice Core - Meme-Coin 專化版)
+// 📝 檔案功能用途：V10.49 【後勤樞紐】微服務 (Meme 專化 & 極簡排隊版)
 // 🚀 核心升級：實裝 Supabase Realtime 全域記憶體校準 (RAM Sync)，徹底消滅幽靈倉位。
 // 🎯 氣候改造：引入 Boredom Pump (無聊炒作效應)，以 SOL 相對強弱與 Jito Tip 主導大市評分。
-// 🛡️ 防禦升級：將 enqueueRequest 改為更穩定的 runWithKey，並強制清理 URL，秒殺 Invalid URL 報錯。
+// 🛡️ 防禦升級：依賴 V10.29 KeyRotator 的全域鎖，移除本地冗餘排隊代碼，實現極簡 API 呼叫。
 
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 50;
@@ -38,9 +38,9 @@ const parser = new Parser();
 
 const MACRO_PROVIDERS = [{ name: 'COINGECKO', keyName: 'COINGECKO_API_KEY' }, { name: 'KUCOIN', keyName: null }];
 const NEWS_PROVIDERS = [
-    { name: 'COINTELEGRAPH', type: 'RSS', url: '[https://cointelegraph.com/rss](https://cointelegraph.com/rss)' },
-    { name: 'DECRYPT', type: 'RSS', url: '[https://decrypt.co/feed](https://decrypt.co/feed)' },
-    { name: 'COINDESK', type: 'RSS', url: '[https://www.coindesk.com/arc/outboundfeeds/rss/](https://www.coindesk.com/arc/outboundfeeds/rss/)' }
+    { name: 'COINTELEGRAPH', type: 'RSS', url: 'https://cointelegraph.com/rss' },
+    { name: 'DECRYPT', type: 'RSS', url: 'https://decrypt.co/feed' },
+    { name: 'COINDESK', type: 'RSS', url: 'https://www.coindesk.com/arc/outboundfeeds/rss/' }
 ];
 
 let activeMacroIdx = 0;
@@ -203,7 +203,7 @@ class EnvironmentCenter {
 
     async _fetchJitoCongestion() {
         try {
-            const res = await axios.get('[https://bundles.jito.wtf/api/v1/bundles/tip_floor](https://bundles.jito.wtf/api/v1/bundles/tip_floor)', { timeout: 2000 });
+            const res = await axios.get('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { timeout: 2000 });
             if (res.data && res.data.length > 0) return res.data[0].landed_tips_50th_percentile || 0.0001;
         } catch (err) {}
         return 0.0001; 
@@ -262,7 +262,7 @@ class EnvironmentCenter {
 
         const hardScore = this._calculateHardDataScore(metrics, jitoP50);
 
-        let mistralModels = ['mistral-small-latest', 'ministral-8b-latest', 'open-mistral-nemo'];
+        let mistralModels = ['mistral-small-latest', 'open-mistral-nemo', 'mistral-large-latest'];
         let rawPrompt = `You are the Chief Macro Economist. Analyze data: BTC {{btc_change}}%, SOL {{sol_change}}%. News: {{titles}}. Output JSON: {"climate": "CHOPPY", "news_score": 0, "reasoning": "..."}`;
         
         try {
@@ -293,15 +293,17 @@ class EnvironmentCenter {
         const enforceJsonPrompt = "CRITICAL: Output ONLY a valid JSON object. Do not include markdown formatting like ```json.";
 
         try {
-            // 🚀 核心防護：將 enqueueRequest 改為更純粹的 runWithKey，並明確封裝 URL 參數，秒殺 Invalid URL！
+            // 🚀 核心優化：直接依賴 V10.29 嘅 keyRotator，佢已經自帶全域 Mistral 鎖 + 1秒冷卻！
             const parsedAI = await keyRotator.runWithKey('MISTRAL', async (apiKey, retryCount) => {
                 const currentAttempt = retryCount || 0;
                 const safeIndex = Math.min(currentAttempt, mistralModels.length - 1);
                 const selectedModel = mistralModels[safeIndex];
 
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
-                const mistralUrl = 'https://api.mistral.ai/v1/chat/completions'; // 確保 URL 為乾淨字串
+                const mistralUrl = '[https://api.mistral.ai/v1/chat/completions](https://api.mistral.ai/v1/chat/completions)';
                 
+                console.log(`🤖 [Macro] 呼叫 Mistral: ${selectedModel} (排隊鎖由 keyRotator 處理)`);
+
                 const res = await axios.post(mistralUrl, {
                     model: selectedModel, 
                     messages: [
@@ -438,7 +440,7 @@ async function checkAndApply60MinFallback() {
 // 5. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.48 (Meme 專化 & 連線防彈版) 啟動中...");
+    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.49 (Meme 專化 & 極簡排隊版) 啟動中...");
     
     await initPortfolio();
     
