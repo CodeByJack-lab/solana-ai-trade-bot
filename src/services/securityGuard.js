@@ -1,9 +1,10 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V10.40 量化安檢中樞 (全自動 ML 參數接管版 - 三權分立之第一權)
+// 📝 檔案功能用途：V10.46 量化安檢中樞 (全自動 ML 參數接管版 - 三權分立之第一權)
 // 🚀 升級功能：加入 ML 動態參數接收器，實現真正 AI 驅動。分數重構為 0-20 物理安全及格線，為 ML 騰出 60 分龐大計分空間。
 // 🛡️ 終極修復：加入 preFetchedData 綠色通道，完美解決與前線批次查價的 DexScreener 429 API 撞車問題。
 // 💰 CVD 淨流防禦：實裝偽 CVD (Cumulative Volume Delta) 估算法，防禦大戶左手交右手之假 OFI 陷阱。
 // 🧬 數學引擎：實裝 Shannon Entropy (香農熵) 偵測，從微觀結構秒殺機器人極度規律刷量。
+// ✂️ 邏輯精簡：移除過時且會誤殺優質幣的「量價背離」、「舊版刷量」及過於嚴苛的「50% 籌碼集中」Hardcode。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -172,7 +173,8 @@ class SecurityGuard {
             for (const account of largestAccounts.value.slice(1, 11)) top10Sum += account.uiAmount || 0;
             
             const top10Pct = top10Sum / totalSupply;
-            if (top10Pct > 0.50) return false; 
+            // 🚀 升級：放寬至 80% (適配 Solana 常規池，防止誤殺神仙幣)
+            if (top10Pct > 0.80) return false; 
             return true;
         } catch (err) { return true; }
     }
@@ -194,7 +196,6 @@ class SecurityGuard {
             console.warn("⚠️ 無法讀取 ML 動態參數，降級使用經驗預設值");
         }
 
-        // 🚀 新增讀取 min_cvd_usd，預設為 0
         let activeParams = {
             buyThreshold: targetParam?.buy_threshold ? Number(targetParam.buy_threshold) : (mlParams?.buy_threshold ?? 70), 
             minOFI: parseFloat(targetParam?.min_ofi ?? targetParam?.minOfi ?? (type === 'TRENDING' ? -0.4 : -0.2)),
@@ -258,11 +259,7 @@ class SecurityGuard {
 
         const turnover5m = marketData.liquidity > 0 ? (marketData.volume5m / marketData.liquidity) : 0;
         if (turnover5m > activeParams.maxTurnover) return { numeric_score: 0, isSafe: false, reason: `🛑 極端換手率: 達 ${(turnover5m*100).toFixed(0)}% (ML上限 ${(activeParams.maxTurnover*100).toFixed(0)}%)`, marketData };
-        if (turnover5m > 1.5 && marketData.h1 < 50) return { numeric_score: 0, isSafe: false, reason: `🛑 量價背離: 高換手率但不漲`, marketData };
-
-        const buyRatio = buys / totalTxs5m;
-        if (totalTxs5m > 30 && buyRatio > 0.45 && buyRatio < 0.55) return { numeric_score: 0, isSafe: false, reason: `🛑 女巫刷量: 買賣極度對稱`, marketData };
-
+        
         // 🚀 新增：微觀結構熵值檢查 (防刷量終極過濾器)
         const entropy = await this._checkTradeEntropy(mint);
         if (entropy < 0.4) {
@@ -306,7 +303,8 @@ class SecurityGuard {
             coreScore += 5; 
         } else { 
             if (climate === 'BEAR_PANIC') { coreScore -= 10; reasons.push('籌碼集中 (熊市嚴懲)'); }
-            else { reasons.push('⚠️ 籌碼過度集中 (Top10 > 50%)'); }
+            // 🚀 升級：對應放寬後的 80% 門檻
+            else { reasons.push('⚠️ 籌碼過度集中 (Top10 > 80%)'); }
         }
 
         coreScore = Math.max(0, coreScore);
