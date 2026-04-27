@@ -1,7 +1,7 @@
 // src/services/consensusService.js
-// 📝 檔案功能用途：V10.30 純粹動態降級版 AI 議事廳 (全面遷移 Mistral + URL 防腐版)
+// 📝 檔案功能用途：V10.31 純粹動態降級版 AI 議事廳 (Base64 防腐版)
 // 🚀 核心升級：徹底解決 Chat 介面自動轉換 Markdown 導致 Invalid URL 的問題。
-// 🔒 安全升級：使用 Regex 正則提取 JSON，完全免疫 API 兼容性 400 報錯。
+// 🔒 安全升級：所有 API Endpoint 使用 Base64 編碼，運行時即時解碼，無視任何字串污染。
 
 const { keyRotator } = require('./keyRotator');
 const { cacheManager } = require('./cacheManager');
@@ -45,8 +45,8 @@ class ConsensusService {
                 console.log(`🤖 [Consensus] 呼叫 Mistral: ${selectedModel}`);
 
                 try {
-                    // 🛡️ 核心防腐：URL 切件，杜絕 Invalid URL 報錯
-                    const mistralUrl = ['https', '://', 'api.mistral.ai/v1/chat/completions'].join('');
+                    // 🛡️ 終極防腐：Node.js 運行時才解碼成真實網址，免疫所有 Markdown 污染！
+                    const mistralUrl = Buffer.from('aHR0cHM6Ly9hcGkubWlzdHJhbC5haS92MS9jaGF0L2NvbXBsZXRpb25z', 'base64').toString('utf-8');
                     
                     const response = await axios.post(mistralUrl, {
                         model: selectedModel,

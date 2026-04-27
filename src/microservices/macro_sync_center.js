@@ -1,8 +1,8 @@
 // src/microservices/macro_sync_center.js
-// 📝 檔案功能用途：V10.49 【後勤樞紐】微服務 (Meme 專化 & 極簡排隊版)
+// 📝 檔案功能用途：V10.51 【後勤樞紐】微服務 (Meme 專化 & 原汁原味 Base64 防腐版)
 // 🚀 核心升級：實裝 Supabase Realtime 全域記憶體校準 (RAM Sync)，徹底消滅幽靈倉位。
 // 🎯 氣候改造：引入 Boredom Pump (無聊炒作效應)，以 SOL 相對強弱與 Jito Tip 主導大市評分。
-// 🛡️ 防禦升級：依賴 V10.29 KeyRotator 的全域鎖，移除本地冗餘排隊代碼，實現極簡 API 呼叫。
+// 🛡️ 防禦升級：全線 API URL 採用 Base64 動態解碼，徹底解決 Chat 介面轉換 Markdown 導致的 Invalid URL 死機問題。
 
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 50;
@@ -37,10 +37,12 @@ const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL ||
 const parser = new Parser();
 
 const MACRO_PROVIDERS = [{ name: 'COINGECKO', keyName: 'COINGECKO_API_KEY' }, { name: 'KUCOIN', keyName: null }];
+
+// 🛡️ URL Base64 防腐處理
 const NEWS_PROVIDERS = [
-    { name: 'COINTELEGRAPH', type: 'RSS', url: 'https://cointelegraph.com/rss' },
-    { name: 'DECRYPT', type: 'RSS', url: 'https://decrypt.co/feed' },
-    { name: 'COINDESK', type: 'RSS', url: 'https://www.coindesk.com/arc/outboundfeeds/rss/' }
+    { name: 'COINTELEGRAPH', type: 'RSS', url: Buffer.from('aHR0cHM6Ly9jb2ludGVsZWdyYXBoLmNvbS9yc3M=', 'base64').toString('utf-8') },
+    { name: 'DECRYPT', type: 'RSS', url: Buffer.from('aHR0cHM6Ly9kZWNyeXB0LmNvL2ZlZWQ=', 'base64').toString('utf-8') },
+    { name: 'COINDESK', type: 'RSS', url: Buffer.from('aHR0cHM6Ly93d3cuY29pbmRlc2suY29tL2FyYy9vdXRib3VuZGZlZWRzL3Jzcy8=', 'base64').toString('utf-8') }
 ];
 
 let activeMacroIdx = 0;
@@ -158,16 +160,22 @@ class EnvironmentCenter {
                     const apiKey = rawKey ? rawKey.replace(/['"]/g, '').trim() : null;
                     const cfg = { headers: apiKey ? { 'x-cg-demo-api-key': apiKey } : {}, timeout: 8000 };
                     
-                    const res = await axios.get(`https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,solana&vs_currencies=usd&include_24hr_vol=true&include_24hr_change=true`, cfg);
+                    // 🛡️ URL Base64 防腐處理
+                    const cgUrl = Buffer.from('aHR0cHM6Ly9hcGkuY29pbmdlY2tvLmNvbS9hcGkvdjMvc2ltcGxlL3ByaWNlP2lkcz1iaXRjb2luLHNvbGFuYSZ2c19jdXJyZW5jaWVzPXVzZCZpbmNsdWRlXzI0aHJfdm9sPXRydWUmaW5jbHVkZV8yNGhyX2NoYW5nZT10cnVl', 'base64').toString('utf-8');
+                    const res = await axios.get(cgUrl, cfg);
                     
                     btc_change = res.data.bitcoin.usd_24h_change || 0;
                     btc_vol = res.data.bitcoin.usd_24h_vol || 0;
                     sol_change = res.data.solana.usd_24h_change || 0;
                     sol_vol = res.data.solana.usd_24h_vol || 0;
                 } else {
+                    // 🛡️ URL Base64 防腐處理
+                    const kucoinBtcUrl = Buffer.from('aHR0cHM6Ly9hcGkua3Vjb2luLmNvbS9hcGkvdjEvbWFya2V0L3N0YXRzP3N5bWJvbD1CVEMtVVNEVA==', 'base64').toString('utf-8');
+                    const kucoinSolUrl = Buffer.from('aHR0cHM6Ly9hcGkua3Vjb2luLmNvbS9hcGkvdjEvbWFya2V0L3N0YXRzP3N5bWJvbD1TT0wtVVNEVA==', 'base64').toString('utf-8');
+                    
                     const [btcRes, solRes] = await Promise.all([
-                        axios.get(`https://api.kucoin.com/api/v1/market/stats?symbol=BTC-USDT`, { timeout: 8000 }),
-                        axios.get(`https://api.kucoin.com/api/v1/market/stats?symbol=SOL-USDT`, { timeout: 8000 })
+                        axios.get(kucoinBtcUrl, { timeout: 8000 }),
+                        axios.get(kucoinSolUrl, { timeout: 8000 })
                     ]);
                     btc_change = parseFloat(btcRes.data.data.changeRate) * 100 || 0;
                     btc_vol = parseFloat(btcRes.data.data.volValue) || 0;
@@ -203,7 +211,9 @@ class EnvironmentCenter {
 
     async _fetchJitoCongestion() {
         try {
-            const res = await axios.get('https://bundles.jito.wtf/api/v1/bundles/tip_floor', { timeout: 2000 });
+            // 🛡️ URL Base64 防腐處理
+            const jitoUrl = Buffer.from('aHR0cHM6Ly9idW5kbGVzLmppdG8ud3RmL2FwaS92MS9idW5kbGVzL3RpcF9mbG9vcg==', 'base64').toString('utf-8');
+            const res = await axios.get(jitoUrl, { timeout: 2000 });
             if (res.data && res.data.length > 0) return res.data[0].landed_tips_50th_percentile || 0.0001;
         } catch (err) {}
         return 0.0001; 
@@ -300,7 +310,9 @@ class EnvironmentCenter {
                 const selectedModel = mistralModels[safeIndex];
 
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
-                const mistralUrl = '[https://api.mistral.ai/v1/chat/completions](https://api.mistral.ai/v1/chat/completions)';
+                
+                // 🛡️ URL Base64 防腐處理
+                const mistralUrl = Buffer.from('aHR0cHM6Ly9hcGkubWlzdHJhbC5haS92MS9jaGF0L2NvbXBsZXRpb25z', 'base64').toString('utf-8');
                 
                 console.log(`🤖 [Macro] 呼叫 Mistral: ${selectedModel} (排隊鎖由 keyRotator 處理)`);
 
@@ -440,7 +452,7 @@ async function checkAndApply60MinFallback() {
 // 5. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
-    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.49 (Meme 專化 & 極簡排隊版) 啟動中...");
+    console.log("🛠️ SOL QUANT MACRO_SYNC_CENTER V10.51 (Meme 專化 & 原汁原味 Base64 防腐版) 啟動中...");
     
     await initPortfolio();
     
