@@ -1,16 +1,13 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.46 【獵人中樞】微服務 (Microservice Core) - 零影子淨化版
+// 📝 檔案功能用途：V10.52 【獵人中樞】微服務 (數學完全體 + Base64 防腐版)
 // 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，徹底杜絕同幣重複買入！
-// 🚀 極速出車：將 Newborn 保溫箱由 5 分鐘等死機制，改為 15 秒光速出車，適配 Pump.fun 閃電戰 Meta！
-// 🛡️ 記憶體修復：解決 AI Watchdog 觸發 SELL_HALF 時的 OOM 隱患。
-// 🔒 安全升級：加入 LLM Hard-Fail 防禦與 Narrative Override (敘事特赦)。
-// 🛠️ Bug Fix：修正 Supabase insert 無法使用 .catch 導致漏斗崩潰的問題。
-// 🛠️ 併發修復：突破 Node.js 預設 10 個 TLSSocket 監聽限制，解決 MaxListenersExceededWarning。
-// 🧬 數學升級：導入 Bayesian 貝葉斯勝率融合，及 Kelly Criterion 動態注碼倍數，完全取代 Hardcode。
-// ✂️ 邏輯精簡：徹底拔除 Shadow Route (影子倉位) 寫入與查詢，釋放系統效能，確保大數據純粹性。
+// 🛡️ URL防腐：Watchdog 呼叫 Mistral 全面採用 Base64 動態解碼，免疫 Markdown 破壞。
+// 🧬 數學進化 1：Bayesian 貝葉斯勝率融合由階梯式改為「Sigmoid 連續平滑函數」，消除邊界效應。
+// 🧬 數學進化 2：Kelly Criterion 注碼分母改為動態讀取 DB 的並發上限，消除 Hardcode 爆倉風險。
+// ✂️ 邏輯精簡：徹底拔除 Shadow Route (影子倉位) 寫入與查詢，釋放系統效能。
 
 require('dotenv').config();
-require('events').EventEmitter.defaultMaxListeners = 50; // 🚀 突破 Node.js 預設 TLSSocket 併發監聽限制
+require('events').EventEmitter.defaultMaxListeners = 50; 
 
 const express = require('express');
 const Redis = require('ioredis');
@@ -102,7 +99,10 @@ watchdogSub.on('message', async (channel, message) => {
 
             const decision = await keyRotator.enqueueRequest('MISTRAL', async (apiKey) => {
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
-                const res = await axios.post('https://api.mistral.ai/v1/chat/completions', {
+                // 🛡️ 核心修復：Watchdog API URL Base64 絕對防腐
+                const mistralUrl = Buffer.from('aHR0cHM6Ly9hcGkubWlzdHJhbC5haS92MS9jaGF0L2NvbXBsZXRpb25z', 'base64').toString('utf-8');
+                
+                const res = await axios.post(mistralUrl, {
                     model: aiConfig.models[0] || 'mistral-large-latest',
                     messages: [{ role: "user", content: dataPrompt }],
                     response_format: { type: "json_object" }, temperature: 0.1
@@ -416,7 +416,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         const portfolio = getPortfolio();
         const isHoldingMain = portfolio.positions && portfolio.positions.some(p => p.mint_address === mint);
         
-        // ✂️ 移除查閱 Shadow DB 的邏輯
         if (isHoldingMain) {
             console.log(`⚠️ [Frontline] 發現已持有倉位 $${symbol}，停止重複掃描/買入。`);
             if (poolType === 'TRENDING') {
@@ -504,15 +503,37 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         }
 
         // ---------------------------------------------------------
-        // 🚀 V10.45 終極數學引擎：Bayesian 融合 + Kelly 倍數注碼
+        // 🚀 數據前置處理：提前讀取 DB 配置供 Kelly 使用
+        // ---------------------------------------------------------
+        let maxPositions = poolType === 'NEWBORN' ? 4 : 8; 
+        let currentMode = 'paper';
+        let baseAmount = poolType === 'NEWBORN' ? 0.1 : 0.2; 
+        let currentPositionsCount = 0;
+        
+        try {
+            const { data: config } = await supabase.from('system_config')
+                .select('trade_mode, trade_amount_sol, trending_trade_amount_sol, max_meme_positions, max_trending_positions')
+                .eq('id', 1).single();
+            if (config) {
+                currentMode = config.trade_mode === 'LIVE' ? 'live' : 'paper';
+                baseAmount = poolType === 'NEWBORN' ? config.trade_amount_sol : config.trending_trade_amount_sol;
+                maxPositions = poolType === 'NEWBORN' ? config.max_meme_positions : config.max_trending_positions;
+            }
+
+            const { count } = await supabase.from(`active_positions_${currentMode}`)
+                .select('*', { count: 'exact', head: true }).like('strategy_type', `${poolType}%`);
+            if (count !== null) currentPositionsCount = count;
+        } catch(e) {}
+
+        // ---------------------------------------------------------
+        // 🚀 V10.52 終極數學引擎：連續 Bayesian 融合 + 動態 Kelly
         // ---------------------------------------------------------
         
         const priorOdds = priorProb / (1 - priorProb);
-        let bayesFactor = 1.0;
-        if (llmScore >= 8) bayesFactor = 2.0;       
-        else if (llmScore >= 5) bayesFactor = 1.5;  
-        else if (llmScore < 0) bayesFactor = 0.5;   
-        else if (llmScore <= -3) bayesFactor = 0.2; 
+        
+        // 🧬 數學進化 1：Sigmoid 幾何平滑曲線，徹底消除階梯跳躍！
+        // 分數 10 = ~2.0x, 分數 5 = ~1.5x, 分數 0 = ~0.4x, 分數 -5 = ~0.2x
+        const bayesFactor = 0.2 + (1.8 / (1.0 + Math.exp(-0.6 * (llmScore - 3.5))));
 
         const posteriorOdds = priorOdds * bayesFactor;
         const finalWinProb = posteriorOdds / (1 + posteriorOdds); 
@@ -527,7 +548,10 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const fStar = finalWinProb - ((1 - finalWinProb) / kellyBRatio);
         const safeKelly = Math.max(0, fStar * 0.25); 
-        let kellyMultiplier = Math.max(0.1, Math.min(safeKelly / 0.05, 3.0)); 
+        
+        // 🧬 數學進化 2：Kelly 分母動態化，按系統最大倉位計算標準資金比例
+        const standardPositionSize = 1.0 / (maxPositions > 0 ? maxPositions : 10);
+        let kellyMultiplier = Math.max(0.1, Math.min(safeKelly / standardPositionSize, 3.0)); 
 
         let buyThreshold = 70; 
         let activeStrategyId = appliedMlStrategyId || 0; 
@@ -570,27 +594,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         console.log(`⚖️ [Final Verdict] ${symbol} 貝葉斯最終分: ${finalScore} / 100 (及格線: ${buyThreshold})`);
 
         if (finalScore >= buyThreshold) {
-            let maxPositions = poolType === 'NEWBORN' ? 4 : 8; 
-            let currentMode = 'paper';
-            let baseAmount = poolType === 'NEWBORN' ? 0.1 : 0.2; 
-            let currentPositionsCount = 0;
-            
-            try {
-                const { data: config } = await supabase.from('system_config')
-                    .select('trade_mode, trade_amount_sol, trending_trade_amount_sol, max_meme_positions, max_trending_positions')
-                    .eq('id', 1).single();
-                if (config) {
-                    currentMode = config.trade_mode === 'LIVE' ? 'live' : 'paper';
-                    baseAmount = poolType === 'NEWBORN' ? config.trade_amount_sol : config.trending_trade_amount_sol;
-                    maxPositions = poolType === 'NEWBORN' ? config.max_meme_positions : config.max_trending_positions;
-                }
-
-                const { count } = await supabase.from(`active_positions_${currentMode}`)
-                    .select('*', { count: 'exact', head: true }).like('strategy_type', `${poolType}%`);
-                if (count !== null) currentPositionsCount = count;
-
-            } catch(e) {}
-
             if (currentPositionsCount >= maxPositions) {
                 console.log(`🛑 [Capacity Full] ${poolType} 倉位已滿 (${currentPositionsCount}/${maxPositions})，放棄買入 ${symbol}。`);
                 return; 
@@ -629,7 +632,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 }
             }
         } else {
-            // ✂️ 拔除寫入 active_positions_shadow 的邏輯，直接乾淨利落拒絕
             console.log(`🚫 [AUTO VETO] 分數不達標 (${finalScore} < ${buyThreshold})，拒絕買入。`);
         }
     } catch (err) {
@@ -686,7 +688,7 @@ burnSub.on('message', async (channel, message) => {
 });
 
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.46 (零影子淨化版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.52 (數學完全體防腐版) 啟動中...");
     
     await initPortfolio();
 

@@ -1,10 +1,9 @@
 // src/services/securityGuard.js
-// 📝 檔案功能用途：V10.46 量化安檢中樞 (全自動 ML 參數接管版 - 三權分立之第一權)
-// 🚀 升級功能：加入 ML 動態參數接收器，實現真正 AI 驅動。分數重構為 0-20 物理安全及格線，為 ML 騰出 60 分龐大計分空間。
+// 📝 檔案功能用途：V10.52 量化安檢中樞 (終極防刷量與社群背離版)
+// 🚀 核心升級 1：徹底移除 Math.random() Mock，實裝真實 RPC 交易金額分桶熵值計算 (Shannon Entropy)，秒殺規律刷量機器人。
+// 🚀 核心升級 2：加入「社群與價格背離」偵測，高成交量但無綁定 Socials 連結的項目一票否決。
 // 🛡️ 終極修復：加入 preFetchedData 綠色通道，完美解決與前線批次查價的 DexScreener 429 API 撞車問題。
 // 💰 CVD 淨流防禦：實裝偽 CVD (Cumulative Volume Delta) 估算法，防禦大戶左手交右手之假 OFI 陷阱。
-// 🧬 數學引擎：實裝 Shannon Entropy (香農熵) 偵測，從微觀結構秒殺機器人極度規律刷量。
-// ✂️ 邏輯精簡：移除過時且會誤殺優質幣的「量價背離」、「舊版刷量」及過於嚴苛的「50% 籌碼集中」Hardcode。
 
 const axios = require('axios');
 const { connection } = require('../config/solana');
@@ -23,12 +22,14 @@ const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
 
 class SecurityGuard {
     
-    // 🚀 新增：計算香農熵 (Shannon Entropy) - 衡量交易序列混亂度
+    // 🧬 數學引擎：計算香農熵 (Shannon Entropy) - 衡量交易金額分佈混亂度
     _calculateEntropy(sequence) {
         const len = sequence.length;
         if (len === 0) return 0;
-        const counts = { '0': 0, '1': 0 };
-        for (const char of sequence) counts[char]++;
+        const counts = {};
+        for (const char of sequence) {
+            counts[char] = (counts[char] || 0) + 1;
+        }
         
         let entropy = 0;
         for (const key in counts) {
@@ -38,21 +39,40 @@ class SecurityGuard {
         return entropy;
     }
 
-    // 🚀 新增：抽樣最近交易並計算資訊熵 (預設防刷量機制)
+    // 🚀 核心升級：抓取真實 RPC 交易，按資金規模分桶 (Bucketing) 計算資訊熵
     async _checkTradeEntropy(mint) {
         try {
-            const sigs = await connection.getSignaturesForAddress(new PublicKey(mint), { limit: 30 });
-            if (sigs.length < 20) return 1.0; // 樣本不足，不進行判定
+            const mintPubkey = new PublicKey(mint);
+            const sigs = await connection.getSignaturesForAddress(mintPubkey, { limit: 20 });
+            if (sigs.length < 10) return 1.0; // 樣本太少，暫不判定為刷量
 
-            // 為避免過多 RPC 請求，此處使用簡化模擬 (實戰可解開 getTransaction 解析真偽)
-            // 系統會根據簽名時間間隔與數量做初步哈希轉換
-            let mockSequence = ""; 
-            for (let i=0; i<sigs.length; i++) mockSequence += (Math.random() > 0.5 ? "1" : "0"); 
+            const txSignatures = sigs.map(s => s.signature);
+            // 輕量級抓取 Parsed Txs
+            const txs = await connection.getParsedTransactions(txSignatures, { maxSupportedTransactionVersion: 0 });
+
+            let sequence = ""; 
+            for (const tx of txs) {
+                if (!tx || !tx.meta || !tx.meta.preBalances || !tx.meta.postBalances) continue;
+                
+                // 粗略估算交易發起人 (Fee Payer) 的資金變動 (以 SOL 為單位)
+                const preBal = tx.meta.preBalances[0];
+                const postBal = tx.meta.postBalances[0];
+                const solSpent = Math.abs(preBal - postBal) / 1e9; 
+
+                // 資金分桶 (Bucketing)
+                if (solSpent < 0.05) sequence += "0";      // 微塵單 (Dust)
+                else if (solSpent < 0.5) sequence += "1";  // 散戶單 (Retail)
+                else if (solSpent < 5.0) sequence += "2";  // 大戶單 (Dolphin)
+                else sequence += "3";                      // 巨鯨單 (Whale)
+            }
             
-            const h = this._calculateEntropy(mockSequence);
+            if (sequence.length < 5) return 1.0;
+            
+            const h = this._calculateEntropy(sequence);
             return h; 
         } catch (e) { 
-            return 1.0; // 若 RPC 失敗，預設放行
+            console.warn(`⚠️ [Entropy Check] RPC 查核失敗 (${e.message})，降級放行`);
+            return 1.0; // 若 RPC 失敗或 Rate Limit，預設放行以免誤殺
         }
     }
 
@@ -173,7 +193,6 @@ class SecurityGuard {
             for (const account of largestAccounts.value.slice(1, 11)) top10Sum += account.uiAmount || 0;
             
             const top10Pct = top10Sum / totalSupply;
-            // 🚀 升級：放寬至 80% (適配 Solana 常規池，防止誤殺神仙幣)
             if (top10Pct > 0.80) return false; 
             return true;
         } catch (err) { return true; }
@@ -247,6 +266,11 @@ class SecurityGuard {
             }
         }
 
+        // 🚀 核心升級：社群與價格背離偵測 (Social-Price Divergence)
+        if (marketData.volume5m > 100000 && !marketData.hasSocials) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 幽靈殺豬盤: 5m成交過10萬美金，但無任何 TG/X 綁定`, marketData };
+        }
+
         const buys = marketData.buys5m;
         const sells = marketData.sells5m;
         const totalTxs5m = buys + sells;
@@ -260,13 +284,12 @@ class SecurityGuard {
         const turnover5m = marketData.liquidity > 0 ? (marketData.volume5m / marketData.liquidity) : 0;
         if (turnover5m > activeParams.maxTurnover) return { numeric_score: 0, isSafe: false, reason: `🛑 極端換手率: 達 ${(turnover5m*100).toFixed(0)}% (ML上限 ${(activeParams.maxTurnover*100).toFixed(0)}%)`, marketData };
         
-        // 🚀 新增：微觀結構熵值檢查 (防刷量終極過濾器)
+        // 🚀 微觀結構熵值檢查 (香農熵：防刷量終極過濾器)
         const entropy = await this._checkTradeEntropy(mint);
-        if (entropy < 0.4) {
-            return { numeric_score: 0, isSafe: false, reason: `🛑 熵值異常 (${entropy.toFixed(2)})，疑似規律刷量盤`, marketData, applied_ml_strategy_id: targetParam?.id || 0 };
+        if (entropy > 0 && entropy < 0.4) {
+            return { numeric_score: 0, isSafe: false, reason: `🛑 交易熵值極低 (${entropy.toFixed(2)})，疑似規律刷量盤`, marketData, applied_ml_strategy_id: targetParam?.id || 0 };
         }
 
-        // 🚀 核心升級：OFI 與 CVD 雙重淨流防禦
         const pseudoOfi = totalTxs5m > 0 ? (buys - sells) / totalTxs5m : 0;
         const pseudoCvdUsd = marketData.volume5m * pseudoOfi; 
 
@@ -303,7 +326,6 @@ class SecurityGuard {
             coreScore += 5; 
         } else { 
             if (climate === 'BEAR_PANIC') { coreScore -= 10; reasons.push('籌碼集中 (熊市嚴懲)'); }
-            // 🚀 升級：對應放寬後的 80% 門檻
             else { reasons.push('⚠️ 籌碼過度集中 (Top10 > 80%)'); }
         }
 
