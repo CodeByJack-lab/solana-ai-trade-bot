@@ -170,7 +170,7 @@ setInterval(async () => {
 
     for (const mint of activeMints) {
         const lastTs = last_valid_ts.get(mint) || 0;
-        if (now - lastTs > 6000) { 
+        if (now - lastTs > 8000) { 
             const lastDexCheck = token_last_dex_check_ts.get(mint) || 0;
             if (now - lastDexCheck >= 30000) {
                 deadMints.push(mint);
@@ -222,7 +222,7 @@ setInterval(async () => {
         if (deadMints.length === activeMints.length && activeMints.length > 1) {
             console.warn(`🚨 [DEFCON 6] 全線斷線！準備進行 DexScreener 救援查價... (冷卻期: 30s)`);
         } else {
-            console.warn(`⚠️ [Price Warning] 發現 ${deadMints.length} 隻持倉幣 (${deadSymbols}) 超時無報價，啟動 DexScreener 獨立監視 (冷卻期: 30s)...`);
+            console.log(`⚠️ [Price Warning] 發現 ${deadMints.length} 隻持倉幣 (${deadSymbols}) 超時無報價，啟動 DexScreener 獨立監視 (冷卻期: 30s)...`);
         }
 
         try {
