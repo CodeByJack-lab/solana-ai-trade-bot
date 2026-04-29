@@ -1,10 +1,6 @@
 // src/microservices/trade_frontline.js
-// 📝 檔案功能用途：V10.52 【獵人中樞】微服務 (數學完全體 + Base64 防腐版)
-// 🚀 核心升級：實裝「全域倉位攔截 (Global Holding Shield)」，徹底杜絕同幣重複買入！
-// 🛡️ URL防腐：Watchdog 呼叫 Mistral 全面採用 Base64 動態解碼，免疫 Markdown 破壞。
-// 🧬 數學進化 1：Bayesian 貝葉斯勝率融合由階梯式改為「Sigmoid 連續平滑函數」，消除邊界效應。
-// 🧬 數學進化 2：Kelly Criterion 注碼分母改為動態讀取 DB 的並發上限，消除 Hardcode 爆倉風險。
-// ✂️ 邏輯精簡：徹底拔除 Shadow Route (影子倉位) 寫入與查詢，釋放系統效能。
+// 📝 檔案功能用途：V10.53 【獵人中樞】微服務 (幽靈殺手版)
+// 🚀 核心升級：實裝「Ghost Buster 幽靈殺手」機制，DexScreener 救援前強制與 DB 對帳，徹底清除 RAM 殘留倉位！
 
 require('dotenv').config();
 require('events').EventEmitter.defaultMaxListeners = 50; 
@@ -50,9 +46,7 @@ let BRAND_BLACKLIST = new Set();
 async function syncBrandBlacklist() {
     try {
         const cachedStr = await redisClient.get('cache:brand_blacklist');
-        if (cachedStr) {
-            BRAND_BLACKLIST = new Set(JSON.parse(cachedStr));
-        }
+        if (cachedStr) BRAND_BLACKLIST = new Set(JSON.parse(cachedStr));
     } catch (e) {}
 }
 syncBrandBlacklist(); 
@@ -99,7 +93,6 @@ watchdogSub.on('message', async (channel, message) => {
 
             const decision = await keyRotator.enqueueRequest('MISTRAL', async (apiKey) => {
                 const cleanKey = apiKey.replace(/['"]/g, '').trim();
-                // 🛡️ 核心修復：Watchdog API URL Base64 絕對防腐
                 const mistralUrl = Buffer.from('aHR0cHM6Ly9hcGkubWlzdHJhbC5haS92MS9jaGF0L2NvbXBsZXRpb25z', 'base64').toString('utf-8');
                 
                 const res = await axios.post(mistralUrl, {
@@ -188,6 +181,41 @@ setInterval(async () => {
     }
 
     if (deadMints.length > 0) {
+        // 🚀 V10.53: 幽靈殺手機制 (Ghost Buster) - 在查 DexScreener 前先對帳 DB！
+        try {
+            const currentMode = portfolio.mode === 'LIVE' ? 'live' : 'paper';
+            const { data: realPositions, error } = await supabase
+                .from(`active_positions_${currentMode}`)
+                .select('mint_address')
+                .in('mint_address', deadMints);
+                
+            if (!error) {
+                const realMints = new Set(realPositions.map(p => p.mint_address));
+                const trueDeadMints = [];
+                
+                for (const m of deadMints) {
+                    if (!realMints.has(m)) {
+                        console.log(`👻 [Ghost Buster] 發現幽靈倉位 ${symbol_cache.get(m) || m}！DB 已經平倉但 RAM 卡住，立即清除！`);
+                        last_valid_ts.delete(m);
+                        latest_market_data.delete(m);
+                        symbol_cache.delete(m);
+                        token_strike_count.delete(m);
+                        token_last_dex_check_ts.delete(m);
+                        
+                        const idx = portfolio.positions.findIndex(p => p.mint_address === m);
+                        if (idx > -1) portfolio.positions.splice(idx, 1);
+                    } else {
+                        trueDeadMints.push(m);
+                    }
+                }
+                deadMints = trueDeadMints;
+            }
+        } catch (dbErr) {
+            console.warn(`⚠️ [Ghost Buster] DB 校對失敗:`, dbErr.message);
+        }
+
+        if (deadMints.length === 0) return; // 虛驚一場，全部都係幽靈倉位，無需 DexScreener 救援
+
         if (deadMints.length === activeMints.length && activeMints.length > 1) {
             console.warn(`🚨 [DEFCON 6] 全線斷線！準備進行 DexScreener 救援查價... (冷卻期: 30s)`);
         } else {
@@ -502,9 +530,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             llmReason = "LLM 資源池全線異常";
         }
 
-        // ---------------------------------------------------------
-        // 🚀 數據前置處理：提前讀取 DB 配置供 Kelly 使用
-        // ---------------------------------------------------------
         let maxPositions = poolType === 'NEWBORN' ? 4 : 8; 
         let currentMode = 'paper';
         let baseAmount = poolType === 'NEWBORN' ? 0.1 : 0.2; 
@@ -524,15 +549,9 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 .select('*', { count: 'exact', head: true }).like('strategy_type', `${poolType}%`);
             if (count !== null) currentPositionsCount = count;
         } catch(e) {}
-
-        // ---------------------------------------------------------
-        // 🚀 V10.52 終極數學引擎：連續 Bayesian 融合 + 動態 Kelly
-        // ---------------------------------------------------------
         
         const priorOdds = priorProb / (1 - priorProb);
         
-        // 🧬 數學進化 1：Sigmoid 幾何平滑曲線，徹底消除階梯跳躍！
-        // 分數 10 = ~2.0x, 分數 5 = ~1.5x, 分數 0 = ~0.4x, 分數 -5 = ~0.2x
         const bayesFactor = 0.2 + (1.8 / (1.0 + Math.exp(-0.6 * (llmScore - 3.5))));
 
         const posteriorOdds = priorOdds * bayesFactor;
@@ -549,7 +568,6 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         const fStar = finalWinProb - ((1 - finalWinProb) / kellyBRatio);
         const safeKelly = Math.max(0, fStar * 0.25); 
         
-        // 🧬 數學進化 2：Kelly 分母動態化，按系統最大倉位計算標準資金比例
         const standardPositionSize = 1.0 / (maxPositions > 0 ? maxPositions : 10);
         let kellyMultiplier = Math.max(0.1, Math.min(safeKelly / standardPositionSize, 3.0)); 
 
@@ -688,7 +706,7 @@ burnSub.on('message', async (channel, message) => {
 });
 
 async function bootstrap() {
-    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.52 (數學完全體防腐版) 啟動中...");
+    console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.53 (幽靈殺手版) 啟動中...");
     
     await initPortfolio();
 
