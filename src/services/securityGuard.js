@@ -12,7 +12,7 @@ const config = require('../config/config');
 const { cacheManager } = require('./cacheManager'); 
 const Redis = require('ioredis');
 
-const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
+const redisClient = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
 
 // 🎯 全局 DexScreener 請求鎖，防止併發轟炸
 let lastDexRequestTime = 0;

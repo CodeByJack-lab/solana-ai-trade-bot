@@ -3,7 +3,7 @@
 // 🚀 核心更新：清理所有 V9 廢棄劇本與 POSITION_WATCHDOG，完美對齊 Supabase 數據庫的最新 Prompt 與三重降級 Model。
 
 const Redis = require('ioredis');
-const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
+const redis = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
 
 class CacheManager {
     constructor() {

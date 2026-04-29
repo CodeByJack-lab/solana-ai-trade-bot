@@ -11,7 +11,7 @@ const configEnv = require('../config/config');
 const Redis = require('ioredis');
 const { Codex } = require('@codex-data/sdk'); 
 
-const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
+const redis = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
 
 // 🎯 初始化 Codex SDK
 const sdk = new Codex(process.env.DEFINED_API_KEY);

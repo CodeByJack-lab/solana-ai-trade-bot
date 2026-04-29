@@ -6,7 +6,7 @@
 const config = require('../config/config');
 const Redis = require('ioredis');
 // 建立 Redis 連線供全域鎖使用
-const redis = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
+const redis = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
 
 class KeyRotator {
     constructor() {
