@@ -17,6 +17,7 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "zod": "^3.23.8",
     "@codex-data/sdk": "^2.3.1",
     "@google/generative-ai": "^0.24.1",
     "@raydium-io/raydium-sdk-v2": "^0.2.39-alpha",
