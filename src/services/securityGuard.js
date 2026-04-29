@@ -134,7 +134,8 @@ class SecurityGuard {
                         description: pair.info?.description || '', liquidity: pair.liquidity?.usd || 0, fdv: pair.fdv || 0,
                         volume5m: pair.volume?.m5 || 0, buys5m: pair.txns?.m5?.buys || 0, sells5m: pair.txns?.m5?.sells || 0,
                         h1: parseFloat(pair.priceChange?.h1) || 0, priceUsd: parseFloat(pair.priceUsd) || 0,
-                        hasSocials: (pair.info?.socials?.length > 0 || pair.info?.websites?.length > 0)
+                        hasSocials: (pair.info?.socials?.length > 0 || pair.info?.websites?.length > 0),
+                        pairCreatedAt: pair.pairCreatedAt || null  // P0-3: LP age check
                     };
                 }
                 return null; 
@@ -196,6 +197,31 @@ class SecurityGuard {
             if (top10Pct > 0.80) return false; 
             return true;
         } catch (err) { return true; }
+    }
+
+    // P0-3: LP 流動性風險評估（零額外 API，使用已取得 marketData）
+    _checkLpRisk(marketData) {
+        try {
+            const liquidity = parseFloat(marketData?.liquidity || 0);
+            const pairAgeMs = marketData?.pairCreatedAt
+                ? Date.now() - marketData.pairCreatedAt
+                : null;
+            const pairAgeMins = pairAgeMs ? pairAgeMs / 60000 : 9999;
+
+            if (liquidity < 1000) {
+                return { riskLevel: 'CRITICAL', penaltyPts: 0, reason: '流動性極低 (<$1000)，拒絕入場' };
+            }
+            if (pairAgeMins < 5 && liquidity < 5000) {
+                return { riskLevel: 'HIGH', penaltyPts: 8, reason: `超新幣 (${pairAgeMins.toFixed(1)}m) + 低流動性 ($${liquidity.toFixed(0)})` };
+            }
+            if (liquidity < 5000) {
+                return { riskLevel: 'MEDIUM', penaltyPts: 4, reason: `流動性偏低 ($${liquidity.toFixed(0)})` };
+            }
+            return { riskLevel: 'OK', penaltyPts: 0, reason: '' };
+        } catch (err) {
+            console.warn(`⚠️ [LP Check] 解析失敗: ${err.message}`);
+            return { riskLevel: 'UNKNOWN', penaltyPts: 2, reason: '無法驗證 LP' };
+        }
     }
 
     async calculateQuantScore(mint, type = 'NEWBORN', preFetchedData = null) {
@@ -303,6 +329,12 @@ class SecurityGuard {
         const VERIFIED_TOKENS = cacheManager.getVerifiedTokens();
         if (VERIFIED_TOKENS[upperSymbol] && mint !== VERIFIED_TOKENS[upperSymbol]) return { numeric_score: 0, isSafe: false, reason: `🛑 終極防偽攔截: 假冒幣`, marketData };
 
+        // P0-3: LP 流動性風險預篩（從已取得的 marketData 計算，零額外 API）
+        const lpRisk = this._checkLpRisk(marketData);
+        if (lpRisk.riskLevel === 'CRITICAL') {
+            return { numeric_score: 0, isSafe: false, reason: `🔥 [LP Filter] ${lpRisk.reason}`, marketData, applied_ml_strategy_id: targetParam?.id || 0 };
+        }
+
         let score = 0;
         let reasons = [];
 
@@ -310,8 +342,15 @@ class SecurityGuard {
         if (textAnalysis.isFatal) return { numeric_score: 0, isSafe: false, reason: `🛑 一票否決: ${textAnalysis.reasons.join(', ')}`, marketData };
         if (textAnalysis.reasons.length > 0) reasons.push(...textAnalysis.reasons);
 
-        let coreScore = 10; 
+        let coreScore = 10;
         coreScore = Math.max(0, coreScore - textAnalysis.safetyPenalty);
+
+        // P0-3: LP penalty 扣分（CRITICAL 已在上方攔截，這裡只處理 HIGH/MEDIUM）
+        if (lpRisk.penaltyPts > 0) {
+            coreScore = Math.max(0, coreScore - lpRisk.penaltyPts);
+            console.log(`🔥 [LP Filter] ${marketData.symbol} LP ${lpRisk.riskLevel}：扣 ${lpRisk.penaltyPts} 分 (${lpRisk.reason})`);
+            reasons.push(`LP風險-${lpRisk.riskLevel}`);
+        }
 
         const safetyCheck = await this._checkContractSafety(mint, textAnalysis.requireAuthCheck);
         if (safetyCheck.isSafe) {
