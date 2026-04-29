@@ -153,6 +153,7 @@ setInterval(() => {
     if (cleanedCount > 0) console.log(`🧹 [Garbage Collector] 已釋放 ${cleanedCount} 隻過期代幣的 RAM 緩存。`);
 }, 60 * 1000); 
 
+// 替換 trade_frontline.js 中的 DexScreener 救援輪詢 (大約在 Line 130-220 之間)
 const token_strike_count = new Map(); 
 const token_last_dex_check_ts = new Map(); 
 
@@ -181,7 +182,6 @@ setInterval(async () => {
     }
 
     if (deadMints.length > 0) {
-        // 🚀 V10.53: 幽靈殺手機制 (Ghost Buster) - 在查 DexScreener 前先對帳 DB！
         try {
             const currentMode = portfolio.mode === 'LIVE' ? 'live' : 'paper';
             const { data: realPositions, error } = await supabase
@@ -214,12 +214,15 @@ setInterval(async () => {
             console.warn(`⚠️ [Ghost Buster] DB 校對失敗:`, dbErr.message);
         }
 
-        if (deadMints.length === 0) return; // 虛驚一場，全部都係幽靈倉位，無需 DexScreener 救援
+        if (deadMints.length === 0) return; 
+
+        // 🚀 新增：清楚印出究竟係邊幾隻幣卡住咗！
+        const deadSymbols = deadMints.map(m => symbol_cache.get(m) || `${m.slice(0,4)}...`).join(', ');
 
         if (deadMints.length === activeMints.length && activeMints.length > 1) {
             console.warn(`🚨 [DEFCON 6] 全線斷線！準備進行 DexScreener 救援查價... (冷卻期: 30s)`);
         } else {
-            console.warn(`⚠️ [Price Warning] 發現 ${deadMints.length} 隻持倉幣超時無報價，啟動 DexScreener 獨立監視 (冷卻期: 30s)...`);
+            console.warn(`⚠️ [Price Warning] 發現 ${deadMints.length} 隻持倉幣 (${deadSymbols}) 超時無報價，啟動 DexScreener 獨立監視 (冷卻期: 30s)...`);
         }
 
         try {
@@ -261,23 +264,36 @@ setInterval(async () => {
                     token_strike_count.set(m, strikes);
                     
                     const sym = symbol_cache.get(m) || 'UNKNOWN';
-                    console.log(`💀 [Rugpull Check] 幣種 ${sym} 第 ${strikes}/3 次 DexScreener 查價失敗或池已乾... (下次查價需等 30 秒)`);
+                    console.log(`💀 [Rugpull Check] 幣種 ${sym} 第 ${strikes}/3 次 DexScreener 查價失敗或池已乾...`);
 
                     if (strikes >= 3) {
-                        console.error(`💥 [RUGPULL DETECTED] ${sym} 連續 3 次 (跨越 90 秒) 失去報價或流動性歸零，判定為已撤池！執行緊急清倉！`);
+                        console.error(`💥 [RUGPULL DETECTED] ${sym} 連續 3 次失去報價或流動性歸零，判定為已撤池！執行緊急清倉！`);
                         
                         const pos = portfolio.positions.find(p => p.mint_address === m);
                         if (pos) {
                             const lockKey = `sell_lock:${m}`;
                             const acquired = await redisClient.set(lockKey, 'LOCKED', 'EX', 30, 'NX');
                             if (acquired) {
-                                const sold = await runSellPipeline(pos, 0.000000001, `🚨 徹底失去報價 (連續3次 DexScreener 查價失敗)，判定為 Rugpull 撤池`, 1.0);
-                                if (sold) {
-                                    const idx = portfolio.positions.findIndex(p => p.mint_address === m);
-                                    if (idx > -1) portfolio.positions.splice(idx, 1);
-                                } else {
-                                    await redisClient.del(lockKey);
+                                const sold = await runSellPipeline(pos, 0.000000001, `🚨 徹底失去報價 (判定 Rugpull 撤池)`, 1.0);
+                                
+                                // 🚀 終極火化程序 (Forced Cremation)
+                                if (!sold) {
+                                    console.error(`🪦 [Forced Cremation] 由於流動性枯竭，${sym} 無法透過 Jupiter 賣出。執行強制火化，從 DB 中徹底抹除 (-100% 虧損)！`);
+                                    const currentMode = portfolio.mode === 'LIVE' ? 'live' : 'paper';
+                                    await supabase.from(`active_positions_${currentMode}`).delete().eq('mint_address', m);
+                                    
+                                    // 寫入虧損紀錄
+                                    await supabase.from(`trade_history_${currentMode}`).insert([{
+                                        mint_address: m, token_symbol: sym, action: 'LIQUIDATED',
+                                        entry_price_sol: pos.entry_price_sol, exit_price_sol: 0,
+                                        realized_pnl_pct: -100.0, reason: "🪦 徹底歸零，無法賣出強制火化"
+                                    }]);
                                 }
+
+                                // 無論賣唔賣得出，都從 RAM 中踢走佢，解除無限 Loop
+                                const idx = portfolio.positions.findIndex(p => p.mint_address === m);
+                                if (idx > -1) portfolio.positions.splice(idx, 1);
+                                await redisClient.del(lockKey);
                             }
                         }
                         token_strike_count.delete(m);
@@ -293,7 +309,7 @@ setInterval(async () => {
             console.error(`❌ [DexScreener Rescue] 救援 API 連線異常: ${err.message}`);
         }
     }
-}, 4000); 
+}, 4000);
 
 function runLayer1PhysicalFilter(symbol) {
     if (!symbol) return false;
