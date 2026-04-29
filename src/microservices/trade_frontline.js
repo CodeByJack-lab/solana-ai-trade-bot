@@ -56,10 +56,11 @@ redisSub.subscribe('price_updates', 'trending_signal');
 redisSub.on('message', (channel, message) => {
     if (channel === 'price_updates') {
         const now = Date.now();
-        // 🚀 核心修復：每 30 秒先寫一次入 DB，大幅減輕 Supabase 負擔！
-        if (now - last_koyeb_heartbeat_db_write > 30000) {
+        
+        // 🚀 終極防呆版：直接將時間戳綁定喺 redisSub 身上，完美避開 Scope Error！
+        if (!redisSub.last_koyeb_heartbeat || now - redisSub.last_koyeb_heartbeat > 30000) {
             healthMonitor.recordHeartbeat('PriceBot_Koyeb');
-            last_koyeb_heartbeat_db_write = now;
+            redisSub.last_koyeb_heartbeat = now;
         }
 
         try {
@@ -69,7 +70,9 @@ redisSub.on('message', (channel, message) => {
                 last_valid_ts.set(mint, data.ts);
                 latest_market_data.set(mint, data); 
             }
-        } catch (e) {}
+        } catch (e) {
+            console.error("解析價錢廣播失敗:", e.message);
+        }
     }
     
     if (channel === 'trending_signal') {
