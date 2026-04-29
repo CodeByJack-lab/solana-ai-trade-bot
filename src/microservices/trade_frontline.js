@@ -621,6 +621,14 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
             console.warn(`⚠️ [Frontline] 讀取動態及格線失敗，使用預設防守線 70 分`);
         }
 
+        // P0-2: BULL_FRENZY 保守參數強制覆蓋（防止 ML 錯誤降閾）
+        if (envState.climate === 'BULL_FRENZY') {
+            buyThreshold = Math.max(buyThreshold, 75);
+            dynamicSL    = Math.max(dynamicSL, -12.0); // -12% 比 -15% 更嚴（數值更大）
+            kellyMultiplier = Math.min(kellyMultiplier, 1.5); // 限制 Kelly 上限
+            console.log(`🛡️ [BULL_FRENZY Guard] 強制保守: threshold=${buyThreshold}, sl=${dynamicSL}%, kelly_cap=1.5x`);
+        }
+
         if (llmFailed) {
             console.log(`🛑 [Hard-Fail 防禦] 偵測到 LLM 異常，強行將 Buy Threshold 從 ${buyThreshold} 提升至 999，阻截盲買風險！`);
             buyThreshold = 999;
