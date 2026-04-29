@@ -164,7 +164,7 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio,
         state.peak_pnl_pct = pnlPct;
         if (pnlPct - state.peak_pnl_written >= 5) {
             state.peak_pnl_written = pnlPct;
-            const tblName = pos.strategy_type?.includes('LIVE') ? 'active_positions_live' : 'active_positions_paper';
+            const tblName = (getPortfolio()?.mode === 'LIVE') ? 'active_positions_live' : 'active_positions_paper';
             supabase.from(tblName).update({ highest_pnl_pct: pnlPct }).eq('mint_address', pos.mint_address).catch(() => {});
         }
     }
