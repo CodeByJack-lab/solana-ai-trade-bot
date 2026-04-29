@@ -766,97 +766,95 @@ async function bootstrap() {
     await healthMonitor.setStatus('Hunter_Frontline', '🟢 獵人掃描中 (數學完全體)');
 
     // =========================================================================
-    // 🎮 Command Queue Processor — 每 5 秒輪詢 Dashboard 平倉指令
+    // 🎮 Command Queue Processor — Supabase Realtime (INSERT 即時觸發)
     // =========================================================================
-    setInterval(async () => {
+    async function executeCommand(cmd) {
+        // 先用 Redis NX 搶佔，確保多個 Bot 實例不會重複執行同一條指令
+        const cmdLock = `cmd_lock:${cmd.id}`;
+        const acquired = await redisClient.set(cmdLock, 'LOCKED', 'EX', 60, 'NX');
+        if (!acquired) return; // 已有其他實例在處理
+
+        await supabase.from('command_queue').update({ status: 'PROCESSING' }).eq('id', cmd.id);
+
+        const portfolio = getPortfolio();
+
         try {
-            const { data: commands, error } = await supabase
-                .from('command_queue')
-                .select('*')
-                .eq('status', 'PENDING')
-                .order('created_at', { ascending: true })
-                .limit(5);
-
-            if (error || !commands || commands.length === 0) return;
-
-            const portfolio = getPortfolio();
-            const { data: config } = await supabase.from('system_config').select('trade_mode').eq('id', 1).single();
-            const currentMode = config?.trade_mode === 'LIVE' ? 'live' : 'paper';
-
-            for (const cmd of commands) {
-                // 先標記為 PROCESSING，防止重複執行
-                await supabase.from('command_queue').update({ status: 'PROCESSING' }).eq('id', cmd.id);
-
-                try {
-                    if (cmd.command_type === 'SELL_SINGLE' && cmd.mint_address) {
-                        const pos = portfolio.positions.find(p => p.mint_address === cmd.mint_address);
-                        if (!pos) {
-                            console.log(`⚠️ [CmdQueue] SELL_SINGLE: 找不到倉位 ${cmd.mint_address}，可能已平倉`);
-                            await supabase.from('command_queue').update({ status: 'DONE' }).eq('id', cmd.id);
-                            continue;
-                        }
-
-                        const lockKey = `sell_lock:${cmd.mint_address}`;
-                        const acquired = await redisClient.set(lockKey, 'CMD_QUEUE', 'EX', 30, 'NX');
-                        if (!acquired) {
-                            console.log(`⚠️ [CmdQueue] SELL_SINGLE: ${pos.token_symbol} 鎖定中，稍後重試`);
-                            await supabase.from('command_queue').update({ status: 'PENDING' }).eq('id', cmd.id);
-                            continue;
-                        }
-
-                        const currentPrice = latest_market_data.get(cmd.mint_address)?.p || pos.entry_price_sol;
-                        console.log(`🎮 [CmdQueue] 執行手動平倉: ${pos.token_symbol || cmd.mint_address}`);
-                        const sold = await runSellPipeline(pos, currentPrice, '🎮 Dashboard 手動平倉指令', 1.0);
-
-                        if (sold) {
-                            const idx = portfolio.positions.findIndex(p => p.mint_address === cmd.mint_address);
-                            if (idx > -1) portfolio.positions.splice(idx, 1);
-                            await supabase.from('command_queue').update({ status: 'DONE' }).eq('id', cmd.id);
-                            console.log(`✅ [CmdQueue] ${pos.token_symbol} 手動平倉成功`);
-                        } else {
-                            await redisClient.del(lockKey);
-                            await supabase.from('command_queue').update({ status: 'FAILED' }).eq('id', cmd.id);
-                            console.error(`❌ [CmdQueue] ${pos.token_symbol} 手動平倉失敗`);
-                        }
-
-                    } else if (cmd.command_type === 'SELL_ALL') {
-                        console.log(`🎮 [CmdQueue] 執行全線平倉指令，共 ${portfolio.positions.length} 個倉位`);
-                        const posToSell = [...portfolio.positions];
-                        let successCount = 0;
-
-                        for (const pos of posToSell) {
-                            const lockKey = `sell_lock:${pos.mint_address}`;
-                            const acquired = await redisClient.set(lockKey, 'CMD_QUEUE_ALL', 'EX', 30, 'NX');
-                            if (!acquired) continue;
-
-                            const currentPrice = latest_market_data.get(pos.mint_address)?.p || pos.entry_price_sol;
-                            const sold = await runSellPipeline(pos, currentPrice, '🎮 Dashboard 全線平倉指令', 1.0);
-
-                            if (sold) {
-                                const idx = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
-                                if (idx > -1) portfolio.positions.splice(idx, 1);
-                                successCount++;
-                            } else {
-                                await redisClient.del(lockKey);
-                            }
-                        }
-
-                        await supabase.from('command_queue').update({ status: 'DONE' }).eq('id', cmd.id);
-                        console.log(`✅ [CmdQueue] 全線平倉完成：成功 ${successCount}/${posToSell.length}`);
-
-                    } else {
-                        // 未知指令，直接標記完成
-                        await supabase.from('command_queue').update({ status: 'DONE' }).eq('id', cmd.id);
-                    }
-                } catch (cmdErr) {
-                    console.error(`❌ [CmdQueue] 執行指令 ${cmd.id} 失敗:`, cmdErr.message);
-                    await supabase.from('command_queue').update({ status: 'FAILED' }).eq('id', cmd.id);
+            if (cmd.command_type === 'SELL_SINGLE' && cmd.mint_address) {
+                const pos = portfolio.positions.find(p => p.mint_address === cmd.mint_address);
+                if (!pos) {
+                    console.log(`⚠️ [CmdQueue] SELL_SINGLE: 找不到倉位 ${cmd.mint_address}，可能已平倉`);
+                    await supabase.from('command_queue').update({ status: 'DONE' }).eq('id', cmd.id);
+                    return;
                 }
+
+                const sellLock = `sell_lock:${cmd.mint_address}`;
+                const sellAcquired = await redisClient.set(sellLock, 'CMD_QUEUE', 'EX', 30, 'NX');
+                if (!sellAcquired) {
+                    console.log(`⚠️ [CmdQueue] ${pos.token_symbol} sell_lock 被佔用，重設為 PENDING 等下次`);
+                    await supabase.from('command_queue').update({ status: 'PENDING' }).eq('id', cmd.id);
+                    await redisClient.del(cmdLock);
+                    return;
+                }
+
+                const currentPrice = latest_market_data.get(cmd.mint_address)?.p || pos.entry_price_sol;
+                console.log(`🎮 [CmdQueue] 執行手動平倉: ${pos.token_symbol || cmd.mint_address}`);
+                const sold = await runSellPipeline(pos, currentPrice, '🎮 Dashboard 手動平倉指令', 1.0);
+
+                if (sold) {
+                    const idx = portfolio.positions.findIndex(p => p.mint_address === cmd.mint_address);
+                    if (idx > -1) portfolio.positions.splice(idx, 1);
+                    await supabase.from('command_queue').update({ status: 'DONE' }).eq('id', cmd.id);
+                    console.log(`✅ [CmdQueue] ${pos.token_symbol} 手動平倉成功`);
+                } else {
+                    await redisClient.del(sellLock);
+                    await supabase.from('command_queue').update({ status: 'FAILED' }).eq('id', cmd.id);
+                    console.error(`❌ [CmdQueue] ${pos.token_symbol} 手動平倉失敗`);
+                }
+
+            } else if (cmd.command_type === 'SELL_ALL') {
+                console.log(`🎮 [CmdQueue] 執行全線平倉指令，共 ${portfolio.positions.length} 個倉位`);
+                const posToSell = [...portfolio.positions];
+                let successCount = 0;
+
+                for (const pos of posToSell) {
+                    const sellLock = `sell_lock:${pos.mint_address}`;
+                    const sellAcquired = await redisClient.set(sellLock, 'CMD_QUEUE_ALL', 'EX', 30, 'NX');
+                    if (!sellAcquired) continue;
+
+                    const currentPrice = latest_market_data.get(pos.mint_address)?.p || pos.entry_price_sol;
+                    const sold = await runSellPipeline(pos, currentPrice, '🎮 Dashboard 全線平倉指令', 1.0);
+
+                    if (sold) {
+                        const idx = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
+                        if (idx > -1) portfolio.positions.splice(idx, 1);
+                        successCount++;
+                    } else {
+                        await redisClient.del(sellLock);
+                    }
+                }
+
+                await supabase.from('command_queue').update({ status: 'DONE' }).eq('id', cmd.id);
+                console.log(`✅ [CmdQueue] 全線平倉完成：成功 ${successCount}/${posToSell.length}`);
+
+            } else {
+                await supabase.from('command_queue').update({ status: 'DONE' }).eq('id', cmd.id);
             }
-        } catch (e) {
-            // 靜默失敗，不影響主流程
+        } catch (cmdErr) {
+            console.error(`❌ [CmdQueue] 執行指令 ${cmd.id} 失敗:`, cmdErr.message);
+            await supabase.from('command_queue').update({ status: 'FAILED' }).eq('id', cmd.id);
         }
-    }, 5000);
+    }
+
+    supabase.channel('command_queue_listener')
+        .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'command_queue' }, (payload) => {
+            const cmd = payload.new;
+            if (cmd.status !== 'PENDING') return;
+            console.log(`🎮 [CmdQueue] 收到即時指令: ${cmd.command_type} ${cmd.mint_address || ''}`);
+            executeCommand(cmd).catch(e => console.error(`❌ [CmdQueue] executeCommand 崩潰:`, e.message));
+        })
+        .subscribe((status) => {
+            console.log(`🎮 [CmdQueue] Realtime 頻道狀態: ${status}`);
+        });
 }
 
 bootstrap();
