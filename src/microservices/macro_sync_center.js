@@ -333,7 +333,23 @@ class EnvironmentCenter {
             }, 'macro_climate_analyst'); 
 
             if (parsedAI.climate && ['BULL_FRENZY', 'CHOPPY', 'BEAR_PANIC'].includes(parsedAI.climate)) {
-                currentClimate = parsedAI.climate;
+                // P1-3: BULL_FRENZY 需要多重信號確認，防止局部 pump 誤判
+                if (parsedAI.climate === 'BULL_FRENZY') {
+                    let confirmCount = 0;
+                    if ((metrics.sol_change || 0) >= 5.0)  confirmCount++; // SOL 24h > +5%
+                    if ((metrics.btc_change || 0) >= 3.0)  confirmCount++; // BTC 24h > +3%
+                    if (newsScore >= 7)                     confirmCount++; // 新聞極度正面
+                    if (winRate > 55)                       confirmCount++; // 內部勝率強勁
+
+                    if (confirmCount >= 2) {
+                        currentClimate = 'BULL_FRENZY';
+                    } else {
+                        currentClimate = 'CHOPPY';
+                        console.log(`🌡️ [Climate] BULL_FRENZY 信號不足 (${confirmCount}/4)，降級為 CHOPPY`);
+                    }
+                } else {
+                    currentClimate = parsedAI.climate;
+                }
             }
             if (parsedAI.news_score !== undefined) {
                 let aiScore = parseInt(parsedAI.news_score);
