@@ -375,12 +375,100 @@ setInterval(async () => {
 }, 60 * 1000);
 
 // ------------------------------------------------------------------
+// P0-1: 持倉失聯守護進程 (Position Watchdog)
+// 每 10 分鐘檢查一次，超過 15 分鐘無 price update 的倉位強制出場
+// ------------------------------------------------------------------
+async function triggerEmergencySell(posData, reason) {
+    const lockKey = `sell_lock:${posData.mint_address}`;
+    const acquired = await redisClient.set(lockKey, '1', 'EX', 30, 'NX');
+    if (!acquired) {
+        console.warn(`⚠️ [WATCHDOG] ${posData.token_symbol || posData.mint_address} sell_lock 已被佔用，跳過。`);
+        return;
+    }
+    try {
+        const portfolio = getPortfolio();
+        // 優先用 RAM 倉位（含即時價格），否則用 DB 數據
+        const pos = portfolio.positions?.find(p => p.mint_address === posData.mint_address) || posData;
+        const emergencyPrice = (pos.entry_price_sol || posData.entry_price_sol) * 0.01;
+        console.error(`🚨 [WATCHDOG] 執行緊急出場: ${pos.token_symbol || posData.mint_address} @ emergencyPrice=${emergencyPrice}`);
+        const sold = await runSellPipeline(pos, emergencyPrice, reason, 1.0);
+        if (sold) {
+            const idx = portfolio.positions?.findIndex(p => p.mint_address === posData.mint_address) ?? -1;
+            if (idx > -1) portfolio.positions.splice(idx, 1);
+            guard_states.delete(posData.mint_address);
+            last_valid_ts.delete(posData.mint_address);
+        }
+    } catch (err) {
+        console.error(`❌ [WATCHDOG] Emergency sell 失敗 ${posData.mint_address}: ${err.message}`);
+    } finally {
+        await redisClient.del(lockKey); // 必須在 finally 釋放鎖
+    }
+}
+
+function startPositionWatchdog() {
+    const WATCHDOG_INTERVAL_MS = 10 * 60 * 1000; // 每 10 分鐘
+    const STALE_THRESHOLD_MS   = 15 * 60 * 1000; // 超過 15 分鐘無 price update = 失聯
+
+    setInterval(async () => {
+        if (!globalConfig.is_running) return;
+        try {
+            const portfolio = getPortfolio();
+            const tradeMode = portfolio?.mode || 'PAPER';
+            const tableName = tradeMode === 'LIVE' ? 'active_positions_live' : 'active_positions_paper';
+
+            const { data: positions, error } = await supabase
+                .from(tableName)
+                .select('id, mint_address, token_symbol, entry_price_sol, created_at');
+
+            if (error || !positions || positions.length === 0) return;
+
+            const now = Date.now();
+
+            for (const pos of positions) {
+                const mint = pos.mint_address;
+                if (quarantine_lock.has(mint)) continue;
+
+                // 從 Redis 取得最後一次 price update 的時間戳
+                const lastPriceRaw = await redisClient.get(`last_price_ts:${mint}`);
+                const lastPriceTs  = lastPriceRaw ? parseInt(lastPriceRaw) : null;
+
+                const ageMs   = now - new Date(pos.created_at).getTime();
+                const ageMins = Math.floor(ageMs / 60000);
+
+                // 持倉超過 5 分鐘才啟動檢查，避免剛買入誤報
+                if (ageMins < 5) continue;
+
+                const isStale = lastPriceTs
+                    ? (now - lastPriceTs) > STALE_THRESHOLD_MS
+                    : ageMins > 15;
+
+                if (isStale) {
+                    const staleMins = lastPriceTs
+                        ? Math.floor((now - lastPriceTs) / 60000)
+                        : ageMins;
+                    console.error(
+                        `🚨 [WATCHDOG] ${pos.token_symbol || mint} 已失聯 ${staleMins} 分鐘！` +
+                        `強制執行 EMERGENCY_SELL。`
+                    );
+                    await triggerEmergencySell(pos, `🚨 WATCHDOG: 失聯 ${staleMins} 分鐘，強制出場`);
+                }
+            }
+        } catch (err) {
+            console.error(`❌ [WATCHDOG] 執行錯誤: ${err.message}`);
+        }
+    }, WATCHDOG_INTERVAL_MS);
+
+    console.log('🐕 [WATCHDOG] 持倉守護進程已啟動（每 10 分鐘巡邏）');
+}
+
+// ------------------------------------------------------------------
 // 9. 啟動程序
 // ------------------------------------------------------------------
 async function bootstrap() {
     console.log("🛡️ SOL QUANT MONITOR_GUARDS V10.42 (零影子淨化版) 啟動中...");
     await initPortfolio();
     await healthMonitor.setStatus('Monitor_Guards', '🟢 鐵衛巡邏中');
+    startPositionWatchdog();
 }
 
 bootstrap();
