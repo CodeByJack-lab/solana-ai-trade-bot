@@ -19,8 +19,8 @@ const { runSellPipeline } = require('../services/tradeService');
 const { fallbackEscapeService } = require('../services/fallbackEscapeService');
 const { healthMonitor } = require('../services/healthMonitor');
 
-const redisSub = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
-const redisClient = new Redis(process.env.REDIS_PUBLIC_URL || process.env.REDIS_URL || 'redis://localhost:6379');
+const redisSub = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
+const redisClient = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
 
 let globalConfig = { is_running: true };
 let localClimate = 'CHOPPY'; 
