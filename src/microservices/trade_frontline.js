@@ -55,7 +55,13 @@ setInterval(syncBrandBlacklist, 30000);
 redisSub.subscribe('price_updates', 'trending_signal'); 
 redisSub.on('message', (channel, message) => {
     if (channel === 'price_updates') {
-        healthMonitor.recordHeartbeat('PriceBot_Koyeb');
+        const now = Date.now();
+        // 🚀 核心修復：每 30 秒先寫一次入 DB，大幅減輕 Supabase 負擔！
+        if (now - last_koyeb_heartbeat_db_write > 30000) {
+            healthMonitor.recordHeartbeat('PriceBot_Koyeb');
+            last_koyeb_heartbeat_db_write = now;
+        }
+
         try {
             const payload = JSON.parse(message);
             for (const [mint, data] of Object.entries(payload)) {
