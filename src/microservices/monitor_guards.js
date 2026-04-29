@@ -38,11 +38,15 @@ class MathGuardState {
         this.sum_pv = 0; this.sum_v = 0;
         this.w_count = 0; this.w_mean = 0; this.w_m2 = 0;
         this.highest_price = 0; this.cvd = 0; this.last_p = 0;
-        
+
         // 🚀 專屬風控參數
-        this.sl = null; 
-        this.tp = null; 
+        this.sl = null;
+        this.tp = null;
         this.tp_level = 0; // 記錄最高觸發過的 TP 階梯
+
+        // P1-2: Trailing Stop 追蹤
+        this.peak_pnl_pct  = 0;   // 歷史最高 PnL%
+        this.peak_pnl_written = 0; // 上次寫入 DB 的值（避免頻繁寫入）
     }
     updateTick(p, v) {
         if (p > this.highest_price) this.highest_price = p;
@@ -154,7 +158,37 @@ async function executeV10MathGuards(pos, state, pnlPct, currentPrice, portfolio,
     }
 
     const highestPnlPct = ((state.highest_price - pos.entry_price_sol) / pos.entry_price_sol) * 100;
-    
+
+    // P1-2: 更新 peak PnL，超過舊高才寫 DB（每 5% 才觸發一次寫入）
+    if (pnlPct > state.peak_pnl_pct) {
+        state.peak_pnl_pct = pnlPct;
+        if (pnlPct - state.peak_pnl_written >= 5) {
+            state.peak_pnl_written = pnlPct;
+            const tblName = pos.strategy_type?.includes('LIVE') ? 'active_positions_live' : 'active_positions_paper';
+            supabase.from(tblName).update({ highest_pnl_pct: pnlPct }).eq('mint_address', pos.mint_address).catch(() => {});
+        }
+    }
+
+    // P1-2: Trailing Stop — 峰值 +15% 後啟動，回落 8% 觸發
+    if (state.peak_pnl_pct >= 15.0) {
+        const trailingThreshold = state.peak_pnl_pct - 8.0;
+        if (pnlPct < trailingThreshold) {
+            const lockKey = `sell_lock:${pos.mint_address}`;
+            if (await redisClient.set(lockKey, 'LOCKED', 'EX', 45, 'NX')) {
+                console.log(`🏃 [Trailing Stop] ${pos.token_symbol} 峰值 ${state.peak_pnl_pct.toFixed(1)}%，現時 ${pnlPct.toFixed(1)}%，觸發 trailing stop`);
+                const sold = await runSellPipeline(pos, currentPrice, `🏃 Trailing Stop (peak: ${state.peak_pnl_pct.toFixed(1)}%, now: ${pnlPct.toFixed(1)}%)`, 1.0);
+                if (sold) {
+                    guard_states.delete(pos.mint_address); last_valid_ts.delete(pos.mint_address);
+                    const idx = portfolio.positions.findIndex(p => p.mint_address === pos.mint_address);
+                    if (idx > -1) portfolio.positions.splice(idx, 1);
+                } else {
+                    await redisClient.del(lockKey);
+                }
+                return;
+            }
+        }
+    }
+
     // 🚀 使用專屬 TP 進行階梯體檢
     const milestoneLevel = Math.floor(pnlPct / actual_tp) * actual_tp;
 
@@ -334,14 +368,23 @@ setInterval(async () => {
             let shouldTimeStop = false;
             let stopReason = '';
 
-            // 🚀 動態提早斬纜 (Dynamic Time-Stop): Weed out the weak
+            // P1-1: MAE-Calibrated 早期動能衰退偵測（純時間+PnL，無需 CVD/VWAP）
+            if (!shouldTimeStop && ageMins >= 15 && ageMins < timeStopLimit && pnlPct < -5.0) {
+                shouldTimeStop = true;
+                stopReason = `✂️ [MAE Stop] 持倉 ${Math.floor(ageMins)}m，PnL ${pnlPct.toFixed(1)}% < -5%，動能衰退，提早出場`;
+            }
+            if (!shouldTimeStop && ageMins >= 30 && ageMins < timeStopLimit && pnlPct < -2.0) {
+                shouldTimeStop = true;
+                stopReason = `✂️ [MAE Stop] 持倉 ${Math.floor(ageMins)}m，PnL ${pnlPct.toFixed(1)}% < -2%，橫行確認，提早出場`;
+            }
+
+            // 🚀 動態提早斬纜 (Dynamic Time-Stop): CVD/VWAP 確認版（保留作補充）
             const state = guard_states.get(pos.mint_address);
-            if (ageMins >= 10 && ageMins < timeStopLimit && pnlPct < -5.0 && state) {
+            if (!shouldTimeStop && ageMins >= 10 && ageMins < timeStopLimit && pnlPct < -5.0 && state) {
                 const vwap = state.getVWAP();
                 const cvd = state.getCVD();
                 const isBelowVWAP = vwap > 0 && currentPrice < vwap * 0.95;
 
-                // 若買入超過 10 分鐘，依然浮虧大於 5%，且 (大戶資金淨流出 或 跌穿 VWAP 5% 以上)
                 if (cvd < 0 || isBelowVWAP) {
                     shouldTimeStop = true;
                     stopReason = `✂️ Dynamic Time-Stop: 早期動能衰退，提早斬纜 (持有 ${Math.floor(ageMins)}m)`;
