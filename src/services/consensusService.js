@@ -15,9 +15,15 @@ class ConsensusService {
         const promptId = poolType === 'NEWBORN' ? 'meme_scout' : 'trending_scout';
         const symbol = marketData.symbol || 'UNKNOWN';
         const name = marketData.name || 'UNKNOWN';
+        const climate = options.climate || 'CHOPPY';
 
         try {
-            const promptConfig = cacheManager.getPromptConfig(promptId, { token_symbol: symbol, name: name });
+            const promptConfig = cacheManager.getPromptConfig(promptId, {
+                token_symbol: symbol,
+                name: name,
+                market_climate: climate,
+                description: marketData.description || ''
+            });
             const systemPrompt = promptConfig.parsedPrompt;
             
             const targetProvider = 'MISTRAL';

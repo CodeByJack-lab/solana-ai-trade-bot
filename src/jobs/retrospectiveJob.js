@@ -67,15 +67,17 @@ const retrospectiveJob = {
             // 獲取 Prompt
             let parsedPrompt = "";
             let targetProvider = 'GEMINI';
-            
+            let dbModels = []; // 由 DB 配置讀取，避免 hardcode
+
             try {
                 const promptConfig = cacheManager.getPromptConfig('master_retrospective', {
-                    totalTrades, winRate, totalPnlSol: totalPnlSol.toFixed(4), newsScore: config?.latest_news_score || 50, 
-                    autopsyReport, lastAiMemory: safeMemory, 
-                    currentMemeScout, currentTrendingScout 
+                    totalTrades, winRate, totalPnlSol: totalPnlSol.toFixed(4), newsScore: config?.latest_news_score || 50,
+                    autopsyReport, lastAiMemory: safeMemory,
+                    currentMemeScout, currentTrendingScout
                 });
                 parsedPrompt = promptConfig?.parsedPrompt;
                 targetProvider = promptConfig?.provider || 'GEMINI';
+                dbModels = Array.isArray(promptConfig?.models) ? promptConfig.models : [];
             } catch (e) {
                 console.warn("⚠️ [Retrospective AI] 無法從 Cache 獲取 Prompt，使用 Hardcode 備用劇本。");
                 parsedPrompt = `請根據以下勝率 ${winRate}% 和利潤 ${totalPnlSol.toFixed(4)} SOL，以及敗局：${autopsyReport}。給出簡短的 briefing_notes，並微調 new_meme_scout_prompt 和 new_trending_scout_prompt。請返回 JSON。`;
@@ -84,7 +86,9 @@ const retrospectiveJob = {
             if (!parsedPrompt) throw new Error("無法生成 parsedPrompt");
 
             const aiDecision = await keyRotator.enqueueRequest(targetProvider, async (apiKey) => {
-                const modelToUse = targetProvider === 'GEMINI' ? 'gemini-2.5-flash' : 'llama3-8b-8192'; 
+                // 從 DB Prompt config 讀取 model；fallback 才用預設
+                const fallbackModel = targetProvider === 'GEMINI' ? 'gemini-2.5-flash' : 'llama3-8b-8192';
+                const modelToUse = dbModels[0] || fallbackModel;
                 let apiUrl, payload, headers;
 
                 if (targetProvider === 'GEMINI' || apiKey.startsWith('AIza')) {
