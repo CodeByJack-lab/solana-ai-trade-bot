@@ -1,7 +1,7 @@
 // src/services/cacheManager.js
 // 📝 檔案功能用途：V10 橋樑版全域大腦。不再連接 Supabase，只負責從 Redis 拉取 macro_sync_center 準備好的數據，供舊有服務同步讀取。
 // 🚀 核心更新：清理所有 V9 廢棄劇本與 POSITION_WATCHDOG，完美對齊 Supabase 數據庫的最新 Prompt 與三重降級 Model。
-
+const redis = require('../config/redis');
 const Redis = require('ioredis');
 const redis = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
 

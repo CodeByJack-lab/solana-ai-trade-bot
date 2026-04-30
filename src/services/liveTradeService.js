@@ -2,12 +2,13 @@
 // 📝 檔案功能用途：實盤簽名與上鏈引擎。
 // 🚀 V9.3 強化：實裝交易後「秒速餘額校準」機制，杜絕 PnL 數據幻象。
 // 🧨 V10.4 逃生升級：加入 Banzai 模式 (10倍 Jito 小費 + veryHigh Jupiter 優先級)，抵禦深度 Rug Pull。
+// 🛡️ CTA 升級：注入 withRpcRetry 防彈包裝，完美抵抗 RPC 429 塞車問題。
 
 const { Keypair, VersionedTransaction, Transaction, SystemProgram, PublicKey } = require('@solana/web3.js');
 const { connection, broadcastWithPromiseAny } = require('../config/solana'); 
 const { supabase } = require('../config/supabase'); 
 const { cacheManager } = require('./cacheManager'); 
-const { syncLiveBalanceToDB } = require('./portfolioService'); // 🚀 引入同步核心
+const { syncLiveBalanceToDB } = require('./portfolioService'); 
 const axios = require('axios');
 const { healthMonitor } = require('./healthMonitor'); 
 const configEnv = require('../config/config'); 
@@ -50,11 +51,27 @@ try {
     healthMonitor.setStatus('Live_Engine', `🔴 私鑰解析失敗`); 
 }
 
+// 🛡️ CTA 新增：RPC 防彈重試包裝器 (Exponential Backoff)
+async function withRpcRetry(fn, maxRetries = 3, baseDelayMs = 500) {
+    for (let i = 0; i < maxRetries; i++) {
+        try {
+            return await fn();
+        } catch (err) {
+            if (i === maxRetries - 1) throw err;
+            const isRateLimit = err.message?.includes('429') || err.message?.includes('Too Many Requests');
+            const delay = isRateLimit ? baseDelayMs * Math.pow(2, i) : baseDelayMs;
+            console.warn(`⚠️ [RPC 防護] 遭遇節點連線問題，${delay}ms 後重試 (嘗試 ${i + 1}/${maxRetries})...`);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+}
+
 async function pollSignatureStatus(signature, timeoutMs = 15000) {
     const startTime = Date.now();
     while (Date.now() - startTime < timeoutMs) {
         try {
-            const { value: status } = await connection.getSignatureStatus(signature, { searchTransactionHistory: true });
+            // 🛡️ 套用 RPC 防護
+            const { value: status } = await withRpcRetry(() => connection.getSignatureStatus(signature, { searchTransactionHistory: true }), 2, 1000);
             if (status && (status.confirmationStatus === 'confirmed' || status.confirmationStatus === 'finalized')) {
                 if (status.err) {
                     throw new Error(`Transaction failed on-chain: ${JSON.stringify(status.err)}`);
@@ -77,7 +94,6 @@ async function getJupiterSwapTransaction(quoteResponse, isEmergency = false) {
         config.headers['x-api-key'] = configEnv.external.jupiterApiKey.replace(/['"]/g, '').trim();
     }
 
-    // 🚀 緊急狀態下，拉爆 Jupiter Priority Fee
     const priorityFee = isEmergency ? "veryHigh" : "auto";
 
     const payload = {
@@ -138,8 +154,10 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
         transaction.sign([wallet]);
 
         console.log(`🔬 [Pre-flight Check] 正在本地模擬交易...`);
-        const simulationResult = await connection.simulateTransaction(transaction);
-        if (simulationResult.value.err) {
+        // 🛡️ 套用 RPC 防護
+        const simulationResult = await withRpcRetry(() => connection.simulateTransaction(transaction), 2, 500);
+        
+        if (simulationResult?.value?.err) {
             console.error(`❌ [Pre-flight Failed] 模擬失敗:`, JSON.stringify(simulationResult.value.err));
             healthMonitor.setStatus('Live_Engine', '🔴 模擬交易失敗'); 
             return { success: false, txid: null };
@@ -164,11 +182,10 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
             }
             currentTip = Math.min(p50Tip, maxBuyTipLamports);
         } else if (isEmergency) {
-            // 🧨 Banzai Mode: 10 倍小費強行擠入區塊
             currentTip = baseTip * 10; 
             console.log(`🧨 [Jito Banzai Mode] 緊急逃生！Jito 小費拉升 10 倍至 ${currentTip} Lamports!`);
         } else if (action === 'SELL') {
-            currentTip = baseTip * 2; // 普通賣出給予 2 倍
+            currentTip = baseTip * 2; 
         }
 
         const maxRetries = isEmergency ? 5 : 3; 
@@ -177,7 +194,11 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
         const txid = bs58.encode(transaction.signatures[0]);
 
         for (let attempt = 1; attempt <= maxRetries; attempt++) {
-            const latestBlockHash = await connection.getLatestBlockhash();
+            // 🛡️ 套用 RPC 防護：確保拎到最新 Blockhash，防止交易過期
+            const latestBlockHash = await withRpcRetry(() => connection.getLatestBlockhash('confirmed'), 3, 500);
+            
+            if (!latestBlockHash) throw new Error("無法從 RPC 獲取 Blockhash");
+
             const tipAccount = new PublicKey(JITO_TIP_ACCOUNTS[Math.floor(Math.random() * JITO_TIP_ACCOUNTS.length)]);
             const tipTx = new Transaction().add(SystemProgram.transfer({ fromPubkey: wallet.publicKey, toPubkey: tipAccount, lamports: Math.floor(currentTip) }));
             tipTx.recentBlockhash = latestBlockHash.blockhash;
@@ -192,15 +213,12 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
             try {
                 await pollSignatureStatus(txid, 5000); 
                 console.log(`🎉 [Live Trade] ${action} 交易已在鏈上確認！`);
-                
-                // 🚀 修復 4：交易確認後立即校準真倉餘額
                 syncLiveBalanceToDB(); 
-                
                 healthMonitor.setStatus('Live_Engine', `🟢 交易確認成功`); 
                 return { success: true, txid: txid }; 
             } catch (e) {
                 if (attempt < maxRetries) {
-                    currentTip = currentTip * 1.5; // 每次失敗再加碼 1.5 倍
+                    currentTip = currentTip * 1.5; 
                     console.log(`⚠️ [Jito Retry] 嘗試 ${attempt} 失敗，加碼小費至 ${Math.floor(currentTip)} Lamports`);
                 }
             }
@@ -210,10 +228,7 @@ async function executeLiveSwapUAT(quoteResponse, action, reason = '') {
             try {
                 const fastestSig = await broadcastWithPromiseAny(serializedSwapTx);
                 await pollSignatureStatus(fastestSig, 15000);
-                
-                // 🚀 修復 4：絕命廣播成功後也進行同步
                 syncLiveBalanceToDB(); 
-                
                 return { success: true, txid: fastestSig };
             } catch (broadcastErr) {}
         }

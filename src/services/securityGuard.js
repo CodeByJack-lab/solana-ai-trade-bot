@@ -40,24 +40,34 @@ class SecurityGuard {
     }
 
     // 🚀 核心升級：抓取真實 RPC 交易，按資金規模分桶 (Bucketing) 計算資訊熵
+    // 🛡️ V10.53 優化：加入 Redis Cache，同一 mint 30 分鐘內唔重複打 RPC，消除 [Fatal RPC Error] 警告
     async _checkTradeEntropy(mint) {
+        // ✅ 先查 Redis Cache，有就直接返回，唔打 RPC
+        try {
+            const cached = await redisClient.get(`entropy_cache:${mint}`);
+            if (cached !== null) return parseFloat(cached);
+        } catch (_) {}
+
         try {
             const mintPubkey = new PublicKey(mint);
-            const sigs = await connection.getSignaturesForAddress(mintPubkey, { limit: 20 });
-            if (sigs.length < 10) return 1.0; // 樣本太少，暫不判定為刷量
+            const sigs = await connection.getSignaturesForAddress(mintPubkey, { limit: 15 });
+            if (sigs.length < 10) {
+                await redisClient.set(`entropy_cache:${mint}`, '1.0', 'EX', 1800);
+                return 1.0; // 樣本太少，暫不判定為刷量
+            }
 
             const txSignatures = sigs.map(s => s.signature);
             // 輕量級抓取 Parsed Txs
             const txs = await connection.getParsedTransactions(txSignatures, { maxSupportedTransactionVersion: 0 });
 
-            let sequence = ""; 
+            let sequence = "";
             for (const tx of txs) {
                 if (!tx || !tx.meta || !tx.meta.preBalances || !tx.meta.postBalances) continue;
-                
+
                 // 粗略估算交易發起人 (Fee Payer) 的資金變動 (以 SOL 為單位)
                 const preBal = tx.meta.preBalances[0];
                 const postBal = tx.meta.postBalances[0];
-                const solSpent = Math.abs(preBal - postBal) / 1e9; 
+                const solSpent = Math.abs(preBal - postBal) / 1e9;
 
                 // 資金分桶 (Bucketing)
                 if (solSpent < 0.05) sequence += "0";      // 微塵單 (Dust)
@@ -65,13 +75,19 @@ class SecurityGuard {
                 else if (solSpent < 5.0) sequence += "2";  // 大戶單 (Dolphin)
                 else sequence += "3";                      // 巨鯨單 (Whale)
             }
-            
-            if (sequence.length < 5) return 1.0;
-            
+
+            if (sequence.length < 5) {
+                await redisClient.set(`entropy_cache:${mint}`, '1.0', 'EX', 1800);
+                return 1.0;
+            }
+
             const h = this._calculateEntropy(sequence);
-            return h; 
-        } catch (e) { 
-            console.warn(`⚠️ [Entropy Check] RPC 查核失敗 (${e.message})，降級放行`);
+            // ✅ 計算成功後寫入 cache，30 分鐘內唔再打 RPC
+            await redisClient.set(`entropy_cache:${mint}`, h.toString(), 'EX', 1800);
+            return h;
+
+        } catch (e) {
+            console.warn(`⚠️ [Entropy Check] RPC 查核失敗 (${e.message.substring(0, 80)})，降級放行`);
             return 1.0; // 若 RPC 失敗或 Rate Limit，預設放行以免誤殺
         }
     }
