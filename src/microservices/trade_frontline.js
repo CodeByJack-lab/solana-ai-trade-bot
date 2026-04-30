@@ -577,11 +577,20 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         
         const priorOdds = priorProb / (1 - priorProb);
         
-        const bayesFactor = 0.2 + (1.8 / (1.0 + Math.exp(-0.6 * (llmScore - 3.5))));
+        // 🔪 [Strategy Surgery 1A] LLM 降格為 Veto-only
+        // LLM score < -2：明顯詐騙/負面敘事，直接否決
+        // LLM score >= -2：中性，唔影響 Bayesian 計算
+        // 原理：LLM 識別「已 pump 完」，不應作正向信號使用
 
+        if (llmScore < -2 && !llmFailed) {
+            console.log(`🚫 [LLM Veto] ${symbol} 被敘事否決 (score: ${llmScore})，判定為負面敘事，拒絕入場`);
+            return; // 直接退出 processAsymmetricRouting
+        }
+
+        // LLM 唔影響 posteriorOdds，bayesFactor 固定 1.0（中性）
+        const bayesFactor = 1.0;
         const posteriorOdds = priorOdds * bayesFactor;
-        const finalWinProb = posteriorOdds / (1 + posteriorOdds); 
-        
+        const finalWinProb = posteriorOdds / (1 + posteriorOdds);
         let finalScore = Math.round(finalWinProb * 100);
 
         let kellyBRatio = 2.0; 
@@ -736,7 +745,61 @@ burnSub.on('message', async (channel, message) => {
             }
         } catch (e) {}
     }
+    
+    // 🎓 [Strategy Surgery 2B] Graduation 入場處理
+    if (channel === 'graduation_alerts') {
+        try {
+            const { mint, graduatedAt } = JSON.parse(message);
+            const symbol = symbol_cache.get(mint) || 'UNKNOWN';
+
+            console.log(`\n🎓 [Graduation Alert] 接收到 ${symbol} 畢業訊號，即時查價並送入決策漏斗...`);
+
+            // 等 5 秒讓 Raydium pool 穩定
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
+            // 查 DexScreener 取得最新數據
+            await redisClient.set('DEXSCREENER_LOCK', 'GRADUATION', 'EX', 10);
+            const res = await axios.get(
+                `https://api.dexscreener.com/latest/dex/tokens/${mint}`, 
+                { timeout: 4000 }
+            );
+            const pair = res.data?.pairs?.sort(
+                (a, b) => (b.liquidity?.usd || 0) - (a.liquidity?.usd || 0)
+            )[0];
+
+            if (pair && pair.priceUsd && pair.liquidity?.usd >= 10000) {
+                const marketData = {
+                    p: parseFloat(pair.priceUsd),
+                    v: pair.volume?.m5 || 0,
+                    b: pair.txns?.m5?.buys || 0,
+                    s: pair.txns?.m5?.sells || 0,
+                    l: pair.liquidity?.usd || 0,
+                    ts: Date.now(),
+                    description: pair.info?.description || pair.baseToken?.name || '',
+                    symbol: pair.baseToken?.symbol || symbol,
+                    name: pair.baseToken?.name || 'UNKNOWN',
+                    fdv: pair.fdv || 0,
+                    h1: parseFloat(pair.priceChange?.h1) || 0,
+                    hasSocials: (pair.info?.socials?.length > 0 || pair.info?.websites?.length > 0),
+                    pairCreatedAt: pair.pairCreatedAt || graduatedAt
+                };
+
+                latest_market_data.set(mint, marketData);
+                symbol_cache.set(mint, pair.baseToken?.symbol || symbol);
+
+                // 以 NEWBORN 類型送入決策漏斗
+                await processAsymmetricRouting(mint, 'NEWBORN');
+            } else {
+                console.log(`💀 [Graduation] ${symbol} 畢業後流動性不足 ($${pair?.liquidity?.usd || 0})，放棄`);
+            }
+        } catch (err) {
+            console.warn(`⚠️ [Graduation Alert] 處理失敗: ${err.message}`);
+        }
+    }
 });
+
+// 🎓 [Strategy Surgery 2B] 新增：Graduation alerts 訂閱
+redisSub.subscribe('graduation_alerts');
 
 async function bootstrap() {
     console.log("🚀 SOL QUANT HUNTER_FRONTLINE V10.53 (幽靈殺手版) 啟動中...");

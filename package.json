@@ -17,9 +17,9 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
-    "zod": "^3.23.8",
     "@codex-data/sdk": "^2.3.1",
     "@google/generative-ai": "^0.24.1",
+    "@modelcontextprotocol/server-memory": "^2026.1.26",
     "@raydium-io/raydium-sdk-v2": "^0.2.39-alpha",
     "@solana/spl-token": "^0.4.14",
     "@solana/web3.js": "^1.98.4",
@@ -35,7 +35,8 @@
     "node-cron": "^4.2.1",
     "nodemailer": "^8.0.4",
     "rss-parser": "^3.13.0",
-    "utf-8-validate": "^5.0.10"
+    "utf-8-validate": "^5.0.10",
+    "zod": "^3.23.8"
   },
   "devDependencies": {
     "@types/bs58": "^4.0.4"

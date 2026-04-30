@@ -137,7 +137,7 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
             strategy_type: strategyVersion,
             entry_price_sol: entryPrice,
             highest_price_sol: entryPrice,
-            quantity: (finalTradeAmountSol / entryPrice),
+            quantity: Math.round((finalTradeAmountSol / entryPrice) * Math.pow(10, actualDecimals)) / Math.pow(10, actualDecimals),
             token_decimals: actualDecimals, 
             ai_score: aiScore,
             ai_reason: reason,

@@ -72,6 +72,10 @@ class FeaturePayload(BaseModel):
     s: int = Field(..., ge=0)
     l: float = Field(..., ge=0.0)
     ts: int = Field(..., gt=0)
+    # 🆕 Sprint 3 新增特徵（optional，向後兼容）
+    token_age_mins: float = Field(default=999.0, ge=0.0)
+    mins_since_graduation: float = Field(default=-1.0)  # -1 = 未 graduate
+    had_lp_burn: bool = Field(default=False)
 
 class PredictRequest(BaseModel):
     features: FeaturePayload

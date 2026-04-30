@@ -297,6 +297,44 @@ class SecurityGuard {
 
         if (marketData.liquidity < activeParams.minLiquidityUsd) return { numeric_score: 0, isSafe: false, reason: `🛑 流動性過低攔截: $${marketData.liquidity.toFixed(0)} < $${activeParams.minLiquidityUsd}`, marketData };
 
+        // 🕐 [Strategy Surgery 1B] Token Age 硬性門檻
+        // pairCreatedAt 已係 marketData payload 入面（DexScreener 提供）
+        const pairAgeMins = marketData.pairCreatedAt
+            ? (Date.now() - marketData.pairCreatedAt) / 60000
+            : null;
+
+        if (pairAgeMins !== null) {
+            if (type === 'NEWBORN') {
+                // 太新：流動性未穩定，rug 風險極高
+                if (pairAgeMins < 3) {
+                    return { 
+                        numeric_score: 0, isSafe: false, 
+                        reason: `⏳ NEWBORN 太新 (${pairAgeMins.toFixed(1)}m < 3m)，流動性未穩定`,
+                        marketData, applied_ml_strategy_id: targetParam?.id || 0 
+                    };
+                }
+                // 太舊：NEWBORN momentum 窗口已關閉
+                if (pairAgeMins > 90) {
+                    return { 
+                        numeric_score: 0, isSafe: false, 
+                        reason: `⌛ NEWBORN 過時 (${pairAgeMins.toFixed(0)}m > 90m)，momentum 窗口已關閉`,
+                        marketData, applied_ml_strategy_id: targetParam?.id || 0 
+                    };
+                }
+            }
+
+            if (type === 'TRENDING') {
+                // TRENDING 唔應該係全新幣（< 60 分鐘）
+                if (pairAgeMins < 60) {
+                    return { 
+                        numeric_score: 0, isSafe: false, 
+                        reason: `🔀 TRENDING 太新 (${pairAgeMins.toFixed(0)}m < 60m)，應走 NEWBORN 流程`,
+                        marketData, applied_ml_strategy_id: targetParam?.id || 0 
+                    };
+                }
+            }
+        }
+
         if (type === 'NEWBORN') {
             const deadPoolVolReq = parseFloat(targetParam?.dead_pool_vol_req ?? targetParam?.deadPoolVolReq ?? (dbParams?.min_vol_5m * 5 || 5000)); 
             if (marketData.liquidity > 100000 && marketData.volume5m < deadPoolVolReq) {
@@ -386,7 +424,20 @@ class SecurityGuard {
 
         coreScore = Math.max(0, coreScore);
 
-        const isSafe = coreScore >= 10; 
+        // 🔥 [Strategy Surgery 1C] LP Burn 正向加分
+        // 在這裡添加 LP Burn 加分邏輯
+        try {
+            const lpBurned = await redisClient.get(`lp_burned:${mint}`);
+            if (lpBurned === 'TRUE') {
+                const burnBonus = 4; // 加 4 分，上限仍係 20
+                const prevScore = coreScore;
+                coreScore = Math.min(20, coreScore + burnBonus);
+                reasons.push(`🔥 LP 已燒毀 (+${coreScore - prevScore}分)`);
+                console.log(`🔥 [LP Burn Bonus] ${marketData.symbol} LP 已燒毀，加分 +${coreScore - prevScore} → ${coreScore}/20`);
+            }
+        } catch (e) {
+            // Redis 失敗唔阻止正常流程
+        }
         const finalReason = isSafe 
             ? `量化及格: ${coreScore}/20 [物理防禦] 氣候: ${climate} | 備註: ${reasons.join(' | ')}` 
             : `攔截得分: ${coreScore}/20 (未達物理安全底線), 缺陷: ${reasons.join(' | ')}`;

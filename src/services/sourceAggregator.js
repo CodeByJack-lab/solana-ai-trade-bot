@@ -69,8 +69,19 @@ class SourceAggregator {
                 const signature = response.params?.result?.context?.signature || response.params?.result?.value?.signature;
                 if (!signature) return;
 
-                const isCreation = logsStr.includes('InitializeMint') || logsStr.includes('CreatePool') || logsStr.includes('InitializeInstruction2');
-                const isBurn = logsStr.includes('Instruction: Burn') || logsStr.includes('1nc1nerator');
+                // 🎓 [Strategy Surgery 2A] 新增：Graduation 事件識別
+                // Pump.fun → Raydium 的 migration 特徵：
+                // - 係 Raydium V4 program 的 transaction
+                // - 包含 InitializeInstruction2（Raydium pool 初始化）
+                // - 但唔係單純新幣 mint（排除 InitializeMint）
+                const isCreation = logsStr.includes('InitializeMint') || 
+                               logsStr.includes('CreatePool') || 
+                               logsStr.includes('InitializeInstruction2');
+                const isBurn = logsStr.includes('Instruction: Burn') || 
+                              logsStr.includes('1nc1nerator');
+                const isGraduation = logsStr.includes('InitializeInstruction2') && 
+                                     !logsStr.includes('InitializeMint') &&
+                                     programIds.includes(RAYDIUM_V4_PROGRAM_ID);
 
                 // 🎯 攔截 1：新池建立
                 if (isCreation) {
@@ -125,6 +136,43 @@ class SourceAggregator {
 
                             await redis.publish('lp_burn_alerts', JSON.stringify({ mint: acc }));
                             break;
+                        }
+                    }
+                }
+                // 🎓 [Strategy Surgery 2A] 新增：Graduation 事件識別
+                else if (isGraduation) {
+                    const isSeen = await redis.set(`seen_grad:${signature}`, '1', 'EX', 3600, 'NX');
+                    if (!isSeen) return;
+
+                    const txInfo = await connection.getTransaction(signature, { 
+                        maxSupportedTransactionVersion: 0, 
+                        commitment: "confirmed" 
+                    }).catch(() => null);
+
+                    if (!txInfo) return;
+
+                    const accounts = txInfo?.transaction?.message?.accountKeys || [];
+                    const potentialMints = accounts
+                        .map(a => a.pubkey ? a.pubkey.toString() : a.toString())
+                        .filter(k => k && !this.blacklist.includes(k) && k.length > 32);
+
+                    for (const mint of potentialMints) {
+                        const cleanMint = this.sanitizeAddress(mint);
+                        if (cleanMint) {
+                            const graduatedAt = Date.now();
+                            
+                            // 寫入 Redis（TTL 2 小時）
+                            await redis.set(`graduated:${cleanMint}`, graduatedAt.toString(), 'EX', 7200);
+                            
+                            // 廣播 graduation 事件
+                            await redis.publish('graduation_alerts', JSON.stringify({ 
+                                mint: cleanMint,
+                                graduatedAt,
+                                signature
+                            }));
+                            
+                            console.log(`\n🎓 [Graduation] 捕捉到畢業事件！${cleanMint} 從 Pump.fun → Raydium，廣播入場訊號...`);
+                            break; // 一個 tx 只處理一個 mint
                         }
                     }
                 }

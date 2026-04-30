@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "github.com/modelcontextprotocol/servers/tree/main/src/filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "/Users/jack/Personal_Project"
+      ]
+    },
+    "github.com/modelcontextprotocol/servers/tree/main/src/memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-memory"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "/Users/jack/Documents/Cline/MCP/memory.jsonl"
+      }
+    }
+  }
+}
