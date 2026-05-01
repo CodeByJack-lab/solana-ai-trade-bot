@@ -72,10 +72,12 @@ class FeaturePayload(BaseModel):
     s: int = Field(..., ge=0)
     l: float = Field(..., ge=0.0)
     ts: int = Field(..., gt=0)
-    # 🆕 Sprint 3 新增特徵（optional，向後兼容）
+    # 🆕 Sprint 3 新增特徵（optional，向後啟用）
     token_age_mins: float = Field(default=999.0, ge=0.0)
     mins_since_graduation: float = Field(default=-1.0)  # -1 = 未 graduate
     had_lp_burn: bool = Field(default=False)
+    volume_h1: float = Field(default=-1.0)        # ← 新增
+    unique_buyers_h1: float = Field(default=-1.0) # ← 新增
 
 class PredictRequest(BaseModel):
     features: FeaturePayload
@@ -102,7 +104,53 @@ async def predict_score(req: PredictRequest):
     if os.path.exists(target_model_path):
         try:
             rf_model = joblib.load(target_model_path)
-            X_live = pd.DataFrame([[ofi, f.l, f.v]], columns=['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd'])
+            
+            # 🆕 [Strategy Surgery 3C] 加入時間特徵
+            # mins_since_graduation: -1 = 未 graduate，0-20 = 最佳窗口，>20 = 窗口關閉
+            grad_feature = f.mins_since_graduation if f.mins_since_graduation >= 0 else 999.0
+            lp_burn_feature = 1.0 if f.had_lp_burn else 0.0
+
+            X_live = pd.DataFrame([[
+                ofi, 
+                f.l,                    # entry_liquidity_usd
+                f.v,                    # entry_volume_5m_usd
+                f.token_age_mins,       # token_age_at_entry_mins
+                grad_feature,           # mins_since_graduation (999 = 未 graduate)
+                lp_burn_feature         # had_lp_burn (0/1)
+            ]], columns=[
+                'entry_ofi', 
+                'entry_liquidity_usd', 
+                'entry_volume_5m_usd',
+                'token_age_mins',
+                'mins_since_graduation',
+                'had_lp_burn'
+            ])
+
+            # 讀取訓練時用嘅特徵清單
+            import json
+            feature_path = target_model_path.replace('.pkl', '_features.json')
+            if os.path.exists(feature_path):
+                with open(feature_path) as fp:
+                    trained_features = json.load(fp)
+            else:
+                trained_features = ['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']
+            
+            # 準備所有可能嘅特徵值
+            all_feature_values = {
+                'entry_ofi':               ofi,
+                'entry_liquidity_usd':     f.l,
+                'entry_volume_5m_usd':     f.v,
+                'token_age_mins': getattr(f, 'token_age_mins', -1),
+                'mins_since_graduation':   getattr(f, 'mins_since_graduation', -1),
+                'entry_volume_h1':         getattr(f, 'volume_h1', -1),
+                'unique_buyers_h1':        getattr(f, 'unique_buyers_h1', -1),
+                'had_lp_burn':             1.0 if getattr(f, 'had_lp_burn', False) else 0.0,
+            }
+            
+            X_live = pd.DataFrame(
+                [[all_feature_values.get(feat, -1) for feat in trained_features]],
+                columns=trained_features
+            )
             survival_prob = rf_model.predict_proba(X_live)[0][1]
         except Exception as e:
             print(f"⚠️ [Predict] 模型推論異常 ({req.type}): {e}")
@@ -281,9 +329,45 @@ def execute_evolution_pipeline():
 
         def train_model_if_valid(train_df, path):
             if len((train_df['realized_pnl_pct'] > 0).unique()) > 1:
-                rf = RandomForestClassifier(n_estimators=int(params.get('rf_n_estimators', 100)), max_depth=int(params.get('rf_max_depth', 5)), random_state=42, n_jobs=1, class_weight="balanced")
-                rf.fit(train_df[['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']], (train_df['realized_pnl_pct'] > 0).astype(int), sample_weight=train_df['w_time'])
+                # 🆕 [Strategy Surgery 3C] 新特徵列表
+                base_features = ['entry_ofi', 'entry_liquidity_usd', 'entry_volume_5m_usd']
+                optional_features = ['token_age_at_entry_mins', 'mins_since_graduation', 'entry_volume_h1', 'unique_buyers_h1']
+                
+                available_features = base_features.copy()
+                for feat in optional_features:
+                    if feat in train_df.columns:
+                        valid_count = pd.to_numeric(train_df[feat], errors='coerce').notna().sum()
+                        if valid_count > len(train_df) * 0.3:  # 30%+ 有值先用
+                            train_df[feat] = pd.to_numeric(train_df[feat], errors='coerce').fillna(-1)
+                            available_features.append(feat)
+                
+                # had_lp_burn 係 boolean，另外處理
+                if 'had_lp_burn' in train_df.columns:
+                    valid_count = train_df['had_lp_burn'].notna().sum()
+                    if valid_count > len(train_df) * 0.3:
+                        train_df['had_lp_burn'] = train_df['had_lp_burn'].fillna(False).astype(int)
+                        available_features.append('had_lp_burn')
+                
+                print(f"🌲 [ML] 訓練特徵 ({len(available_features)}): {available_features}")
+                
+                rf = RandomForestClassifier(
+                    n_estimators=int(params.get('rf_n_estimators', 100)),
+                    max_depth=int(params.get('rf_max_depth', 5)),
+                    random_state=42, n_jobs=1, class_weight="balanced"
+                )
+                rf.fit(
+                    train_df[available_features],
+                    (train_df['realized_pnl_pct'] > 0).astype(int),
+                    sample_weight=train_df['w_time']
+                )
                 joblib.dump(rf, path)
+                
+                # 記錄訓練用嘅特徵，predict 時對應
+                import json
+                feature_path = path.replace('.pkl', '_features.json')
+                with open(feature_path, 'w') as f:
+                    json.dump(available_features, f)
+                print(f"✅ [ML] 特徵清單已存: {feature_path}")
                 return True
             return False
 

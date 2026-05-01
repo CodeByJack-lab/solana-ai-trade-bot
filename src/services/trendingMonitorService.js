@@ -1,7 +1,8 @@
 // src/services/trendingMonitorService.js
-// 📝 檔案功能用途：V10.13 雙引擎隱形獵人。
+// 📝 檔案功能用途：V10.14 雙引擎隱形獵人。
 // 🚀 數據源升級：由 Birdeye 轉向 Defined.fi (Codex) SDK，單次極速獲取 150 隻熱門幣。
 // 🛠️ 終極修復：修正 nameStr 崩潰 Bug；改為 RAM 集中過濾，保留所有原有防偽/冷卻 Policy，並只寫入 trending_pool。
+// 🆕 V10.14：Gecko + Codex 新增 volume_h1 / unique_buyers_h1 / trending_score / price_change_h4 欄位。
 
 const { supabase } = require('../config/supabase');
 const axios = require('axios');
@@ -63,16 +64,23 @@ const trendingMonitorService = {
             }
         }
         
+        // 🆕 V10.14：新增 volume_h1 / price_change_h1 / price_change_h4 / buys_h24 / sells_h24
         return allPools.map(pool => {
             const baseTokenId = pool.relationships?.base_token?.data?.id || '';
             const attr = pool.attributes || {};
             return {
-                mint_address: baseTokenId.replace('solana_', ''),
-                token_symbol: attr.name?.split(' /')[0]?.toUpperCase() || 'UNKNOWN',
-                token_name: attr.name || 'UNKNOWN',
-                liquidity: parseFloat(attr.reserve_in_usd) || 0,
-                volume_24h: parseFloat(attr.volume_usd?.h24) || 0,
-                price_change_24h: parseFloat(attr.price_change_percentage?.h24) || 0
+                mint_address:     baseTokenId.replace('solana_', ''),
+                token_symbol:     attr.name?.split(' /')[0]?.toUpperCase() || 'UNKNOWN',
+                token_name:       attr.name || 'UNKNOWN',
+                liquidity:        parseFloat(attr.reserve_in_usd) || 0,
+                volume_24h:       parseFloat(attr.volume_usd?.h24) || 0,
+                volume_h1:        parseFloat(attr.volume_usd?.h1)  || 0,
+                price_change_24h: parseFloat(attr.price_change_percentage?.h24) || 0,
+                price_change_h1:  parseFloat(attr.price_change_percentage?.h1)  || 0,
+                price_change_h4:  parseFloat(attr.price_change_percentage?.h6)  || 0,
+                buys_h24:         parseInt(attr.transactions?.h24?.buys)         || 0,
+                sells_h24:        parseInt(attr.transactions?.h24?.sells)        || 0,
+                source:           'GECKO'
             };
         });
     },
@@ -99,13 +107,21 @@ const trendingMonitorService = {
             const tokens = response?.filterTokens?.results || [];
             console.log(`📑 [Defined SDK] 成功獲取 ${tokens.length} 隻高質素熱門幣！`);
 
+            // 🆕 V10.14：新增 volume_h1 / unique_buyers_h1 / trending_score / price_change_h4
             return tokens.map(t => ({
-                mint_address: t.token.address,
-                token_symbol: (t.token.symbol || 'UNKNOWN').toUpperCase(),
-                token_name: t.token.name || 'UNKNOWN',
-                liquidity: t.liquidity || 50000,
-                volume_24h: t.volume24 || 150000,
-                price_change_24h: t.change24 || 0
+                mint_address:      t.token.address,
+                token_symbol:      (t.token.symbol || 'UNKNOWN').toUpperCase(),
+                token_name:        t.token.name || 'UNKNOWN',
+                liquidity:         t.liquidity        || 0,
+                volume_24h:        t.volume24         || 0,
+                volume_h1:         t.volume1          || 0,
+                price_change_24h:  t.change24         || 0,
+                price_change_h1:   t.priceChange1     || 0,
+                price_change_h4:   t.priceChange4     || 0,
+                unique_buyers_h1:  t.uniqueBuys1      || 0,
+                unique_sellers_h1: t.uniqueSells1     || 0,
+                trending_score:    t.trendingScore24  || 0,
+                source:            'CODEX'
             }));
 
         } catch (error) {
@@ -153,7 +169,6 @@ const trendingMonitorService = {
             const sym = (token_symbol || 'UNKNOWN').toUpperCase();
             const name = (token_name || 'UNKNOWN');
 
-            // 🚀 核心修復 1：擊殺 nameStr 未定義報錯，統一使用 token_name
             if (/[^\x00-\x7F]/.test(sym) || /[^\x00-\x7F]/.test(name)) {
                 nonAsciiCount++;
                 continue; 
@@ -215,7 +230,6 @@ const trendingMonitorService = {
             const { mint_address, token_symbol, liquidity } = token;
             const sym = (token_symbol || 'UNKNOWN').toUpperCase();
 
-            // 超高流動性自動加入白名單
             if (liquidity > 500000 && !VERIFIED_TOKENS[sym]) {
                 autoWhitelistArray.push({ token_symbol: sym, mint_address: mint_address, is_active: true });
                 VERIFIED_TOKENS[sym] = mint_address; 
@@ -224,17 +238,20 @@ const trendingMonitorService = {
             if (uniqueMints.has(mint_address)) continue;
             uniqueMints.add(mint_address);
 
-            // 限制最多檢查前 150 隻 (因為合併了兩個來源)
             if (currentRank > 150) break; 
 
-            const dbData = { ...token, source: 'MERGED_RAM', updated_at: new Date().toISOString() };
+            // 🆕 V10.14：保留 source 欄位，...token spread 自動帶入所有新字段
+            const dbData = {
+                ...token,
+                source:     token.source || 'MERGED_RAM',
+                updated_at: new Date().toISOString()
+            };
 
             if (liquidity >= dynamicMinLiquidity) {
                 const isBlacklisted = await redis.get(`scam_blacklist:${mint_address}`);
                 const isHolding = activePositions.some(p => p.mint_address === mint_address);
                 
                 if (!isBlacklisted && !isHolding) {
-                    // 執行 24 小時冷卻期檢查
                     const { data: tradeHistory } = await supabase
                         .from(`trade_history_${tableSuffix}`)
                         .select('created_at, realized_pnl_pct')
@@ -262,7 +279,6 @@ const trendingMonitorService = {
             if (!whitelistErr) console.log(`✅ [Auto-Whitelist] 成功將 ${autoWhitelistArray.length} 隻代幣加入防偽白名單！`);
         }
 
-        // 🚀 核心修復 2：移除 trending_top100，只寫入 trending_pool
         if (incubatorArray.length > 0) {
             const { error } = await supabase.from('trending_pool').upsert(incubatorArray, { onConflict: 'mint_address' });
             if (!error) console.log(`🦎 [RAM_MERGED] 淨化完成，成功將 ${incubatorArray.length} 隻嚴選獵物一次過送入天網保溫箱！`);
@@ -273,7 +289,7 @@ const trendingMonitorService = {
     },
 
     start() {
-        console.log('🦎🦅 [雙軌情報網] V10.28 掛載啟動 (RAM 集中淨化版)...');
+        console.log('🦎🦅 [雙軌情報網] V10.14 掛載啟動 (RAM 集中淨化版)...');
         
         const runTask = async () => {
             if (isCrawlerRunning) return;
@@ -297,7 +313,6 @@ const trendingMonitorService = {
                     catch (err) { geckoSuspendedUntil = Date.now() + 60 * 60 * 1000; }
                 }
 
-                // 給予適當冷卻避免 API 限流
                 await new Promise(r => setTimeout(r, 10000));
 
                 if (Date.now() > definedSuspendedUntil) {
@@ -305,7 +320,6 @@ const trendingMonitorService = {
                     catch (err) { definedSuspendedUntil = Date.now() + 60 * 60 * 1000; }
                 }
 
-                // 🚀 核心修復 3：將兩邊數據結合，送入 RAM 統一處理
                 const combinedTokens = [...geckoTokens, ...definedTokens];
                 if (combinedTokens.length > 0) {
                     console.log(`\n🔄 [情報網] 開始合併處理 ${combinedTokens.length} 筆原始數據...`);
@@ -320,7 +334,6 @@ const trendingMonitorService = {
         };
 
         setTimeout(() => { runTask(); }, 5000); 
-        // 配合你 15 分鐘的要求，我改為 15 * 60 * 1000 (原本係 30 分鐘)
         setInterval(runTask, 15 * 60 * 1000); 
     }
 };

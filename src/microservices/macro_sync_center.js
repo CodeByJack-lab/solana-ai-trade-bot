@@ -160,14 +160,18 @@ class EnvironmentCenter {
                     const apiKey = rawKey ? rawKey.replace(/['"]/g, '').trim() : null;
                     const cfg = { headers: apiKey ? { 'x-cg-demo-api-key': apiKey } : {}, timeout: 8000 };
                     
-                    // 🛡️ URL Base64 防腐處理
-                    const cgUrl = Buffer.from('aHR0cHM6Ly9hcGkuY29pbmdlY2tvLmNvbS9hcGkvdjMvc2ltcGxlL3ByaWNlP2lkcz1iaXRjb2luLHNvbGFuYSZ2c19jdXJyZW5jaWVzPXVzZCZpbmNsdWRlXzI0aHJfdm9sPXRydWUmaW5jbHVkZV8yNGhyX2NoYW5nZT10cnVl', 'base64').toString('utf-8');
-                    const res = await axios.get(cgUrl, cfg);
-                    
-                    btc_change = res.data.bitcoin.usd_24h_change || 0;
-                    btc_vol = res.data.bitcoin.usd_24h_vol || 0;
-                    sol_change = res.data.solana.usd_24h_change || 0;
-                    sol_vol = res.data.solana.usd_24h_vol || 0;
+          // 🛡️ URL Base64 防腐處理 (已添加 include_1hr_change=true)
+          const cgUrl = Buffer.from('aHR0cHM6Ly9hcGkuY29pbmdlY2tvLmNvbS9hcGkvdjMvc2ltcGxlL3ByaWNlP2lkcz1iaXRjb2luLHNvbGFuYSZ2c19jdXJyZW5jaWVzPXVzZCZpbmNsdWRlXzI0aHJfdm9sPXRydWUmaW5jbHVkZV8yNGhyX2NoYW5nZT10cnVlJmluY2x1ZGUfMWhyX2NoYW5nZT10cnVl', 'base64').toString('utf-8');
+          const res = await axios.get(cgUrl, cfg);
+
+          btc_change = res.data.bitcoin.usd_24h_change || 0;
+          btc_vol = res.data.bitcoin.usd_24h_vol || 0;
+          sol_change = res.data.solana.usd_24h_change || 0;
+          sol_vol = res.data.solana.usd_24h_vol || 0;
+          // 🆕 新增 1 小時價格變化數據 (更即時的回應速度，適合 Solana Meme 幣分鐘級交易)
+          const btc_change_1h = res.data.bitcoin.usd_1h_change || 0;
+          const sol_change_1h = res.data.solana.usd_1h_change || 0;
+          return { btc_change, btc_vol, sol_change, sol_vol, btc_change_1h, sol_change_1h };
                 } else {
                     // 🛡️ URL Base64 防腐處理
                     const kucoinBtcUrl = Buffer.from('aHR0cHM6Ly9hcGkua3Vjb2luLmNvbS9hcGkvdjEvbWFya2V0L3N0YXRzP3N5bWJvbD1CVEMtVVNEVA==', 'base64').toString('utf-8');
@@ -190,24 +194,26 @@ class EnvironmentCenter {
         return { btc_change: 0, btc_vol: 0, sol_change: 0, sol_vol: 0 }; 
     }
 
-    async _fetchInternalWinRate() {
-        try {
-            const portfolio = getPortfolio();
-            if (!portfolio) return 50.0;
-            const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
-            const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-            
-            const { data: trades } = await supabase
-                .from(`trade_history_${tableSuffix}`)
-                .select('realized_pnl_pct')
-                .gte('created_at', oneDayAgo)
-                .in('action', ['SELL', 'SELL_HALF', 'LIQUIDATED']);
-            
-            if (!trades || trades.length === 0) return 50.0;
-            const wins = trades.filter(t => t.realized_pnl_pct > 0).length;
-            return (wins / trades.length) * 100;
-        } catch(e) { return 50.0; }
-    }
+  async _fetchInternalWinRate() {
+    try {
+      const portfolio = getPortfolio();
+      if (!portfolio) return 50.0;
+      const tableSuffix = portfolio.mode === 'LIVE' ? 'live' : 'paper';
+      // 🛠️ 修正：從 24h 擴展到 48h 以獲取更多樣本 (Meme 幣交易頻率低，24h 樣本僅 5-10 筆)
+      const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+
+      const { data: trades } = await supabase
+        .from(`trade_history_${tableSuffix}`)
+        .select('realized_pnl_pct')
+        .gte('created_at', twoDaysAgo)
+        .in('action', ['SELL', 'SELL_HALF', 'LIQUIDATED']);
+
+      // 🆕 新增最小樣本數檢查 (至少需要 5 筆交易才計算勝率，否則返回默認值)
+      if (!trades || trades.length < 5) return 50.0;
+      const wins = trades.filter(t => t.realized_pnl_pct > 0).length;
+      return (wins / trades.length) * 100;
+    } catch(e) { return 50.0; }
+  }
 
     async _fetchJitoCongestion() {
         try {
@@ -237,24 +243,35 @@ class EnvironmentCenter {
         return ["No breaking news available."]; 
     }
 
-    _calculateHardDataScore(metrics, jitoTip) {
-        let score = 0;
-        const btcChange24h = metrics.btc_change || 0;
-        const solChange24h = metrics.sol_change || 0;
+  _calculateHardDataScore(metrics, jitoTip) {
+    let score = 0;
+    const btcChange24h = metrics.btc_change || 0;
+    const solChange24h = metrics.sol_change || 0;
+    // 🆕 新增 1 小時價格變化數據用於即時動量評分 (適合 Meme 幣分鐘級波動)
+    const btcChange1h = metrics.btc_change_1h || 0;
+    const solChange1h = metrics.sol_change_1h || 0;
 
-        if (solChange24h > btcChange24h + 2) { score += 3; } 
-        else if (solChange24h < btcChange24h - 3) { score -= 2; }
+    // 24h 相對強弱評分
+    if (solChange24h > btcChange24h + 2) { score += 3; }
+    else if (solChange24h < btcChange24h - 3) { score -= 2; }
 
-        if (jitoTip > 0.005) { score += 5; } 
-        else if (jitoTip > 0.001) { score += 3; } 
-        else if (jitoTip < 0.00005) { score -= 2; }
+    // 🛠️ 修正 Jito Tip 閾值 (0.005 SOL 已過時，更新為實際區間 0.001-0.0001 SOL)
+    if (jitoTip > 0.001) { score += 3; }
+    else if (jitoTip > 0.0003) { score += 1; }
+    else if (jitoTip < 0.00005) { score -= 2; }
 
-        if (Math.abs(btcChange24h) < 1.5 && jitoTip > 0.001) { score += 2; }
+    // 🆕 新增 1h 短線動能評分 (更即時回應 Solana Meme 幣分鐘級走勢)
+    if (solChange1h > 3.0) { score += 3; }  // SOL 1h 漲 3%+ = 牛信號
+    else if (solChange1h > 1.0) { score += 1; }
+    else if (solChange1h < -3.0) { score -= 3; }  // SOL 1h 跌 3%+ = 熊信號
+    else if (solChange1h < -1.0) { score -= 1; }
 
-        if (btcChange24h < -5) { score -= 5; }
+    if (Math.abs(btcChange24h) < 1.5 && jitoTip > 0.0003) { score += 2; }
 
-        return Math.max(-5, Math.min(5, score)); 
-    }
+    if (btcChange24h < -5) { score -= 5; }
+
+    return Math.max(-5, Math.min(5, score));
+  }
 
     async updateEnvironment() {
         console.log(`🌍 [Macro Center] 天文台正在採集 4D 大市氣候 (硬數據 + 新聞)...`);

@@ -438,6 +438,37 @@ class SecurityGuard {
         } catch (e) {
             // Redis 失敗唔阻止正常流程
         }
+
+        // 🎓 [Strategy Surgery 2C] Graduation Timing Window
+        try {
+            const graduatedAtStr = await redisClient.get(`graduated:${mint}`);
+            if (graduatedAtStr) {
+                const minsSinceGrad = (Date.now() - parseInt(graduatedAtStr)) / 60000;
+
+                // 太早（< 3 分鐘）：Raydium pool 未完全穩定
+                if (minsSinceGrad < 3) {
+                    return {
+                        numeric_score: 0, isSafe: false,
+                        reason: `⏳ Graduation 太早 (${minsSinceGrad.toFixed(1)}m)，等待 pool 穩定`,
+                        marketData, applied_ml_strategy_id: targetParam?.id || 0
+                    };
+                }
+
+                // 最佳窗口（3–20 分鐘）：Graduation momentum 加分
+                if (minsSinceGrad <= 20) {
+                    const gradBonus = Math.max(1, Math.round(5 * (1 - minsSinceGrad / 20))); // 3min=+4, 10min=+2, 20min=0
+                    const prevScore = coreScore;
+                    coreScore = Math.min(20, coreScore + gradBonus);
+                    reasons.push(`🎓 Graduation 窗口 ${minsSinceGrad.toFixed(0)}m (+${coreScore - prevScore}分)`);
+                    console.log(`🎓 [Grad Bonus] ${marketData.symbol} Graduation ${minsSinceGrad.toFixed(0)} 分鐘前，+${coreScore - prevScore}分`);
+                }
+
+                // 窗口關閉（> 20 分鐘）：正常評估，唔加分也唔扣分
+            }
+        } catch (e) {
+            // Redis 失敗唔阻止正常流程
+        }
+
         const finalReason = isSafe 
             ? `量化及格: ${coreScore}/20 [物理防禦] 氣候: ${climate} | 備註: ${reasons.join(' | ')}` 
             : `攔截得分: ${coreScore}/20 (未達物理安全底線), 缺陷: ${reasons.join(' | ')}`;

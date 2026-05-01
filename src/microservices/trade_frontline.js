@@ -498,10 +498,11 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 
                 supabase.from('trade_patterns').insert([{
                     mint_address: mint, token_symbol: symbol, entry_price_sol: marketData.p || 0,
-                    entry_ofi: ofi, entry_liquidity_usd: marketData.l, entry_volume_5m: marketData.v, realized_pnl_pct: -100.00 
-                }]).then(({ error }) => {
-                    if (error) console.error(`❌ [Poison Data] 寫入失敗:`, error.message);
-                });
+                    entry_ofi: ofi, entry_liquidity_usd: marketData.l, entry_volume_5m: marketData.v,
+                    realized_pnl_pct: -100.00,
+                    market_climate: envState?.climate || 'CHOPPY',        // ← 新增，修復 NULL 問題
+                    applied_ml_strategy_id: appliedMlStrategyId || null   // ← 新增
+            }])
             }
             return;
         }
@@ -516,7 +517,14 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
         
         try {
             const mlStartTime = Date.now();
-            const res = await axios.post('http://127.0.0.1:8000/predict', { features: marketData, type: poolType }, { timeout: 2000 });
+            const res = await axios.post('http://127.0.0.1:8000/predict', {
+                features: {
+                ...marketData,
+                volume_h1:        marketData.volume_h1        ?? -1,
+                unique_buyers_h1: marketData.unique_buyers_h1 ?? -1
+            },
+            type: poolType
+        }, { timeout: 2000 });  
             healthMonitor.recordAiLatency(Date.now() - mlStartTime);
 
             if (res.data && typeof res.data.win_probability === 'number') {
@@ -683,7 +691,8 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
                 const success = await executeBuy(
                     mint, symbol, poolType, finalScore, 
                     `🤖 貝葉斯決策 (Q:${quantScore} + M:${(finalWinProb*100).toFixed(0)}%) | LLM: ${llmReason}`, 
-                    finalTradeAmountSol, marketData, envState, activeStrategyId, kellyMultiplier
+                    finalTradeAmountSol, marketData, envState, activeStrategyId, kellyMultiplier,
+                    { finalScore, priorProb, bayesFactor }
                 );
 
                 if (success) {
