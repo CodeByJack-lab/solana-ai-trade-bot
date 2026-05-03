@@ -9,10 +9,8 @@ const axios = require('axios');
 const { connection } = require('../config/solana');
 const { PublicKey } = require('@solana/web3.js');
 const config = require('../config/config');
-const { cacheManager } = require('./cacheManager'); 
-const Redis = require('ioredis');
-
-const redisClient = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
+const { cacheManager } = require('./cacheManager');
+const { redisClient } = require('../utils/redisClient'); // 🔌 統一 Redis 客戶端
 
 // 🎯 全局 DexScreener 請求鎖，防止併發轟炸
 let lastDexRequestTime = 0;
@@ -443,16 +441,18 @@ class SecurityGuard {
         try {
             const graduatedAtStr = await redisClient.get(`graduated:${mint}`);
             if (graduatedAtStr) {
-                const minsSinceGrad = (Date.now() - parseInt(graduatedAtStr)) / 60000;
+                const graduatedAt = parseInt(graduatedAtStr);
+                if (!isNaN(graduatedAt)) {
+                    const minsSinceGrad = (Date.now() - graduatedAt) / 60000;
 
-                // 太早（< 3 分鐘）：Raydium pool 未完全穩定
-                if (minsSinceGrad < 3) {
-                    return {
-                        numeric_score: 0, isSafe: false,
-                        reason: `⏳ Graduation 太早 (${minsSinceGrad.toFixed(1)}m)，等待 pool 穩定`,
-                        marketData, applied_ml_strategy_id: targetParam?.id || 0
-                    };
-                }
+                    // 太早（< 3 分鐘）：Raydium pool 未完全穩定
+                    if (minsSinceGrad < 3) {
+                        return {
+                            numeric_score: 0, isSafe: false,
+                            reason: `⏳ Graduation 太早 (${minsSinceGrad.toFixed(1)}m)，等待 pool 穩定`,
+                            marketData, applied_ml_strategy_id: targetParam?.id || 0
+                        };
+                    }
 
                 // 最佳窗口（3–20 分鐘）：Graduation momentum 加分
                 if (minsSinceGrad <= 20) {

@@ -9,24 +9,25 @@ const express = require('express');
 const Redis = require('ioredis');
 const crypto = require('crypto');
 const axios = require('axios');
-const { createClient } = require('@supabase/supabase-js'); 
+const { createClient } = require('@supabase/supabase-js');
 
 const { getPortfolio, initPortfolio, canBuyMeme, canBuyTrending } = require('../services/portfolioService');
-const { securityGuard } = require('../services/securityGuard'); 
-const { consensusService } = require('../services/consensusService'); 
+const { securityGuard } = require('../services/securityGuard');
+const { consensusService } = require('../services/consensusService');
 const { executeBuy, runSellPipeline } = require('../services/tradeService');
-const { sendTelegramAlert, processTelegramCallback } = require('../services/telegramService'); 
+const { sendTelegramAlert, processTelegramCallback } = require('../services/telegramService');
 const { sourceAggregator } = require('../services/sourceAggregator');
-const { walletMonitorRouter } = require('../services/walletMonitor'); 
-const { keyRotator } = require('../services/keyRotator'); 
+const { walletMonitorRouter } = require('../services/walletMonitor');
+const { keyRotator } = require('../services/keyRotator');
 const { cacheManager } = require('../services/cacheManager');
 const { healthMonitor } = require('../services/healthMonitor');
+const { redisClient } = require('../utils/redisClient'); // 🔌 統一 Redis 客戶端
 
 const app = express();
 app.use(express.json());
 app.use('/', walletMonitorRouter);
 
-const redisClient = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
+// 使用統一的 Redis 客戶端 (支援 pub/sub)
 const redisSub = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
 const burnSub = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379');
 const watchdogSub = new Redis(process.env.REDIS_URL || process.env.REDIS_PUBLIC_URL || 'redis://localhost:6379'); 
@@ -482,33 +483,39 @@ async function processAsymmetricRouting(mint, poolType = 'NEWBORN') {
 
         const secResult = await securityGuard.calculateQuantScore(mint, poolType, marketData);
         
-        if (!secResult.isSafe) {
-            console.log(`🛑 [Quant Reject] ${symbol} 未達基準: ${secResult.reason}`);
-            
-            const isRugTrap = marketData.l > 10000 && (
-                secResult.reason.includes('合約高危') || 
-                secResult.reason.includes('籌碼集中') || 
-                secResult.reason.includes('貔貅攔截')
-            );
+if (!secResult.isSafe) {
+  console.log(`🛑 [Quant Reject] ${symbol} 未達基準: ${secResult.reason}`);
 
-            if (isRugTrap && Math.random() < 0.20) {
-                console.log(`☠️ [Poison Data] 捕獲高級 Rug Pull 陷阱 (${symbol})！作為負樣本寫入 ML 數據庫...`);
-                const totalTxs = marketData.b + marketData.s;
-                const ofi = totalTxs > 0 ? (marketData.b - marketData.s) / totalTxs : 0;
-                
-                supabase.from('trade_patterns').insert([{
-                    mint_address: mint, token_symbol: symbol, entry_price_sol: marketData.p || 0,
-                    entry_ofi: ofi, entry_liquidity_usd: marketData.l, entry_volume_5m: marketData.v,
-                    realized_pnl_pct: -100.00,
-                    market_climate: envState?.climate || 'CHOPPY',        // ← 新增，修復 NULL 問題
-                    applied_ml_strategy_id: appliedMlStrategyId || null   // ← 新增
-            }])
-            }
-            return;
-        }
+  const isRugTrap = marketData.l > 10000 && (
+    secResult.reason.includes('合約高危') ||
+    secResult.reason.includes('籌碼集中') ||
+    secResult.reason.includes('貔貅攔截')
+  );
 
-        const quantScore = secResult.numeric_score; 
-        const appliedMlStrategyId = secResult.applied_ml_strategy_id || 0;
+  // 修復 Bug 1: 提前獲取 envState 和 appliedMlStrategyId
+  const envStateStr = await redisClient.get('global_env_state');
+  const envState = envStateStr ? JSON.parse(envStateStr) : { climate: 'CHOPPY' };
+  const appliedMlStrategyId = secResult.applied_ml_strategy_id || null;
+
+  if (isRugTrap && Math.random() < 0.20) {
+    console.log(`☠️ [Poison Data] 捕獲高級 Rug Pull 陷阱 (${symbol})！作為負樣本寫入 ML 數據庫...`);
+    const totalTxs = marketData.b + marketData.s;
+    const ofi = totalTxs > 0 ? (marketData.b - marketData.s) / totalTxs : 0;
+
+    // 修復 Bug 2: 添加 await 等待數據庫插入完成
+    await supabase.from('trade_patterns').insert([{
+      mint_address: mint, token_symbol: symbol, entry_price_sol: marketData.p || 0,
+      entry_ofi: ofi, entry_liquidity_usd: marketData.l, entry_volume_5m: marketData.v,
+      realized_pnl_pct: -100.00,
+      market_climate: envState?.climate || 'CHOPPY',
+      applied_ml_strategy_id: appliedMlStrategyId || null
+    }]);
+  }
+  return;
+}
+
+const quantScore = secResult.numeric_score;
+const appliedMlStrategyId = secResult.applied_ml_strategy_id || 0;
         console.log(`   - 🛡️ [Quant] 基礎物理審核通過，得分: ${quantScore}/20`);
 
         let mlScore = 32; 

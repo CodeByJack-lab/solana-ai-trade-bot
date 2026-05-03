@@ -139,7 +139,11 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
         try {
             const graduatedAtStr = await redis.get(`graduated:${mint}`);
             if (graduatedAtStr) {
-                minsSinceGrad = (Date.now() - parseInt(graduatedAtStr)) / 60000;
+                // 修復：使用正確的時間計算方式
+                const graduatedAt = parseInt(graduatedAtStr);
+                if (!isNaN(graduatedAt)) {
+                    minsSinceGrad = (Date.now() - graduatedAt) / 60000;
+                }
             }
         } catch (e) {
             console.warn(`⚠️ [Graduation Check] 獲取 graduation 時間失敗:`, e.message);
@@ -233,12 +237,20 @@ async function executeBuy(mint, symbol, strategyVersion, aiScore, reason, finalT
 }
 
 async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
-    const mint = position.mint_address;
-    const lockKey = `sell_lock:${mint}`;
+  const mint = position.mint_address;
+  const lockKey = `sell_lock:${mint}`;
 
-    console.log(`📉 [Sell Pipeline] 啟動平倉程序: ${position.token_symbol} | 原因: ${reason}`);
+  // 🔒 Bug 4 修復：添加 Redis 鎖防止並發平倉
+  const lockExists = await redis.get(lockKey);
+  if (lockExists) {
+    console.warn(`⛔ [Sell Pipeline] ${position.token_symbol} 已被鎖定，跳過重複平倉`);
+    return false;
+  }
+  await redis.set(lockKey, Date.now().toString(), 'EX', 30); // 30秒鎖定
 
-    try {
+  console.log(`📉 [Sell Pipeline] 啟動平倉程序: ${position.token_symbol} | 原因: ${reason}`);
+
+  try {
         const sellQuantity = position.quantity * fraction;
         const tokenDecimals = position.token_decimals || 6; 
 
@@ -335,12 +347,12 @@ async function runSellPipeline(position, currentPrice, reason, fraction = 1.0) {
             entry_volume_5m_usd: position.entry_volume_5m_usd || 0,
             max_vwap_deviation: position.max_vwap_dev || 0, 
             final_cvd_slope: position.final_cvd_slope || 0,
-            realized_pnl_pct: realizedPnlPct, 
-            market_climate: climate,
-            entry_price_sol: entryPrice, 
-            entry_volume_5m: position.entry_volume_5m_usd || 0,
-            token_symbol: position.token_symbol || 'UNKNOWN',
-            applied_ml_strategy_id: position.applied_ml_strategy_id,
+      realized_pnl_pct: realizedPnlPct,
+      market_climate: climate,
+      entry_price_sol: entryPrice,
+      entry_volume_5m: position.entry_volume_5m_usd || 0,
+      token_symbol: position.token_symbol || 'UNKNOWN',
+      applied_ml_strategy_id: position.applied_ml_strategy_id || null,
             // 🆕 Sprint 3 新增欄位
             token_age_at_entry_mins: position.token_age_at_entry_mins ?? null,
             mins_since_graduation:   position.mins_since_graduation   ?? null,

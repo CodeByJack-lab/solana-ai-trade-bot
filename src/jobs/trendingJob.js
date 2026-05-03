@@ -38,7 +38,7 @@ const trendingJob = {
             const { data: sysConfig } = await supabase.from('system_config').select('is_running, trending_survival_score').eq('id', 1).single();
             if (!sysConfig || !sysConfig.is_running) return;
 
-            const { data: stratParams } = await supabase.from('ai_strategy_params').select('dynamic_vl_tiers').eq('id', 3).single();
+            const { data: stratParams } = await supabase.from('ml_strategy_params').select('dynamic_vl_tiers').eq('id', 3).single();
             const dynamicVlTiers = stratParams?.dynamic_vl_tiers;
 
             const { data: poolTokens } = await supabase.from('trending_pool').select('*');

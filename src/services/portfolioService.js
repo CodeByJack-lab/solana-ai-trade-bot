@@ -198,11 +198,26 @@ function getTrendingCount() {
 }
 
 function updateCache(action, solAmount, positionData = null) {
-    if (action === 'BUY') {
-        my_portfolio.cash_sol -= solAmount;
-    } else if (action === 'SELL') {
-        my_portfolio.cash_sol += solAmount;
+  if (action === 'BUY') {
+    my_portfolio.cash_sol -= solAmount;
+    // Bug 9 修復：即時更新 positions 陣列，確保 canBuyMeme/canBuyTrending 計數準確
+    if (positionData && positionData.mint_address) {
+      my_portfolio.positions.push({
+        ...positionData,
+        quantity: parseFloat(positionData.quantity || positionData.amount || 0),
+        entry_price_sol: parseFloat(positionData.entry_price_sol || 0),
+        highest_price_sol: parseFloat(positionData.highest_price_sol || positionData.entry_price_sol || 0),
+        strategy_type: positionData.strategy_type || 'v10_default'
+      });
     }
+  } else if (action === 'SELL') {
+    my_portfolio.cash_sol += solAmount;
+    // Bug 9 修復：從 positions 陣列中移除已賣出的倉位
+    if (positionData && positionData.mint_address) {
+      const mintToRemove = positionData.mint_address;
+      my_portfolio.positions = my_portfolio.positions.filter(p => p.mint_address !== mintToRemove);
+    }
+  }
 }
 
 async function resetPaperMemory() {

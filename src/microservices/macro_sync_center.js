@@ -22,6 +22,7 @@ const { getSolPriceInHKD } = require('../services/priceService');
 
 // 🚀 引入維運中樞
 const { healthMonitor } = require('../services/healthMonitor');
+const { pumpfunGraduationMonitor } = require('../services/pumpfunGraduationMonitor');
 
 // 🎯 引入 V9 孤兒排程
 const { janitorJob } = require('../jobs/janitorJob');
@@ -501,8 +502,9 @@ async function bootstrap() {
 
     cron.schedule('* * * * *', () => checkAndApply60MinFallback());
 
-    trendingMonitorService.start();
-    trendingJob.start(); 
+trendingMonitorService.start();
+pumpfunGraduationMonitor.start();
+trendingJob.start();
     janitorJob.start();
     graveyardJob.start();
     retrospectiveJob.start();
