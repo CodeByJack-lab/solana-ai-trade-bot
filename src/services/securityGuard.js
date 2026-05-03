@@ -464,11 +464,13 @@ class SecurityGuard {
                 }
 
                 // 窗口關閉（> 20 分鐘）：正常評估，唔加分也唔扣分
+                }
             }
         } catch (e) {
             // Redis 失敗唔阻止正常流程
         }
 
+        const isSafe = coreScore >= 10; // 定義安全底線為 10 分
         const finalReason = isSafe 
             ? `量化及格: ${coreScore}/20 [物理防禦] 氣候: ${climate} | 備註: ${reasons.join(' | ')}` 
             : `攔截得分: ${coreScore}/20 (未達物理安全底線), 缺陷: ${reasons.join(' | ')}`;
